@@ -46,7 +46,7 @@ fn sockaddr_storage_to_std(addr: SockaddrStorage) -> Option<SocketAddr> {
     match addr.family() {
         Some(nix::sys::socket::AddressFamily::Inet) => addr
             .as_sockaddr_in()
-            .map(|x| SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(x.ip()), x.port()))),
+            .map(|x| SocketAddr::V4(SocketAddrV4::new(x.ip(), x.port()))),
         Some(nix::sys::socket::AddressFamily::Inet6) => addr.as_sockaddr_in6().map(|x| {
             SocketAddr::V6(SocketAddrV6::new(
                 x.ip(),
