@@ -222,16 +222,14 @@ impl DmaFile {
         let pollable = if (fstype.0 as u64) == (libc::TMPFS_MAGIC as u64) {
             PollableStatus::NonPollable(DirectIo::Disabled)
         } else {
-            // Allow this to work on non direct I/O devices, but only if this is in-memory
             sys::direct_io_ify(file.as_raw_fd(), flags)?;
-            let reactor = file.reactor.upgrade().unwrap();
-            if reactor
-                .probe_iopoll_support(file.as_raw_fd(), o_direct_alignment, major, minor, path)
-                .await
+            if !sysfs::BlockDevice::has_io_poll(major, minor)
+                || sysfs::BlockDevice::is_rotational(major, minor)
+                || sysfs::BlockDevice::memory_device(major, minor)
             {
-                PollableStatus::Pollable
-            } else {
                 PollableStatus::NonPollable(DirectIo::Enabled)
+            } else {
+                PollableStatus::Pollable
             }
         };
 

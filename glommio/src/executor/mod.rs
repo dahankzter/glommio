@@ -1025,7 +1025,7 @@ impl LocalExecutorPoolBuilder {
                 } else {
                     // this `Err` isn't visible to the user; the pool builder directly returns an
                     // `Err` from the `std::thread::Builder`
-                    Err(io::Error::new(io::ErrorKind::Other, "spawn failed").into())
+                    Err(io::Error::other("spawn failed").into())
                 }
             }
         });

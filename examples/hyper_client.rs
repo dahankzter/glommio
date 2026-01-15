@@ -13,9 +13,9 @@ mod hyper_compat {
     use glommio::net::TcpStream;
 
     use http_body_util::BodyExt;
-    use hyper::body::{Body as HttpBody, Bytes, Frame};
     use hyper::Error;
     use hyper::Request;
+    use hyper::body::{Body as HttpBody, Bytes, Frame};
     use std::io;
     use std::marker::PhantomData;
 

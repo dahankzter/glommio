@@ -2,8 +2,7 @@ use std::{
     cell::{Cell, UnsafeCell},
     fmt,
     marker::PhantomData,
-    mem::{self, MaybeUninit},
-    slice::from_raw_parts_mut,
+    mem::MaybeUninit,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
@@ -44,7 +43,7 @@ struct Slot<T> {
 /// consumer use to track location in the ring.
 #[repr(C)]
 pub(crate) struct Buffer<T> {
-    buffer_storage: *mut Slot<T>,
+    buffer_storage: Box<[Slot<T>]>,
     capacity: usize,
     mask: usize,
     lookahead: usize,
@@ -132,26 +131,16 @@ impl<T> Buffer<T> {
     /// else, etc.)
     fn try_pop(&self) -> Option<T> {
         let head = self.ccache.head.load(Ordering::Relaxed);
-        let slot = unsafe { &*self.buffer_storage.add(head & self.mask) };
+        let slot = &self.buffer_storage[head & self.mask];
         if !slot.has_value.load(Ordering::Acquire) {
             return None;
         }
         let v = Some(unsafe { slot.value.get().read().assume_init() });
         slot.has_value.store(false, Ordering::Release);
-        self.ccache.head.store(head + 1, Ordering::Relaxed);
+        self.ccache
+            .head
+            .store(head.wrapping_add(1), Ordering::Relaxed);
         v
-    }
-
-    fn has_space(&self, tail: usize) -> bool {
-        let index = (tail + self.lookahead) & self.mask;
-        let slot = unsafe { &*self.buffer_storage.add(index) };
-        if !slot.has_value.load(Ordering::Acquire) {
-            self.pcache.limit.set(tail + self.lookahead + 1);
-            true
-        } else {
-            let slot = unsafe { &*self.buffer_storage.add(tail & self.mask) };
-            !slot.has_value.load(Ordering::Acquire)
-        }
     }
 
     /// Attempt to push a value onto the buffer.
@@ -164,17 +153,32 @@ impl<T> Buffer<T> {
         if self.consumer_disconnected() {
             return Some(v);
         }
+
         let tail = self.pcache.tail.load(Ordering::Relaxed);
-        if tail >= self.pcache.limit.get() && !self.has_space(tail) {
-            return Some(v);
+        let limit = self.pcache.limit.get();
+
+        if tail == limit {
+            let idx = tail.wrapping_add(self.lookahead);
+            let slot = &self.buffer_storage[idx & self.mask];
+            if !slot.has_value.load(Ordering::Acquire) {
+                self.pcache.limit.set(idx);
+            } else {
+                let slot: &Slot<T> = &self.buffer_storage[tail & self.mask];
+                if slot.has_value.load(Ordering::Acquire) {
+                    return Some(v);
+                }
+                self.pcache.limit.set(tail.wrapping_add(1));
+            }
         }
-        let slot = unsafe {
-            let slot = &*self.buffer_storage.add(tail & self.mask);
+
+        let slot = &self.buffer_storage[tail & self.mask];
+        unsafe {
             slot.value.get().write(MaybeUninit::new(v));
-            slot
-        };
+        }
         slot.has_value.store(true, Ordering::Release);
-        self.pcache.tail.store(tail + 1, Ordering::Relaxed);
+        self.pcache
+            .tail
+            .store(tail.wrapping_add(1), Ordering::Relaxed);
         None
     }
 
@@ -221,15 +225,6 @@ impl<T> Drop for Buffer<T> {
         // Pop the rest of the values off the queue. By moving them into this scope,
         // we implicitly call their destructor
         while self.try_pop().is_some() {}
-        // We don't want to run any destructors here, because we didn't run
-        // any of the constructors through the vector. And whatever object was
-        // in fact still alive we popped above.
-        let _drop = unsafe {
-            // Nightly clippy warns about this but ptr::from_raw_parts_mut isn't stable yet.
-            #[allow(clippy::cast_slice_from_raw_parts)]
-            let ptr = from_raw_parts_mut(self.buffer_storage, self.capacity) as *mut [Slot<T>];
-            Box::from_raw(ptr)
-        };
     }
 }
 
@@ -248,10 +243,10 @@ fn inner_make<T>(capacity: usize, initial_value: usize) -> (Producer<T>, Consume
         buffer_storage,
         capacity,
         mask: capacity - 1,
-        lookahead: std::cmp::min(capacity / 4, MAX_LOOKAHEAD),
+        lookahead: (capacity / 4).clamp(1, MAX_LOOKAHEAD),
         pcache: ProducerCacheline {
             tail: AtomicUsize::new(initial_value),
-            limit: Cell::new(0),
+            limit: Cell::new(initial_value),
             consumer_id: AtomicUsize::new(0),
         },
         ccache: ConsumerCacheline {
@@ -268,16 +263,15 @@ fn inner_make<T>(capacity: usize, initial_value: usize) -> (Producer<T>, Consume
     )
 }
 
-fn allocate_buffer<T>(capacity: usize) -> *mut Slot<T> {
-    let mut boxed: Box<[Slot<T>]> = (0..capacity)
-        .map(|_| Slot {
-            has_value: AtomicBool::new(false),
+fn allocate_buffer<T>(capacity: usize) -> Box<[Slot<T>]> {
+    let mut boxed: Box<[MaybeUninit<Slot<T>>]> = Box::new_uninit_slice(capacity);
+    for slot in boxed.iter_mut() {
+        slot.write(Slot {
             value: UnsafeCell::new(MaybeUninit::uninit()),
-        })
-        .collect();
-    let ptr = boxed.as_mut_ptr();
-    mem::forget(boxed);
-    ptr
+            has_value: AtomicBool::new(false),
+        });
+    }
+    unsafe { boxed.assume_init() }
 }
 
 pub(crate) trait BufferHalf {
@@ -469,7 +463,6 @@ mod tests {
         }
     }
 
-    #[should_panic]
     #[test]
     fn test_wrap() {
         let (p, c) = super::inner_make(10, usize::MAX - 1);
