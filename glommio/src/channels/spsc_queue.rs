@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, UnsafeCell},
+    cell::UnsafeCell,
     fmt,
     marker::PhantomData,
     mem::MaybeUninit,
@@ -14,7 +14,7 @@ use std::{
 struct ProducerCacheline {
     /// Index position of current tail
     tail: AtomicUsize,
-    limit: Cell<usize>,
+    limit: AtomicUsize,
     /// Id == 0 : never connected
     /// Id == usize::MAX: disconnected
     consumer_id: AtomicUsize,
@@ -35,6 +35,8 @@ struct Slot<T> {
     value: UnsafeCell<MaybeUninit<T>>,
     has_value: AtomicBool,
 }
+
+unsafe impl<T: Send> Sync for Slot<T> {}
 
 /// The internal memory buffer used by the queue.
 ///
@@ -58,7 +60,7 @@ impl<T> fmt::Debug for Buffer<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let head = self.ccache.head.load(Ordering::Relaxed);
         let tail = self.pcache.tail.load(Ordering::Relaxed);
-        let limit = self.pcache.limit.get();
+        let limit = self.pcache.limit.load(Ordering::Relaxed);
         let id_to_str = |id| match id {
             0 => "not connected".into(),
             usize::MAX => "disconnected".into(),
@@ -78,8 +80,6 @@ impl<T> fmt::Debug for Buffer<T> {
             .finish()
     }
 }
-
-unsafe impl<T: Sync> Sync for Buffer<T> {}
 
 /// A handle to the queue which allows consuming values from the buffer
 pub struct Consumer<T> {
@@ -119,9 +119,6 @@ impl<T> fmt::Debug for Producer<T> {
     }
 }
 
-unsafe impl<T: Send> Send for Consumer<T> {}
-unsafe impl<T: Send> Send for Producer<T> {}
-
 impl<T> Buffer<T> {
     /// Attempt to pop a value off the buffer.
     ///
@@ -155,19 +152,21 @@ impl<T> Buffer<T> {
         }
 
         let tail = self.pcache.tail.load(Ordering::Relaxed);
-        let limit = self.pcache.limit.get();
+        let limit = self.pcache.limit.load(Ordering::Relaxed);
 
         if tail == limit {
             let idx = tail.wrapping_add(self.lookahead);
             let slot = &self.buffer_storage[idx & self.mask];
             if !slot.has_value.load(Ordering::Acquire) {
-                self.pcache.limit.set(idx);
+                self.pcache.limit.store(idx, Ordering::Relaxed);
             } else {
                 let slot: &Slot<T> = &self.buffer_storage[tail & self.mask];
                 if slot.has_value.load(Ordering::Acquire) {
                     return Some(v);
                 }
-                self.pcache.limit.set(tail.wrapping_add(1));
+                self.pcache
+                    .limit
+                    .store(tail.wrapping_add(1), Ordering::Relaxed);
             }
         }
 
@@ -230,7 +229,7 @@ impl<T> Drop for Buffer<T> {
 
 /// Creates a new `spsc_queue` returning its producer and consumer
 /// endpoints.
-pub fn make<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
+pub fn make<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     inner_make(capacity, 0)
 }
 
@@ -246,7 +245,7 @@ fn inner_make<T>(capacity: usize, initial_value: usize) -> (Producer<T>, Consume
         lookahead: (capacity / 4).clamp(1, MAX_LOOKAHEAD),
         pcache: ProducerCacheline {
             tail: AtomicUsize::new(initial_value),
-            limit: Cell::new(initial_value),
+            limit: AtomicUsize::new(initial_value),
             consumer_id: AtomicUsize::new(0),
         },
         ccache: ConsumerCacheline {
@@ -264,14 +263,13 @@ fn inner_make<T>(capacity: usize, initial_value: usize) -> (Producer<T>, Consume
 }
 
 fn allocate_buffer<T>(capacity: usize) -> Box<[Slot<T>]> {
-    let mut boxed: Box<[MaybeUninit<Slot<T>>]> = Box::new_uninit_slice(capacity);
-    for slot in boxed.iter_mut() {
-        slot.write(Slot {
-            value: UnsafeCell::new(MaybeUninit::uninit()),
-            has_value: AtomicBool::new(false),
-        });
-    }
-    unsafe { boxed.assume_init() }
+    std::iter::repeat_with(|| Slot {
+        value: UnsafeCell::new(MaybeUninit::uninit()),
+        has_value: AtomicBool::new(false),
+    })
+    .take(capacity)
+    .collect::<Vec<_>>()
+    .into_boxed_slice()
 }
 
 pub(crate) trait BufferHalf {
@@ -474,5 +472,12 @@ mod tests {
         for i in 0..10 {
             assert_eq!(c.try_pop(), Some(i));
         }
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
+    #[test]
+    fn producer_consumer_are_send() {
+        assert_send_sync::<Producer<u32>>();
+        assert_send_sync::<Consumer<u32>>();
     }
 }
