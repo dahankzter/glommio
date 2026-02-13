@@ -3,3 +3,5 @@
 *.iml
 /target
 Cargo.lock
+.claude/
+test_spsc_corruption.rs
