@@ -26,15 +26,30 @@ Comprehensive investigation of eventfd file descriptor leak when executors are r
 - Use long-lived executors (recommended)
 - Thread-local executor pattern for tests
 
+### [Issue #695 - Non-Panicking spawn_local()](./investigations/issue_695/)
+**Status:** Documented, ready for implementation
+**Severity:** Medium (API design issue)
+
+Investigation of confusing `spawn_local()` API that panics even when called on a `LocalExecutor` instance. The current design ignores `self` and uses thread-local storage instead.
+
+**Key Finding:** The private `spawn()` method actually uses `self` but is not public. Making it public solves the issue without breaking changes.
+
+**Recommended Fix:**
+- Make `LocalExecutor::spawn()` public (trivial change)
+- Maintains thread-safety via `!Send` trait
+- No breaking changes to existing API
+
 ## Repository Structure
 
 ```
 docs/
 ├── README.md (this file)
 └── investigations/
-    └── issue_448/
-        ├── README.md         # Detailed analysis
-        └── reproduce.rs      # Test demonstrating the leak
+    ├── issue_448/
+    │   ├── README.md         # Detailed analysis
+    │   └── reproduce.rs      # Test demonstrating the leak
+    └── issue_695/
+        └── README.md         # API design investigation
 ```
 
 ## Contributing
