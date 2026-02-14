@@ -298,7 +298,7 @@ impl TimingWheel {
             // Overflow: > 18 hours
             let id = entry.id;
             let expires_at = entry.expires_at;
-            let entries = self.overflow.entry(expires_at).or_insert_with(Vec::new);
+            let entries = self.overflow.entry(expires_at).or_default();
             let index_in_slot = entries.len();
             entries.push(entry);
 
@@ -429,19 +429,19 @@ impl TimingWheel {
         self.expire_slot(0, slot_0);
 
         // Cascade from higher levels when we wrap around
-        if self.current_tick % LEVEL_1_RESOLUTION_MS == 0 {
+        if self.current_tick.is_multiple_of(LEVEL_1_RESOLUTION_MS) {
             let slot_1 =
                 ((self.current_tick / LEVEL_1_RESOLUTION_MS) % LEVEL_1_SLOTS as u64) as usize;
             self.cascade_slot(1, slot_1);
         }
 
-        if self.current_tick % LEVEL_2_RESOLUTION_MS == 0 {
+        if self.current_tick.is_multiple_of(LEVEL_2_RESOLUTION_MS) {
             let slot_2 =
                 ((self.current_tick / LEVEL_2_RESOLUTION_MS) % LEVEL_2_SLOTS as u64) as usize;
             self.cascade_slot(2, slot_2);
         }
 
-        if self.current_tick % LEVEL_3_RESOLUTION_MS == 0 {
+        if self.current_tick.is_multiple_of(LEVEL_3_RESOLUTION_MS) {
             let slot_3 =
                 ((self.current_tick / LEVEL_3_RESOLUTION_MS) % LEVEL_3_SLOTS as u64) as usize;
             self.cascade_slot(3, slot_3);
