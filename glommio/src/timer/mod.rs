@@ -9,6 +9,15 @@ mod timer_impl;
 #[cfg(feature = "timing-wheel")]
 pub mod timing_wheel;
 
+#[cfg(feature = "timing-wheel")]
+pub mod staged_wheel;
+
+#[cfg(feature = "timing-wheel")]
+pub mod handle;
+
+#[cfg(feature = "timing-wheel")]
+pub(crate) mod reactor_adapter;
+
 use std::{future::Future, time::Duration};
 pub use timer_impl::{Timer, TimerActionOnce, TimerActionRepeat};
 

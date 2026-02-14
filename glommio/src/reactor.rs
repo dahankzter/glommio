@@ -23,6 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(not(feature = "timing-wheel"))]
 use ahash::AHashMap;
 use nix::sys::socket::{MsgFlags, SockaddrLike, SockaddrStorage};
 use smallvec::SmallVec;
@@ -40,6 +41,12 @@ use crate::{
 use nix::poll::PollFlags;
 
 type SharedChannelWakerChecker = (SmallVec<[Waker; 1]>, Option<Box<dyn Fn() -> usize>>);
+
+#[cfg(not(feature = "timing-wheel"))]
+use timers_btreemap::Timers;
+
+#[cfg(feature = "timing-wheel")]
+use timers_staged_wheel::Timers;
 
 struct SharedChannels {
     id: u64,
@@ -76,68 +83,124 @@ impl SharedChannels {
     }
 }
 
-struct Timers {
-    timer_id: u64,
-    timers_by_id: AHashMap<u64, Instant>,
+// ============================================================================
+// BTreeMap-based timer implementation (default)
+// ============================================================================
 
-    /// An ordered map of registered timers.
-    ///
-    /// Timers are in the order in which they fire. The `u64` in this type is
-    /// a timer ID used to distinguish timers that fire at the same time.
-    /// The [`Waker`] represents the task awaiting the timer.
-    timers: BTreeMap<(Instant, u64), Waker>,
+#[cfg(not(feature = "timing-wheel"))]
+mod timers_btreemap {
+    use super::*;
+
+    pub(super) struct Timers {
+        timers_by_id: AHashMap<u64, Instant>,
+
+        /// An ordered map of registered timers.
+        ///
+        /// Timers are in the order in which they fire. The `u64` in this type is
+        /// a timer ID used to distinguish timers that fire at the same time.
+        /// The [`Waker`] represents the task awaiting the timer.
+        timers: BTreeMap<(Instant, u64), Waker>,
+    }
+
+    impl Timers {
+        pub(super) fn new() -> Timers {
+            Timers {
+                timers_by_id: AHashMap::new(),
+                timers: BTreeMap::new(),
+            }
+        }
+
+        pub(super) fn remove(&mut self, id: u64) -> Option<Waker> {
+            if let Some(when) = self.timers_by_id.remove(&id) {
+                return self.timers.remove(&(when, id));
+            }
+
+            None
+        }
+
+        pub(super) fn insert(&mut self, id: u64, when: Instant, waker: Waker) {
+            if let Some(when) = self.timers_by_id.get_mut(&id) {
+                self.timers.remove(&(*when, id));
+            }
+            self.timers_by_id.insert(id, when);
+            self.timers.insert((when, id), waker);
+        }
+
+        pub(super) fn exists(&self, id: &(Instant, u64)) -> bool {
+            self.timers.contains_key(id)
+        }
+
+        /// Return the duration until next event and the number of
+        /// ready and woke timers.
+        pub(super) fn process_timers(&mut self) -> (Option<Duration>, usize) {
+            let now = Instant::now();
+
+            // Split timers into ready and pending timers.
+            let pending = self.timers.split_off(&(now, 0));
+            let ready = mem::replace(&mut self.timers, pending);
+            let woke = ready.len();
+            for (_, waker) in ready {
+                wake!(waker);
+            }
+
+            // Calculate the duration until the next event.
+            let next = self
+                .timers
+                .keys()
+                .next()
+                .map(|(when, _)| when.saturating_duration_since(now));
+            (next, woke)
+        }
+    }
 }
 
-impl Timers {
-    fn new() -> Timers {
-        Timers {
-            timer_id: 0,
-            timers_by_id: AHashMap::new(),
-            timers: BTreeMap::new(),
-        }
+// ============================================================================
+// StagedWheel-based timer implementation (timing-wheel feature)
+// ============================================================================
+
+#[cfg(feature = "timing-wheel")]
+mod timers_staged_wheel {
+    use super::*;
+    use crate::timer::handle::TimerHandle;
+    use crate::timer::reactor_adapter::ReactorTimers;
+
+    pub(super) struct Timers {
+        wheel: ReactorTimers,
     }
 
-    fn new_id(&mut self) -> u64 {
-        self.timer_id += 1;
-        self.timer_id
-    }
-
-    fn remove(&mut self, id: u64) -> Option<Waker> {
-        if let Some(when) = self.timers_by_id.remove(&id) {
-            return self.timers.remove(&(when, id));
+    impl Timers {
+        pub(super) fn new() -> Timers {
+            Timers {
+                wheel: ReactorTimers::new(),
+            }
         }
 
-        None
-    }
-
-    fn insert(&mut self, id: u64, when: Instant, waker: Waker) {
-        if let Some(when) = self.timers_by_id.get_mut(&id) {
-            self.timers.remove(&(*when, id));
-        }
-        self.timers_by_id.insert(id, when);
-        self.timers.insert((when, id), waker);
-    }
-
-    /// Return the duration until next event and the number of
-    /// ready and woke timers.
-    fn process_timers(&mut self) -> (Option<Duration>, usize) {
-        let now = Instant::now();
-
-        // Split timers into ready and pending timers.
-        let pending = self.timers.split_off(&(now, 0));
-        let ready = mem::replace(&mut self.timers, pending);
-        let woke = ready.len();
-        for (_, waker) in ready {
-            wake!(waker);
+        /// Insert a timer and return its handle
+        ///
+        /// BREAKING CHANGE: Now returns TimerHandle instead of using external IDs
+        pub(super) fn insert_with_handle(
+            &mut self,
+            when: Instant,
+            waker: Waker,
+        ) -> TimerHandle {
+            self.wheel.insert(when, waker)
         }
 
-        // Calculate the duration until the next event.
-        let next = self
-            .timers
-            .keys()
-            .next()
-            .map(|(when, _)| when.saturating_duration_since(now));
-        (next, woke)
+        /// Remove a timer by handle (O(1), no hashing!)
+        pub(super) fn remove_by_handle(&mut self, handle: TimerHandle) -> bool {
+            self.wheel.remove(handle)
+        }
+
+        /// Check if a timer exists by handle
+        pub(super) fn exists_by_handle(&self, handle: TimerHandle) -> bool {
+            self.wheel.exists(handle)
+        }
+
+        /// Return the duration until next event and the number of
+        /// ready and woke timers.
+        pub(super) fn process_timers(&mut self) -> (Option<Duration>, usize) {
+            self.wheel.process_timers()
+        }
     }
 }
 
@@ -741,6 +804,7 @@ impl Reactor {
     /// Registers a timer in the reactor.
     ///
     /// Returns the registered timer's ID.
+    #[cfg(not(feature = "timing-wheel"))]
     pub(crate) fn register_timer(&self) -> u64 {
         let mut timers = self.timers.borrow_mut();
         timers.new_id()
@@ -749,20 +813,56 @@ impl Reactor {
     /// Registers a timer in the reactor.
     ///
     /// Returns the inserted timer's ID.
+    #[cfg(not(feature = "timing-wheel"))]
     pub(crate) fn insert_timer(&self, id: u64, when: Instant, waker: Waker) {
         let mut timers = self.timers.borrow_mut();
         timers.insert(id, when, waker);
     }
 
     /// Deregisters a timer from the reactor.
+    #[cfg(not(feature = "timing-wheel"))]
     pub(crate) fn remove_timer(&self, id: u64) -> Option<Waker> {
         let mut timers = self.timers.borrow_mut();
         timers.remove(id)
     }
 
+    /// Registers a timer and returns a handle for O(1) cancellation.
+    ///
+    /// This is the high-performance API that avoids HashMap overhead.
+    /// Only available with the `timing-wheel` feature.
+    #[cfg(feature = "timing-wheel")]
+    pub(crate) fn insert_timer_handle(
+        &self,
+        when: Instant,
+        waker: Waker,
+    ) -> crate::timer::handle::TimerHandle {
+        let mut timers = self.timers.borrow_mut();
+        timers.insert_with_handle(when, waker)
+    }
+
+    /// Removes a timer by handle (O(1), no hashing).
+    ///
+    /// Returns true if the timer was found and removed.
+    /// Only available with the `timing-wheel` feature.
+    #[cfg(feature = "timing-wheel")]
+    pub(crate) fn remove_timer_handle(&self, handle: crate::timer::handle::TimerHandle) -> bool {
+        let mut timers = self.timers.borrow_mut();
+        timers.remove_by_handle(handle)
+    }
+
+    /// Checks if a timer exists by handle.
+    ///
+    /// Only available with the `timing-wheel` feature.
+    #[cfg(feature = "timing-wheel")]
+    pub(crate) fn timer_handle_exists(&self, handle: crate::timer::handle::TimerHandle) -> bool {
+        let timers = self.timers.borrow();
+        timers.exists_by_handle(handle)
+    }
+
+    #[cfg(not(feature = "timing-wheel"))]
     pub(crate) fn timer_exists(&self, id: &(Instant, u64)) -> bool {
         let timers = self.timers.borrow();
-        timers.timers.contains_key(id)
+        timers.exists(id)
     }
 
     /// Processes ready timers and extends the list of wakers to wake.

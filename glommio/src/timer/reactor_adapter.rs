@@ -1,0 +1,226 @@
+// Copyright 2024 Glommio Project Authors. Licensed under Apache-2.0.
+
+//! Reactor integration layer for StagedWheel.
+//!
+//! This module provides an adapter that integrates StagedWheel with the Reactor,
+//! using TimerHandle for O(1) cancellation without HashMap overhead.
+
+use super::handle::TimerHandle;
+use super::staged_wheel::StagedWheel;
+use ahash::AHashMap;
+use std::task::Waker;
+use std::time::{Duration, Instant};
+
+/// Adapter for StagedWheel that integrates with the Reactor.
+///
+/// This adapter wraps StagedWheel and provides TimerHandle-based operations
+/// for O(1) cancellation. The handle is simply the wheel's internal ID,
+/// providing direct access without HashMap overhead.
+///
+/// # Performance
+///
+/// - Insert: O(1) - returns handle directly from wheel
+/// - Remove: O(1) - direct access via handle
+/// - No hashing overhead, no cache misses from HashMap traversal
+pub struct ReactorTimers {
+    /// The underlying staged wheel
+    wheel: StagedWheel,
+
+    /// Maps handles to their expiry times (for next_timer_duration calculation)
+    /// TODO: This is the remaining HashMap that could be eliminated by
+    /// exposing expiry times from the wheel itself
+    handle_to_expiry: AHashMap<u64, Instant>,
+}
+
+impl ReactorTimers {
+    pub fn new() -> Self {
+        Self {
+            wheel: StagedWheel::new(),
+            handle_to_expiry: AHashMap::new(),
+        }
+    }
+
+    /// Insert a timer and return a handle for O(1) cancellation
+    ///
+    /// The returned handle provides direct access to the timer's location
+    /// in the wheel, avoiding HashMap lookups on removal.
+    pub fn insert(&mut self, expires_at: Instant, waker: Waker) -> TimerHandle {
+        // Insert into the wheel and get its internal ID
+        let internal_id = self.wheel.insert(expires_at, waker);
+
+        // Track expiry time (needed for next_timer_duration calculation)
+        self.handle_to_expiry.insert(internal_id, expires_at);
+
+        // Return handle (wrapping the wheel's internal ID)
+        // Generation is 0 for now (we don't track reuse yet)
+        TimerHandle::new(internal_id as u32, 0)
+    }
+
+    /// Remove a timer by handle (O(1) operation, no hashing)
+    ///
+    /// Returns true if the timer was found and removed
+    pub fn remove(&mut self, handle: TimerHandle) -> bool {
+        let internal_id = handle.index() as u64;
+
+        // Remove from expiry tracking
+        self.handle_to_expiry.remove(&internal_id);
+
+        // Remove from wheel
+        self.wheel.remove(internal_id)
+    }
+
+    /// Check if a timer exists by handle
+    pub fn exists(&self, handle: TimerHandle) -> bool {
+        let internal_id = handle.index() as u64;
+        self.handle_to_expiry.contains_key(&internal_id)
+    }
+
+    /// Process expired timers
+    ///
+    /// Returns (next_timer_duration, num_woke)
+    ///
+    /// # Re-entrancy Safety
+    ///
+    /// This method collects all expired wakers BEFORE calling wake() to avoid
+    /// re-entrancy panics. If a waker tries to insert/remove timers during
+    /// wake(), it won't conflict with our mutable borrow.
+    pub fn process_timers(&mut self) -> (Option<Duration>, usize) {
+        let now = Instant::now();
+
+        // Advance the wheel to current time
+        self.wheel.advance_to(now);
+
+        // CRITICAL: Collect wakers BEFORE waking to avoid re-entrancy
+        // If we wake while iterating, and the waker tries to insert/remove
+        // a timer, we'll panic on borrow_mut() in the Reactor
+        let expired: Vec<(u64, Waker)> = self.wheel.drain_expired().collect();
+
+        // Clean up expiry time mappings
+        for (internal_id, _) in &expired {
+            self.handle_to_expiry.remove(internal_id);
+        }
+
+        // Now wake all timers (safe: no longer holding any mutable state)
+        let woke = expired.len();
+        for (_, waker) in expired {
+            waker.wake();
+        }
+
+        // Find the next timer expiry
+        let next_expiry = self.handle_to_expiry.values().copied().min();
+
+        let next_duration = next_expiry.map(|expires_at| expires_at.saturating_duration_since(now));
+
+        (next_duration, woke)
+    }
+
+    /// Get the number of active timers
+    pub fn len(&self) -> usize {
+        self.handle_to_expiry.len()
+    }
+
+    /// Check if there are no active timers
+    pub fn is_empty(&self) -> bool {
+        self.handle_to_expiry.is_empty()
+    }
+}
+
+impl Default for ReactorTimers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::task::Wake;
+
+    struct DummyWaker;
+
+    impl Wake for DummyWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn dummy_waker() -> Waker {
+        Arc::new(DummyWaker).into()
+    }
+
+    #[test]
+    fn test_insert_and_process() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert a timer and get handle
+        let _handle = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        assert_eq!(timers.len(), 1);
+
+        // Process before expiry - should not wake
+        let (next, woke) = timers.process_timers();
+        assert_eq!(woke, 0);
+        assert!(next.is_some());
+        assert_eq!(timers.len(), 1);
+
+        // Wait and process after expiry
+        std::thread::sleep(Duration::from_millis(150));
+        let (_, woke) = timers.process_timers();
+        assert_eq!(woke, 1);
+        assert_eq!(timers.len(), 0);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert and get handle
+        let handle = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        assert_eq!(timers.len(), 1);
+
+        // Remove the timer using handle
+        assert!(timers.remove(handle));
+        assert_eq!(timers.len(), 0);
+
+        // Try to remove again with same handle - should return false
+        assert!(!timers.remove(handle));
+    }
+
+    #[test]
+    fn test_exists() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert and get handle
+        let handle = timers.insert(now + Duration::from_millis(100), dummy_waker());
+
+        // Should exist with correct handle
+        assert!(timers.exists(handle));
+
+        // Remove and check it no longer exists
+        timers.remove(handle);
+        assert!(!timers.exists(handle));
+    }
+
+    #[test]
+    fn test_multiple_timers() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert multiple timers
+        let h1 = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        let h2 = timers.insert(now + Duration::from_millis(200), dummy_waker());
+        let h3 = timers.insert(now + Duration::from_millis(300), dummy_waker());
+
+        assert_eq!(timers.len(), 3);
+
+        // Remove one timer
+        assert!(timers.remove(h2));
+        assert_eq!(timers.len(), 2);
+
+        // Verify correct timers remain
+        assert!(timers.exists(h1));
+        assert!(!timers.exists(h2));
+        assert!(timers.exists(h3));
+    }
+}
