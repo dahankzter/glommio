@@ -4,6 +4,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use glommio::timer::timing_wheel::TimingWheel;
+use glommio::timer::staged_wheel::StagedWheel;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::task::{Wake, Waker};
@@ -434,6 +435,214 @@ fn bench_single_insert_timing_wheel(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_insert_staged_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_insert_staged_wheel");
+
+    for count in [100, 1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let start = Instant::now();
+                    (StagedWheel::new_at(start), start)
+                },
+                |(mut wheel, start)| {
+                    for i in 0..count {
+                        let expires_at = start + Duration::from_millis(i as u64);
+                        black_box(wheel.insert(expires_at, dummy_waker()));
+                    }
+                    black_box(wheel);
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_remove_staged_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_remove_staged_wheel");
+
+    for count in [100, 1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let start = Instant::now();
+                    let mut wheel = StagedWheel::new_at(start);
+                    let mut ids = Vec::with_capacity(count);
+
+                    for i in 0..count {
+                        let expires_at = start + Duration::from_millis(i as u64);
+                        let id = wheel.insert(expires_at, dummy_waker());
+                        ids.push(id);
+                    }
+
+                    (wheel, ids)
+                },
+                |(mut wheel, ids)| {
+                    for id in ids {
+                        black_box(wheel.remove(id));
+                    }
+                    black_box(wheel);
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_process_expired_staged_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_process_expired_staged_wheel");
+
+    for count in [100, 1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let start = Instant::now();
+                    let mut wheel = StagedWheel::new_at(start);
+
+                    for i in 0..count {
+                        let expires_at = start + Duration::from_millis(i as u64);
+                        wheel.insert(expires_at, dummy_waker());
+                    }
+
+                    (wheel, start)
+                },
+                |(mut wheel, start)| {
+                    let now = start + Duration::from_millis(count as u64);
+                    wheel.advance_to(now);
+                    let expired: Vec<_> = wheel.drain_expired().collect();
+                    black_box(expired);
+                    black_box(wheel);
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_mixed_workload_staged_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_mixed_workload_staged_wheel");
+
+    for count in [100, 1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*count as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), count, |b, &count| {
+            b.iter_batched(
+                || {
+                    let start = Instant::now();
+                    (StagedWheel::new_at(start), start)
+                },
+                |(mut wheel, start)| {
+                    let mut ids = Vec::with_capacity(count / 2);
+
+                    for i in 0..count {
+                        let expires_at = start + Duration::from_millis(i as u64);
+                        let id = wheel.insert(expires_at, dummy_waker());
+
+                        if i % 2 == 0 {
+                            ids.push(id);
+                        }
+                    }
+
+                    for id in ids {
+                        black_box(wheel.remove(id));
+                    }
+
+                    let now = start + Duration::from_millis(count as u64);
+                    wheel.advance_to(now);
+                    let expired: Vec<_> = wheel.drain_expired().collect();
+                    black_box(expired);
+                    black_box(wheel);
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_single_insert_staged_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_single_insert_staged_wheel");
+    group.measurement_time(Duration::from_secs(10));
+
+    for existing in [0, 1_000, 10_000, 100_000].iter() {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(existing),
+            existing,
+            |b, &existing| {
+                let start = Instant::now();
+                let mut wheel = StagedWheel::new_at(start);
+
+                // Pre-populate with existing timers
+                for i in 0..existing {
+                    let expires_at = start + Duration::from_millis(i as u64);
+                    wheel.insert(expires_at, dummy_waker());
+                }
+
+                let mut counter = 0u64;
+                b.iter(|| {
+                    // Benchmark: single insert into populated structure
+                    let expires_at = start + Duration::from_millis(counter % 10000);
+                    counter += 1;
+                    black_box(wheel.insert(expires_at, dummy_waker()));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_churn_staged_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_churn_staged_wheel");
+
+    for concurrent in [1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*concurrent as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(concurrent),
+            concurrent,
+            |b, &concurrent| {
+                b.iter_batched(
+                    || {
+                        // Setup: pre-populate with timers
+                        let start = Instant::now();
+                        let mut wheel = StagedWheel::new_at(start);
+
+                        for i in 0..concurrent {
+                            let expires_at = start + Duration::from_millis(i as u64 + 1000);
+                            wheel.insert(expires_at, dummy_waker());
+                        }
+
+                        (wheel, start)
+                    },
+                    |(mut wheel, start)| {
+                        // Benchmark: churn 1000 timers (insert + immediate cancel)
+                        for i in 0..1000 {
+                            let expires_at = start + Duration::from_millis(i + 500);
+                            let id = wheel.insert(expires_at, dummy_waker());
+                            // Immediately cancel (simulates ACK arriving before timeout)
+                            black_box(wheel.remove(id));
+                        }
+
+                        black_box(wheel);
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // ============================================================================
 // Register all benchmarks
 // ============================================================================
@@ -442,26 +651,139 @@ criterion_group!(
     insert_benches,
     bench_insert_btreemap,
     bench_insert_timing_wheel,
+    bench_insert_staged_wheel,
     bench_single_insert_btreemap,
     bench_single_insert_timing_wheel,
+    bench_single_insert_staged_wheel,
 );
 
 criterion_group!(
     remove_benches,
     bench_remove_btreemap,
     bench_remove_timing_wheel,
+    bench_remove_staged_wheel,
 );
 
 criterion_group!(
     process_benches,
     bench_process_expired_btreemap,
     bench_process_expired_timing_wheel,
+    bench_process_expired_staged_wheel,
 );
 
 criterion_group!(
     mixed_benches,
     bench_mixed_workload_btreemap,
     bench_mixed_workload_timing_wheel,
+    bench_mixed_workload_staged_wheel,
 );
 
-criterion_main!(insert_benches, remove_benches, process_benches, mixed_benches);
+// ============================================================================
+// Benchmark: Churn (insert + cancel pattern)
+// ============================================================================
+// This simulates message queue behavior where ACKs arrive before timeout:
+// timers are inserted but then cancelled before they expire. Tests the
+// "hot path" of continuous insert/remove without the process_expired overhead.
+
+fn bench_churn_btreemap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_churn_btreemap");
+
+    for concurrent in [1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*concurrent as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(concurrent),
+            concurrent,
+            |b, &concurrent| {
+                b.iter_batched(
+                    || {
+                        // Setup: pre-populate with timers
+                        let mut timers = BTreeMapTimers::new();
+                        let start = Instant::now();
+
+                        for i in 0..concurrent {
+                            let expires_at = start + Duration::from_millis(i as u64 + 1000);
+                            timers.insert(expires_at, dummy_waker());
+                        }
+
+                        (timers, start)
+                    },
+                    |(mut timers, start)| {
+                        // Benchmark: churn 1000 timers (insert + immediate cancel)
+                        for i in 0..1000 {
+                            let expires_at = start + Duration::from_millis(i + 500);
+                            let id = timers.insert(expires_at, dummy_waker());
+                            // Immediately cancel (simulates ACK arriving before timeout)
+                            black_box(timers.remove(expires_at, id));
+                        }
+
+                        black_box(timers);
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_churn_timing_wheel(c: &mut Criterion) {
+    let mut group = c.benchmark_group("timer_churn_timing_wheel");
+
+    for concurrent in [1_000, 10_000, 100_000].iter() {
+        group.throughput(Throughput::Elements(*concurrent as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(concurrent),
+            concurrent,
+            |b, &concurrent| {
+                b.iter_batched(
+                    || {
+                        // Setup: pre-populate with timers
+                        let start = Instant::now();
+                        let mut wheel = TimingWheel::new_at(start);
+
+                        for i in 0..concurrent {
+                            let expires_at = start + Duration::from_millis(i as u64 + 1000);
+                            wheel.insert(expires_at, dummy_waker());
+                        }
+
+                        (wheel, start)
+                    },
+                    |(mut wheel, start)| {
+                        // Benchmark: churn 1000 timers (insert + immediate cancel)
+                        for i in 0..1000 {
+                            let expires_at = start + Duration::from_millis(i + 500);
+                            let id = wheel.insert(expires_at, dummy_waker());
+                            // Immediately cancel (simulates ACK arriving before timeout)
+                            black_box(wheel.remove(id));
+                        }
+
+                        black_box(wheel);
+                    },
+                    criterion::BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Register all benchmarks
+// ============================================================================
+
+criterion_group!(
+    churn_benches,
+    bench_churn_btreemap,
+    bench_churn_timing_wheel,
+    bench_churn_staged_wheel,
+);
+
+criterion_main!(
+    insert_benches,
+    remove_benches,
+    process_benches,
+    mixed_benches,
+    churn_benches
+);

@@ -161,7 +161,7 @@ mod timers_btreemap {
 #[cfg(feature = "timing-wheel")]
 mod timers_staged_wheel {
     use super::*;
-    use crate::timer::handle::TimerHandle;
+    use crate::timer::timer_id::TimerId;
     use crate::timer::reactor_adapter::ReactorTimers;
 
     pub(super) struct Timers {
@@ -177,22 +177,22 @@ mod timers_staged_wheel {
 
         /// Insert a timer and return its handle
         ///
-        /// BREAKING CHANGE: Now returns TimerHandle instead of using external IDs
+        /// BREAKING CHANGE: Now returns TimerId instead of using external IDs
         pub(super) fn insert_with_handle(
             &mut self,
             when: Instant,
             waker: Waker,
-        ) -> TimerHandle {
+        ) -> TimerId {
             self.wheel.insert(when, waker)
         }
 
         /// Remove a timer by handle (O(1), no hashing!)
-        pub(super) fn remove_by_handle(&mut self, handle: TimerHandle) -> bool {
+        pub(super) fn remove_by_handle(&mut self, handle: TimerId) -> bool {
             self.wheel.remove(handle)
         }
 
         /// Check if a timer exists by handle
-        pub(super) fn exists_by_handle(&self, handle: TimerHandle) -> bool {
+        pub(super) fn exists_by_handle(&self, handle: TimerId) -> bool {
             self.wheel.exists(handle)
         }
 
@@ -835,7 +835,7 @@ impl Reactor {
         &self,
         when: Instant,
         waker: Waker,
-    ) -> crate::timer::handle::TimerHandle {
+    ) -> crate::timer::timer_id::TimerId {
         let mut timers = self.timers.borrow_mut();
         timers.insert_with_handle(when, waker)
     }
@@ -845,7 +845,7 @@ impl Reactor {
     /// Returns true if the timer was found and removed.
     /// Only available with the `timing-wheel` feature.
     #[cfg(feature = "timing-wheel")]
-    pub(crate) fn remove_timer_handle(&self, handle: crate::timer::handle::TimerHandle) -> bool {
+    pub(crate) fn remove_timer_handle(&self, handle: crate::timer::timer_id::TimerId) -> bool {
         let mut timers = self.timers.borrow_mut();
         timers.remove_by_handle(handle)
     }
@@ -854,7 +854,7 @@ impl Reactor {
     ///
     /// Only available with the `timing-wheel` feature.
     #[cfg(feature = "timing-wheel")]
-    pub(crate) fn timer_handle_exists(&self, handle: crate::timer::handle::TimerHandle) -> bool {
+    pub(crate) fn timer_handle_exists(&self, handle: crate::timer::timer_id::TimerId) -> bool {
         let timers = self.timers.borrow();
         timers.exists_by_handle(handle)
     }

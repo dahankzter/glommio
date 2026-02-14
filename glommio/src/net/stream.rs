@@ -159,7 +159,7 @@ struct Timeout {
     #[cfg(not(feature = "timing-wheel"))]
     id: u64,
     #[cfg(feature = "timing-wheel")]
-    handle: Cell<Option<crate::timer::handle::TimerHandle>>,
+    handle: Cell<Option<crate::timer::timer_id::TimerId>>,
     timeout: Cell<Option<Duration>>,
     timer: Cell<Option<Instant>>,
 }
@@ -213,8 +213,8 @@ impl Timeout {
         if let Some(timeout) = self.timeout.get() {
             if self.timer.get().is_none() {
                 let deadline = Instant::now() + timeout;
-                let handle = reactor.insert_timer_handle(deadline, waker.clone());
-                self.handle.set(Some(handle));
+                let id = reactor.insert_timer_handle(deadline, waker.clone());
+                self.handle.set(Some(id));
                 self.timer.set(Some(deadline));
             }
         }
@@ -230,8 +230,8 @@ impl Timeout {
     #[cfg(feature = "timing-wheel")]
     fn cancel_timer(&self, reactor: &Reactor) {
         if self.timer.take().is_some() {
-            if let Some(handle) = self.handle.take() {
-                reactor.remove_timer_handle(handle);
+            if let Some(id) = self.handle.take() {
+                reactor.remove_timer_handle(id);
             }
         }
     }
@@ -253,9 +253,9 @@ impl Timeout {
 
     #[cfg(feature = "timing-wheel")]
     fn check(&self, reactor: &Reactor) -> io::Result<()> {
-        if let Some(handle) = self.handle.get() {
-            if !reactor.timer_handle_exists(handle) {
-                reactor.remove_timer_handle(handle);
+        if let Some(id) = self.handle.get() {
+            if !reactor.timer_handle_exists(id) {
+                reactor.remove_timer_handle(id);
                 self.handle.take();
                 self.timer.take();
                 return Err(io::Error::new(

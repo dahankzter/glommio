@@ -13,7 +13,7 @@ pub mod timing_wheel;
 pub mod staged_wheel;
 
 #[cfg(feature = "timing-wheel")]
-pub mod handle;
+pub mod timer_id;
 
 #[cfg(feature = "timing-wheel")]
 pub(crate) mod reactor_adapter;

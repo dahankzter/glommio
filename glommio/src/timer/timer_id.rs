@@ -1,21 +1,21 @@
 // Copyright 2024 Glommio Project Authors. Licensed under Apache-2.0.
 
-//! Timer handle for O(1) cancellation without hashing.
+//! Timer ID for O(1) cancellation without hashing.
 //!
 //! Instead of using a global u64 ID that requires HashMap lookups,
-//! this handle provides direct access to the timer's storage slot.
+//! this ID provides direct access to the timer's storage slot.
 
-/// Handle for O(1) timer cancellation
+/// Unique identifier for O(1) timer cancellation
 ///
-/// This handle contains the exact location of a timer in the wheel,
+/// This ID contains the exact location of a timer in the wheel,
 /// along with a generation counter to detect reused slots.
 ///
 /// # Zero-Cost Cancellation
 ///
 /// ```text
-/// Traditional approach:         Direct handle approach:
+/// Traditional approach:         Direct ID approach:
 /// ┌─────────────────────┐      ┌─────────────────────┐
-/// │ u64 timer_id        │      │ TimerHandle         │
+/// │ u64 timer_id        │      │ TimerId             │
 /// └─────────────────────┘      │ - index: u32        │
 ///          │                   │ - generation: u32   │
 ///          ▼                   └─────────────────────┘
@@ -34,7 +34,7 @@
 /// └─────────────────────┘      No cache misses
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TimerHandle {
+pub struct TimerId {
     /// Index into the timer storage
     ///
     /// For inline storage: index into Vec
@@ -49,8 +49,8 @@ pub struct TimerHandle {
     pub(crate) generation: u32,
 }
 
-impl TimerHandle {
-    /// Create a new timer handle
+impl TimerId {
+    /// Create a new timer ID
     pub(crate) fn new(index: u32, generation: u32) -> Self {
         Self { index, generation }
     }
@@ -71,28 +71,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_handle_creation() {
-        let handle = TimerHandle::new(42, 1);
-        assert_eq!(handle.index(), 42);
-        assert_eq!(handle.generation(), 1);
+    fn test_timer_id_creation() {
+        let id = TimerId::new(42, 1);
+        assert_eq!(id.index(), 42);
+        assert_eq!(id.generation(), 1);
     }
 
     #[test]
-    fn test_handle_equality() {
-        let h1 = TimerHandle::new(42, 1);
-        let h2 = TimerHandle::new(42, 1);
-        let h3 = TimerHandle::new(42, 2); // Different generation
-        let h4 = TimerHandle::new(43, 1); // Different index
+    fn test_timer_id_equality() {
+        let id1 = TimerId::new(42, 1);
+        let id2 = TimerId::new(42, 1);
+        let id3 = TimerId::new(42, 2); // Different generation
+        let id4 = TimerId::new(43, 1); // Different index
 
-        assert_eq!(h1, h2);
-        assert_ne!(h1, h3);
-        assert_ne!(h1, h4);
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+        assert_ne!(id1, id4);
     }
 
     #[test]
-    fn test_handle_clone() {
-        let h1 = TimerHandle::new(100, 5);
-        let h2 = h1.clone();
-        assert_eq!(h1, h2);
+    fn test_timer_id_clone() {
+        let id1 = TimerId::new(100, 5);
+        let id2 = id1.clone();
+        assert_eq!(id1, id2);
     }
 }
