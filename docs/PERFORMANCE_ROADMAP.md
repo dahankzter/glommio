@@ -8,7 +8,19 @@ Monoio currently outperforms Glommio in benchmarks due to:
 3. Fewer resource leaks
 4. Active maintenance and optimization
 
-**This document outlines actionable improvements to make Glommio competitive.**
+**This document outlines the high-level strategy to make Glommio competitive.**
+
+## Related Documentation
+
+- **[Detailed Optimization Plan](OPTIMIZATION_PLAN.md)** ← **START HERE** for implementation details
+  - Timing Wheel implementation guide
+  - RefCell optimization strategy
+  - Adaptive I/O submission design
+  - Soft preemption approaches
+  - Cross-thread wakeup optimization
+  - Complete with timelines, benchmarks, and risk mitigation
+
+- **This Document:** High-level phases, prioritization, and architectural context
 
 ## Performance Gaps: Root Cause Analysis
 
@@ -400,34 +412,72 @@ fn bench_vs_monoio(b: &mut Bencher) {
 
 ## Implementation Priority
 
-### Phase 1: Foundation (Weeks 1-4)
-1. Fix eventfd leak (#448) - Week 1-2
-2. Fix task queue panics (#689) - Week 3
-3. Set up benchmark suite - Week 4
+### Phase 1: Foundation (Weeks 1-4) - **IN PROGRESS**
+1. ✅ **DONE:** Fix eventfd leak (#448) - Implemented Mutex<Option<File>> wrapper for explicit cleanup
+2. ✅ **DONE:** Fix task queue panics (#689) - Made maybe_activate() panic-safe with LOCAL_EX.is_set() check
+3. **NEXT:** Set up benchmark suite - Week 4
+4. **NEXT:** Begin Phase 2 optimizations per [Optimization Plan](OPTIMIZATION_PLAN.md)
 
-### Phase 2: Performance (Weeks 5-10)
-1. Optimize allocations (task pooling) - Week 5-6
-2. Optimize io_uring usage - Week 7-9
-3. Optimize task scheduling - Week 10
+**Status Update (2026-02-14):**
+- Critical bug fixes complete! Both #448 and #689 resolved and merged to master
+- Comprehensive regression tests added for both issues
+- Ready to begin performance optimization work
 
-### Phase 3: Reliability (Weeks 11-13)
-1. Audit io_uring safety (#686) - Week 11-12
-2. Comprehensive testing - Week 13
+### Phase 2: Performance (Weeks 5-10) - **SEE OPTIMIZATION_PLAN.md**
 
-### Phase 4: Ecosystem (Weeks 14-16)
-1. Mock io_uring for portability - Week 14-15
-2. Better error handling - Week 16
+**Priority-ordered optimizations based on architecture analysis:**
+
+1. **🔴 P1: Hierarchical Timing Wheel** (Weeks 5-8)
+   - Replace BTreeMap with O(1) timing wheel
+   - **Expected:** 10-20% improvement in timer-heavy workloads
+   - [See detailed plan](OPTIMIZATION_PLAN.md#priority-1-hierarchical-timing-wheel)
+
+2. **🟡 P2: RefCell Optimization** (Weeks 9-10)
+   - Phase A: Safe borrow caching (+5-10%)
+   - Phase B: UnsafeCell conversion (+10-15%)
+   - **Expected:** 15-25% improvement in task switching
+   - [See detailed plan](OPTIMIZATION_PLAN.md#priority-2a-refcell-caching-phase-1)
+
+3. **🟡 P3: Adaptive I/O Submission** (Weeks 11-14)
+   - Dynamic batching based on observed latency
+   - **Expected:** 10-25% P99 latency improvement
+   - [See detailed plan](OPTIMIZATION_PLAN.md#priority-3-adaptive-io-submission)
+
+### Phase 3: Advanced Optimizations (Weeks 15-20) - **SEE OPTIMIZATION_PLAN.md**
+
+4. **🟢 P5: Cross-Thread Wakeup Optimization** (Weeks 15-16)
+   - Lock-free waker ring buffer
+   - **Expected:** 5-10% improvement in actor patterns
+   - [See detailed plan](OPTIMIZATION_PLAN.md#priority-5-optimize-cross-thread-wakeups)
+
+5. **🟢 P4: Soft Preemption** (Weeks 17-20, **OPTIONAL**)
+   - Compiler-instrumented yield points
+   - **Expected:** 20-40% P99 improvement in mixed workloads
+   - **High risk** - only implement if P99 issues persist
+   - [See detailed plan](OPTIMIZATION_PLAN.md#priority-4-soft-preemption-phase-3)
+
+### Phase 4: Reliability & Ecosystem (Weeks 21-24)
+1. Audit io_uring safety (#686) - Week 21-22
+2. Comprehensive testing & validation - Week 23
+3. Better error handling & portability - Week 24
+4. Documentation & migration guides
 
 ## Success Metrics
 
-**Quantitative:**
+**Quantitative (Updated 2026-02-14):**
+- [x] ✅ Zero eventfd leaks (Issue #448 FIXED)
+- [x] ✅ Zero panics in task queue operations (Issue #689 FIXED)
+- [ ] Timer operations: <100ns P99 @ 100K timers (Timing Wheel)
+- [ ] Task spawn rate: +15% improvement (RefCell optimization)
+- [ ] I/O P99 latency: +20% improvement (Adaptive submission)
+- [ ] Overall performance: 30-40% improvement vs baseline
 - [ ] Random read throughput within 10% of Monoio
 - [ ] Network throughput within 5% of Monoio
-- [ ] Zero eventfd leaks
-- [ ] Zero panics in production workloads
 - [ ] 24+ hour stability tests passing
 
 **Qualitative:**
+- [x] ✅ Critical bugs fixed (eventfd, task panics)
+- [ ] Comprehensive optimization plan documented
 - [ ] Active maintainer assigned
 - [ ] Regular releases (monthly)
 - [ ] Growing contributor base
