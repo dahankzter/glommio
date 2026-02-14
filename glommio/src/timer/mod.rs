@@ -6,6 +6,9 @@
 //! glommio::timer is a module that provides timing related primitives.
 mod timer_impl;
 
+#[cfg(feature = "timing-wheel")]
+pub mod timing_wheel;
+
 use std::{future::Future, time::Duration};
 pub use timer_impl::{Timer, TimerActionOnce, TimerActionRepeat};
 

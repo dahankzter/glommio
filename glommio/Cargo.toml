@@ -21,6 +21,9 @@ rust-version = "1.92"
 bench = []
 debugging = []
 
+# Experimental: Hierarchical timing wheel for O(1) timer operations
+timing-wheel = []
+
 # Unstable features based on nightly
 native-tls = []
 nightly = ["native-tls"]
