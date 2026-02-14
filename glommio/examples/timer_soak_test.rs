@@ -20,7 +20,7 @@ const MIN_TIMER_MS: u64 = 1;
 const MAX_TIMER_MS: u64 = 100;
 
 thread_local! {
-    static RNG_SEED: Cell<u64> = Cell::new(0x123456789abcdef0);
+    static RNG_SEED: Cell<u64> = const { Cell::new(0x123456789abcdef0) };
 }
 
 /// Simple xorshift RNG (no need for rand crate)
@@ -51,7 +51,7 @@ async fn timer_churner(task_id: usize, end_time: Instant, stats: Rc<Cell<u64>>) 
         iterations += 1;
 
         // Update stats every 100 iterations to reduce contention
-        if iterations % 100 == 0 {
+        if iterations.is_multiple_of(100) {
             stats.set(stats.get() + 100);
         }
     }
