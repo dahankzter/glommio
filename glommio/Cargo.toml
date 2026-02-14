@@ -21,9 +21,6 @@ rust-version = "1.92"
 bench = []
 debugging = []
 
-# Experimental: Hierarchical timing wheel for O(1) timer operations
-timing-wheel = []
-
 # Unstable features based on nightly
 native-tls = []
 nightly = ["native-tls"]
@@ -92,7 +89,6 @@ harness = false
 [[bench]]
 name = "timer_benchmark"
 harness = false
-required-features = ["timing-wheel"]
 
 [[bench]]
 name = "tcp"

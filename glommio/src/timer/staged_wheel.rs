@@ -276,6 +276,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::task::Wake;
+    use std::time::Duration;
 
     // Helper: Create a dummy waker
     struct DummyWaker;

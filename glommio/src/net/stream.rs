@@ -188,7 +188,7 @@ impl Timeout {
         if let Some(timeout) = self.timeout.get() {
             if self.timer.get().is_none() {
                 let deadline = Instant::now() + timeout;
-                let id = reactor.insert_timer_handle(deadline, waker.clone());
+                let id = reactor.insert_timer(deadline, waker.clone());
                 self.handle.set(Some(id));
                 self.timer.set(Some(deadline));
             }
@@ -198,15 +198,15 @@ impl Timeout {
     fn cancel_timer(&self, reactor: &Reactor) {
         if self.timer.take().is_some() {
             if let Some(id) = self.handle.take() {
-                reactor.remove_timer_handle(id);
+                reactor.remove_timer(id);
             }
         }
     }
 
     fn check(&self, reactor: &Reactor) -> io::Result<()> {
         if let Some(id) = self.handle.get() {
-            if !reactor.timer_handle_exists(id) {
-                reactor.remove_timer_handle(id);
+            if !reactor.timer_exists(id) {
+                reactor.remove_timer(id);
                 self.handle.take();
                 self.timer.take();
                 return Err(io::Error::new(

@@ -726,7 +726,7 @@ impl Reactor {
     /// Registers a timer and returns a TimerId for O(1) cancellation.
     ///
     /// This API provides direct access to timer storage without HashMap overhead.
-    pub(crate) fn insert_timer_handle(
+    pub(crate) fn insert_timer(
         &self,
         when: Instant,
         waker: Waker,
@@ -738,15 +738,15 @@ impl Reactor {
     /// Removes a timer by TimerId (O(1), no hashing).
     ///
     /// Returns true if the timer was found and removed.
-    pub(crate) fn remove_timer_handle(&self, handle: crate::timer::timer_id::TimerId) -> bool {
+    pub(crate) fn remove_timer(&self, id: crate::timer::timer_id::TimerId) -> bool {
         let mut timers = self.timers.borrow_mut();
-        timers.remove_by_handle(handle)
+        timers.remove_by_handle(id)
     }
 
     /// Checks if a timer exists by TimerId.
-    pub(crate) fn timer_handle_exists(&self, handle: crate::timer::timer_id::TimerId) -> bool {
+    pub(crate) fn timer_exists(&self, id: crate::timer::timer_id::TimerId) -> bool {
         let timers = self.timers.borrow();
-        timers.exists_by_handle(handle)
+        timers.exists_by_handle(id)
     }
 
     /// Processes ready timers and extends the list of wakers to wake.
