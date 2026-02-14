@@ -156,25 +156,12 @@ impl RxBuf for Preallocated {
 
 #[derive(Debug)]
 struct Timeout {
-    #[cfg(not(feature = "timing-wheel"))]
-    id: u64,
-    #[cfg(feature = "timing-wheel")]
     handle: Cell<Option<crate::timer::timer_id::TimerId>>,
     timeout: Cell<Option<Duration>>,
     timer: Cell<Option<Instant>>,
 }
 
 impl Timeout {
-    #[cfg(not(feature = "timing-wheel"))]
-    fn new(id: u64) -> Self {
-        Self {
-            id,
-            timeout: Cell::new(None),
-            timer: Cell::new(None),
-        }
-    }
-
-    #[cfg(feature = "timing-wheel")]
     fn new() -> Self {
         Self {
             handle: Cell::new(None),
@@ -197,18 +184,6 @@ impl Timeout {
         Ok(())
     }
 
-    #[cfg(not(feature = "timing-wheel"))]
-    fn maybe_set_timer(&self, reactor: &Reactor, waker: &Waker) {
-        if let Some(timeout) = self.timeout.get() {
-            if self.timer.get().is_none() {
-                let deadline = Instant::now() + timeout;
-                reactor.insert_timer(self.id, deadline, waker.clone());
-                self.timer.set(Some(deadline));
-            }
-        }
-    }
-
-    #[cfg(feature = "timing-wheel")]
     fn maybe_set_timer(&self, reactor: &Reactor, waker: &Waker) {
         if let Some(timeout) = self.timeout.get() {
             if self.timer.get().is_none() {
@@ -220,14 +195,6 @@ impl Timeout {
         }
     }
 
-    #[cfg(not(feature = "timing-wheel"))]
-    fn cancel_timer(&self, reactor: &Reactor) {
-        if self.timer.take().is_some() {
-            reactor.remove_timer(self.id);
-        }
-    }
-
-    #[cfg(feature = "timing-wheel")]
     fn cancel_timer(&self, reactor: &Reactor) {
         if self.timer.take().is_some() {
             if let Some(id) = self.handle.take() {
@@ -236,22 +203,6 @@ impl Timeout {
         }
     }
 
-    #[cfg(not(feature = "timing-wheel"))]
-    fn check(&self, reactor: &Reactor) -> io::Result<()> {
-        if let Some(deadline) = self.timer.get() {
-            if !reactor.timer_exists(&(deadline, self.id)) {
-                reactor.remove_timer(self.id);
-                self.timer.take();
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Operation timed out",
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "timing-wheel")]
     fn check(&self, reactor: &Reactor) -> io::Result<()> {
         if let Some(id) = self.handle.get() {
             if !reactor.timer_handle_exists(id) {
@@ -419,13 +370,7 @@ where
             stream: socket.into(),
             source_tx: None,
             source_rx: None,
-            #[cfg(not(feature = "timing-wheel"))]
-            write_timeout: Timeout::new(reactor.register_timer()),
-            #[cfg(not(feature = "timing-wheel"))]
-            read_timeout: Timeout::new(reactor.register_timer()),
-            #[cfg(feature = "timing-wheel")]
             write_timeout: Timeout::new(),
-            #[cfg(feature = "timing-wheel")]
             read_timeout: Timeout::new(),
         };
         stream.init();
