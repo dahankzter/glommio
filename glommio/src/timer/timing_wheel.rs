@@ -80,8 +80,31 @@ struct TimerLocation {
 }
 
 /// Hierarchical timing wheel with O(1) operations for most timers
+///
+/// Field ordering optimized for cache locality:
+/// - Hot fields (current_tick, start_time, index, expired) in first ~80 bytes
+/// - Large slot arrays follow (span many cache lines anyway)
+/// - Cold overflow field at the end
 #[derive(Debug)]
 pub struct TimingWheel {
+    /// Current tick (HOT: checked/updated every tick) - 8 bytes
+    current_tick: u64,
+
+    /// Base time (HOT: used for time calculations) - 16 bytes
+    start_time: Instant,
+
+    /// Timer ID allocator (WARM: only touched on insert) - 8 bytes
+    next_id: u64,
+
+    /// Fast lookup: timer_id → location (HOT: accessed on insert/remove) - 24 bytes
+    index: AHashMap<u64, TimerLocation>,
+
+    /// Timers that have expired and are ready to fire (HOT: checked every tick) - 24 bytes
+    expired: Vec<TimerEntry>,
+
+    // Hot fields above total ~80 bytes (fit in 2 cache lines)
+    // Large slot arrays below (span many cache lines)
+
     /// Level 0: 256 slots × 1ms = 0-255ms range
     slots_1ms: [Vec<TimerEntry>; LEVEL_0_SLOTS],
 
@@ -94,23 +117,8 @@ pub struct TimingWheel {
     /// Level 3: 64 slots × 17min = 17min-18hr range
     slots_17min: [Vec<TimerEntry>; LEVEL_3_SLOTS],
 
-    /// Overflow: BTreeMap for timers > 18 hours (rare)
+    /// Overflow: BTreeMap for timers > 18 hours (COLD: rarely used)
     overflow: BTreeMap<Instant, Vec<TimerEntry>>,
-
-    /// Current tick (increments every 1ms)
-    current_tick: u64,
-
-    /// Base time (when tick 0 started)
-    start_time: Instant,
-
-    /// Timer ID allocator
-    next_id: u64,
-
-    /// Fast lookup: timer_id → location
-    index: AHashMap<u64, TimerLocation>,
-
-    /// Timers that have expired and are ready to fire
-    expired: Vec<TimerEntry>,
 }
 
 impl TimingWheel {

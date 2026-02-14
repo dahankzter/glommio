@@ -22,11 +22,17 @@ use std::time::{Duration, Instant};
 /// - Insert: O(1) - returns ID directly from wheel
 /// - Remove: O(1) - direct access via ID
 /// - No hashing overhead, no cache misses from HashMap traversal
+///
+/// # Cache Optimization
+///
+/// Field ordering optimized for cache locality:
+/// - Hot field (wheel) is accessed on every timer operation
+/// - Warm field (id_to_expiry) is accessed on insert/remove and duration checks
 pub struct ReactorTimers {
-    /// The underlying staged wheel
+    /// The underlying staged wheel (HOT: accessed every timer operation)
     wheel: StagedWheel,
 
-    /// Maps IDs to their expiry times (for next_timer_duration calculation)
+    /// Maps IDs to their expiry times (WARM: accessed on insert/remove/duration)
     /// TODO: This is the remaining HashMap that could be eliminated by
     /// exposing expiry times from the wheel itself
     id_to_expiry: AHashMap<u64, Instant>,

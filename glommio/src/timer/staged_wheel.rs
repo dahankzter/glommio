@@ -65,16 +65,20 @@ pub(crate) struct InlineTimer {
 }
 
 /// Staged timing wheel with inline storage for small counts
+///
+/// Field ordering optimized for cache locality:
+/// - Hot fields (storage, start_time) are accessed on every operation
+/// - Warm field (next_id) is only accessed on insert
 #[derive(Debug)]
 pub struct StagedWheel {
-    /// Current storage mode
+    /// Current storage mode (HOT: accessed every poll)
     storage: Storage,
 
-    /// Next timer ID
-    next_id: u64,
-
-    /// Base time for wheel stage
+    /// Base time for wheel stage (HOT: compared every poll)
     start_time: Instant,
+
+    /// Next timer ID (WARM: only touched on insert)
+    next_id: u64,
 }
 
 #[derive(Debug)]
