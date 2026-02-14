@@ -83,8 +83,8 @@ impl SharedChannels {
 
 mod timers {
     use super::*;
-    use crate::timer::timer_id::TimerId;
     use crate::timer::reactor_adapter::ReactorTimers;
+    use crate::timer::timer_id::TimerId;
 
     pub(super) struct Timers {
         wheel: ReactorTimers,
@@ -100,11 +100,7 @@ mod timers {
         /// Insert a timer and return its handle
         ///
         /// BREAKING CHANGE: Now returns TimerId instead of using external IDs
-        pub(super) fn insert_with_handle(
-            &mut self,
-            when: Instant,
-            waker: Waker,
-        ) -> TimerId {
+        pub(super) fn insert_with_handle(&mut self, when: Instant, waker: Waker) -> TimerId {
             self.wheel.insert(when, waker)
         }
 

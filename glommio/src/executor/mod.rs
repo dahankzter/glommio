@@ -2762,7 +2762,8 @@ impl ExecutorProxy {
         future: impl Future<Output = T> + 'a,
     ) -> ScopedTask<'a, T> {
         #[cfg(not(feature = "native-tls"))]
-        return LOCAL_EX.with(|local_ex| ScopedTask::<'a, T>(local_ex.spawn_internal(future), PhantomData));
+        return LOCAL_EX
+            .with(|local_ex| ScopedTask::<'a, T>(local_ex.spawn_internal(future), PhantomData));
 
         #[cfg(feature = "native-tls")]
         return ScopedTask::<'a, T>(

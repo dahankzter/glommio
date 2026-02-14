@@ -5,8 +5,8 @@
 //! This module provides an adapter that integrates StagedWheel with the Reactor,
 //! using TimerId for O(1) cancellation without HashMap overhead.
 
-use super::timer_id::TimerId;
 use super::staged_wheel::StagedWheel;
+use super::timer_id::TimerId;
 use ahash::AHashMap;
 use std::task::Waker;
 use std::time::{Duration, Instant};

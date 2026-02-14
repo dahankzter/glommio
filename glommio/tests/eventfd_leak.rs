@@ -90,7 +90,10 @@ fn test_no_eventfd_leak_on_executor_drop() {
     }
 
     let final_fds = count_open_fds();
-    println!("\n✅ Test passed! FD count stable: {} -> {}", initial_fds, final_fds);
+    println!(
+        "\n✅ Test passed! FD count stable: {} -> {}",
+        initial_fds, final_fds
+    );
 
     // Final check: total leak should be very small
     let total_leaked = final_fds.saturating_sub(initial_fds);
@@ -141,11 +144,7 @@ fn test_executor_with_tasks() {
             .spawn(|| async move {
                 // Spawn some tasks
                 let tasks: Vec<_> = (0..10)
-                    .map(|i| {
-                        glommio::spawn_local(async move {
-                            i * 2
-                        })
-                    })
+                    .map(|i| glommio::spawn_local(async move { i * 2 }))
                     .collect();
 
                 // Await some (but not all) tasks
@@ -163,13 +162,11 @@ fn test_executor_with_tasks() {
     let final_fds = count_open_fds();
     let leaked = final_fds.saturating_sub(initial_fds);
 
-    println!("FD count after executor with tasks: {} -> {} (leaked: {})",
-             initial_fds, final_fds, leaked);
+    println!(
+        "FD count after executor with tasks: {} -> {} (leaked: {})",
+        initial_fds, final_fds, leaked
+    );
 
     // Even with non-runnable tasks, eventfds should be closed
-    assert!(
-        leaked < 5,
-        "FDs leaked with non-runnable tasks: {}",
-        leaked
-    );
+    assert!(leaked < 5, "FDs leaked with non-runnable tasks: {}", leaked);
 }

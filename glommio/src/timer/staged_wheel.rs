@@ -468,7 +468,10 @@ mod tests {
 
         // Force promotion
         for i in 0..=INLINE_THRESHOLD {
-            wheel.insert(start + Duration::from_millis(i as u64 + 1000), dummy_waker());
+            wheel.insert(
+                start + Duration::from_millis(i as u64 + 1000),
+                dummy_waker(),
+            );
         }
 
         assert_eq!(wheel.storage_mode(), "wheel");

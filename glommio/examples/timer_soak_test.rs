@@ -142,8 +142,14 @@ fn main() {
         println!("{}", "=".repeat(70));
         println!("Duration:          {:.2}s", elapsed.as_secs_f64());
         println!("Total iterations:  {}", final_count);
-        println!("Iterations/sec:    {:.0}", final_count as f64 / elapsed.as_secs_f64());
-        println!("Iterations/task:   {:.0}", final_count as f64 / NUM_TASKS as f64);
+        println!(
+            "Iterations/sec:    {:.0}",
+            final_count as f64 / elapsed.as_secs_f64()
+        );
+        println!(
+            "Iterations/task:   {:.0}",
+            final_count as f64 / NUM_TASKS as f64
+        );
         println!("{}", "=".repeat(70));
         println!("\n✅ No panics detected - re-entrancy safety confirmed!");
     });

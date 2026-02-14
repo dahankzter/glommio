@@ -104,7 +104,6 @@ pub struct TimingWheel {
 
     // Hot fields above total ~80 bytes (fit in 2 cache lines)
     // Large slot arrays below (span many cache lines)
-
     /// Level 0: 256 slots × 1ms = 0-255ms range
     slots_1ms: [Vec<TimerEntry>; LEVEL_0_SLOTS],
 
@@ -431,20 +430,20 @@ impl TimingWheel {
 
         // Cascade from higher levels when we wrap around
         if self.current_tick % LEVEL_1_RESOLUTION_MS == 0 {
-            let slot_1 = ((self.current_tick / LEVEL_1_RESOLUTION_MS) % LEVEL_1_SLOTS as u64)
-                as usize;
+            let slot_1 =
+                ((self.current_tick / LEVEL_1_RESOLUTION_MS) % LEVEL_1_SLOTS as u64) as usize;
             self.cascade_slot(1, slot_1);
         }
 
         if self.current_tick % LEVEL_2_RESOLUTION_MS == 0 {
-            let slot_2 = ((self.current_tick / LEVEL_2_RESOLUTION_MS) % LEVEL_2_SLOTS as u64)
-                as usize;
+            let slot_2 =
+                ((self.current_tick / LEVEL_2_RESOLUTION_MS) % LEVEL_2_SLOTS as u64) as usize;
             self.cascade_slot(2, slot_2);
         }
 
         if self.current_tick % LEVEL_3_RESOLUTION_MS == 0 {
-            let slot_3 = ((self.current_tick / LEVEL_3_RESOLUTION_MS) % LEVEL_3_SLOTS as u64)
-                as usize;
+            let slot_3 =
+                ((self.current_tick / LEVEL_3_RESOLUTION_MS) % LEVEL_3_SLOTS as u64) as usize;
             self.cascade_slot(3, slot_3);
         }
 
@@ -490,11 +489,8 @@ impl TimingWheel {
         let threshold = now + Duration::from_millis(OVERFLOW_THRESHOLD_MS);
 
         // Collect keys to process (both in-range and already expired)
-        let keys_to_process: Vec<Instant> = self
-            .overflow
-            .range(..=threshold)
-            .map(|(k, _)| *k)
-            .collect();
+        let keys_to_process: Vec<Instant> =
+            self.overflow.range(..=threshold).map(|(k, _)| *k).collect();
 
         if keys_to_process.is_empty() {
             return;
@@ -703,10 +699,7 @@ mod tests {
         wheel.advance_to(start + Duration::from_millis(260));
 
         // Insert another timer at slot 10 (should be different from id1)
-        let id2 = wheel.insert(
-            start + Duration::from_millis(260 + 10),
-            dummy_waker(),
-        );
+        let id2 = wheel.insert(start + Duration::from_millis(260 + 10), dummy_waker());
 
         assert_ne!(id1, id2);
 
