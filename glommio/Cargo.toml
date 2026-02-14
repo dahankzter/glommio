@@ -60,6 +60,7 @@ typenum = "1.19"
 cc = "1.2"
 
 [dev-dependencies]
+criterion = "0.5"
 fastrand = "2.3"
 futures = "0.3"
 hdrhistogram = "7.5"
@@ -87,6 +88,11 @@ harness = false
 [[bench]]
 name = "preempt"
 harness = false
+
+[[bench]]
+name = "timer_benchmark"
+harness = false
+required-features = ["timing-wheel"]
 
 [[bench]]
 name = "tcp"
