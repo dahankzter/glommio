@@ -1089,19 +1089,27 @@ impl<T> PoolThreadHandles<T> {
 
 pub(crate) fn maybe_activate(tq: Rc<RefCell<TaskQueue>>) {
     #[cfg(not(feature = "native-tls"))]
-    LOCAL_EX.with(|local_ex| {
-        let mut queues = local_ex.queues.borrow_mut();
-        queues.maybe_activate(tq);
-    });
+    {
+        // Check if LOCAL_EX is set before accessing to avoid panic during cleanup
+        // When a task panics and cleanup happens, TLS may not be available
+        if LOCAL_EX.is_set() {
+            LOCAL_EX.with(|local_ex| {
+                let mut queues = local_ex.queues.borrow_mut();
+                queues.maybe_activate(tq);
+            });
+        }
+        // If TLS is not set (e.g., during executor shutdown), skip activation
+        // The executor is shutting down anyway, so there's no point in activating queues
+    }
 
     #[cfg(feature = "native-tls")]
     unsafe {
-        let mut queues = LOCAL_EX
-            .as_ref()
-            .expect("this thread doesn't have a LocalExecutor running")
-            .queues
-            .borrow_mut();
-        queues.maybe_activate(tq);
+        // Check if LOCAL_EX exists before accessing to avoid panic during cleanup
+        if let Some(local_ex) = LOCAL_EX.as_ref() {
+            let mut queues = local_ex.queues.borrow_mut();
+            queues.maybe_activate(tq);
+        }
+        // If LOCAL_EX is None (e.g., during executor shutdown), skip activation
     };
 }
 
