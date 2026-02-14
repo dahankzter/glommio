@@ -5,3 +5,8 @@
 Cargo.lock
 .claude/
 test_spsc_corruption.rs
+
+# Coverage reports
+lcov.info
+*.profraw
+*.profdata

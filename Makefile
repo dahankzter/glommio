@@ -3,7 +3,7 @@
 # Quick commands for common development tasks
 
 .PHONY: help test build fmt lint check bench clean all
-.PHONY: install-tools
+.PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
 
 # =============================================================================
 # Platform Detection & Smart Cargo Commands
@@ -62,6 +62,12 @@ help:
 	@echo "  make test-lib          - Run library tests only"
 	@echo "  make bench             - Run benchmarks"
 	@echo ""
+	@echo "Coverage:"
+	@echo "  make coverage-summary  - Quick coverage summary in terminal"
+	@echo "  make coverage          - Generate HTML coverage report"
+	@echo "  make coverage-open     - Generate and open HTML report"
+	@echo "  make coverage-lcov     - Generate lcov format (for CI)"
+	@echo ""
 	@echo "Code Quality:"
 	@echo "  make fmt               - Format all code"
 	@echo "  make lint              - Run clippy linter"
@@ -96,6 +102,35 @@ test-lib:
 bench:
 	@echo "→ Running benchmarks on $(PLATFORM)..."
 	@$(call run_cargo,bench --benches)
+
+# =============================================================================
+# Coverage
+# =============================================================================
+
+coverage-summary:
+	@echo "→ Generating coverage summary on $(PLATFORM)..."
+	@$(call run_cargo,llvm-cov --lib --summary-only)
+
+coverage:
+	@echo "→ Generating HTML coverage report on $(PLATFORM)..."
+	@$(call run_cargo,llvm-cov --lib --html)
+	@echo ""
+	@echo "✓ Coverage report generated!"
+	@echo "  View at: target/llvm-cov/html/index.html"
+
+coverage-open: coverage
+	@echo "→ Opening coverage report..."
+ifeq ($(UNAME_S),Darwin)
+	@open target/llvm-cov/html/index.html
+else
+	@xdg-open target/llvm-cov/html/index.html 2>/dev/null || \
+		echo "Please open target/llvm-cov/html/index.html manually"
+endif
+
+coverage-lcov:
+	@echo "→ Generating lcov coverage report on $(PLATFORM)..."
+	@$(call run_cargo,llvm-cov --lib --lcov --output-path lcov.info)
+	@echo "✓ lcov.info generated"
 
 # =============================================================================
 # Code Quality
@@ -147,8 +182,11 @@ endif
 
 install-tools:
 	@echo "→ Installing development tools on $(PLATFORM)..."
+	@echo "  - cargo-llvm-cov (for coverage reports)"
 	@$(call run_cargo,install cargo-llvm-cov)
-	@echo "✓ Tools installed"
+	@echo ""
+	@echo "✓ Tools installed successfully!"
+	@echo "  Try: make coverage-summary"
 
 # =============================================================================
 # Meta Commands
