@@ -61,6 +61,7 @@ impl BTreeMapTimers {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn len(&self) -> usize {
         self.timers.len()
     }
