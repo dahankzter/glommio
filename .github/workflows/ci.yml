@@ -1,67 +1,176 @@
-name: Rust
-
-permissions: write-all
+name: CI
 
 on:
-  pull_request:
-    branches: [ master ]
-    types: [ "opened", "synchronize" ]
   push:
     branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
 
 jobs:
-  doc:
+  check:
+    name: Check
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Cache setup
-        uses: ./.github/actions/cache-setup
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
-      - name: Install cargo-deadlinks
-        run: which deadlinks || cargo install cargo-deadlinks
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
 
-      - name: Generate documentation
-        run: cargo doc --all
-
-    # temporarily disabled.
-    # - name: Validate links
-    #   run: cargo deadlinks --dir target/doc/glommio
-
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Cache setup
-        uses: ./.github/actions/cache-setup
-
-      - name: Build all targets
-        run: cargo build --all --all-targets
+      - name: Check all targets
+        run: cargo check --all --all-targets
 
   test:
+    name: Test
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Cache setup
-        uses: ./.github/actions/cache-setup
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
 
-      - name: Install cargo helpers and test all targets
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests
         run: |
-          cat << EOF > "run-gha-workflow.sh"
-          PATH=$PATH:/usr/share/rust/.cargo/bin
-          echo "`nproc` CPU(s) available"
-          rustup install 1.92
-          rustup show
-          rustup default stable
-          cargo install cargo-sort
-          cargo test -- --test-threads=`nproc`
-          EOF
-          sudo -E bash -c "ulimit -Sl 512 && ulimit -Hl 512 && bash run-gha-workflow.sh"
+          # Set memlock limits for io_uring
+          sudo -E bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo test --lib -- --test-threads=$(nproc)"
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+
+      - name: Run clippy
+        run: cargo clippy --all --all-targets -- -D warnings
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-doc-
+
+      - name: Generate documentation
+        run: cargo doc --all --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rust: [stable, beta]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.rust }}-cargo-build-
+
+      - name: Build all targets
+        run: cargo build --all --all-targets --release
