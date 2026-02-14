@@ -121,9 +121,9 @@ impl StagedWheel {
                 // Check if we need to promote to wheel
                 if timers.len() >= INLINE_THRESHOLD {
                     self.promote_to_wheel();
-                    // Now insert into the wheel
+                    // Now insert into the wheel, preserving the ID
                     if let Storage::Wheel(wheel) = &mut self.storage {
-                        wheel.insert(expires_at, waker);
+                        wheel.insert_with_id(id, expires_at, waker);
                     }
                 } else {
                     // Insert into inline storage
@@ -135,7 +135,7 @@ impl StagedWheel {
                 }
             }
             Storage::Wheel(wheel) => {
-                wheel.insert(expires_at, waker);
+                wheel.insert_with_id(id, expires_at, waker);
             }
         }
 
@@ -232,14 +232,14 @@ impl StagedWheel {
             // Create new wheel
             let mut wheel = Box::new(TimingWheel::new_at(self.start_time));
 
-            // Move all inline timers to wheel
+            // Move all inline timers to wheel, preserving IDs
             for timer in timers.drain(..) {
-                wheel.insert(timer.expires_at, timer.waker);
+                wheel.insert_with_id(timer.id, timer.expires_at, timer.waker);
             }
 
-            // Move expired timers to wheel's expired list
+            // Move expired timers to wheel's expired list, preserving IDs
             for timer in expired.drain(..) {
-                wheel.insert(timer.expires_at, timer.waker);
+                wheel.insert_with_id(timer.id, timer.expires_at, timer.waker);
             }
 
             // Replace storage
@@ -388,23 +388,23 @@ mod tests {
         let start = Instant::now();
         let mut wheel = StagedWheel::new_at(start);
 
-        // Force promotion
+        // Force promotion by inserting timers at 0-256ms
         for i in 0..=INLINE_THRESHOLD {
-            wheel.insert(start + Duration::from_millis(i as u64 + 1000), dummy_waker());
+            wheel.insert(start + Duration::from_millis(i as u64), dummy_waker());
         }
 
         assert_eq!(wheel.storage_mode(), "wheel");
 
-        // Test insert in wheel mode
-        let id = wheel.insert(start + Duration::from_millis(50), dummy_waker());
+        // Test insert in wheel mode (insert at 300ms, after the promotion timers)
+        let id = wheel.insert(start + Duration::from_millis(300), dummy_waker());
 
         // Test remove in wheel mode
         assert!(wheel.remove(id));
 
-        // Test advance in wheel mode
+        // Test advance in wheel mode - advance to 100ms
         wheel.advance_to(start + Duration::from_millis(100));
         let expired_count = wheel.drain_expired().count();
-        assert_eq!(expired_count, 100); // Timers from promotion (0-99ms) expired
+        assert_eq!(expired_count, 101); // Timers 0-100ms inclusive
     }
 
     #[test]

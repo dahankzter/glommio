@@ -152,6 +152,24 @@ impl TimingWheel {
         id
     }
 
+    /// Insert a timer with a specific ID (used during promotion from staged wheel)
+    ///
+    /// This is an internal method used by StagedWheel to preserve IDs during promotion
+    pub(crate) fn insert_with_id(&mut self, id: u64, expires_at: Instant, waker: Waker) {
+        let entry = TimerEntry {
+            id,
+            expires_at,
+            waker,
+        };
+
+        self.insert_entry(entry);
+
+        // Update next_id if necessary to avoid ID collision
+        if id >= self.next_id {
+            self.next_id = id + 1;
+        }
+    }
+
     /// Remove a timer by ID
     ///
     /// Returns true if the timer was found and removed, false otherwise
@@ -165,7 +183,13 @@ impl TimingWheel {
             }
             true
         } else {
-            false
+            // Check if timer is in expired queue (can happen if timer expired immediately on insert)
+            if let Some(pos) = self.expired.iter().position(|e| e.id == id) {
+                self.expired.swap_remove(pos);
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -213,14 +237,14 @@ impl TimingWheel {
         self.expired.drain(..).map(|entry| (entry.id, entry.waker))
     }
 
-    /// Get the number of timers currently in the wheel
+    /// Get the number of timers currently in the wheel (including expired but not yet drained)
     pub fn len(&self) -> usize {
-        self.index.len()
+        self.index.len() + self.expired.len()
     }
 
-    /// Check if the wheel is empty
+    /// Check if the wheel is empty (including expired but not yet drained)
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.index.is_empty() && self.expired.is_empty()
     }
 
     // ========================================================================
