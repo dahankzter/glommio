@@ -134,6 +134,15 @@ mod timers {
 ///
 /// There is only one global instance of this type, accessible by
 /// [`Local::get_reactor()`].
+///
+/// # Cache Alignment
+///
+/// Aligned to 64 bytes (cache line boundary) to prevent inter-shard cache
+/// pollution in multi-executor scenarios. When multiple executors run on
+/// different cores, hardware prefetchers can pull neighboring cache lines,
+/// causing false sharing. Aligning the Reactor (root of each shard) prevents
+/// this at negligible memory cost (one Reactor per executor).
+#[repr(align(64))]
 pub(crate) struct Reactor {
     /// Raw bindings to `epoll`/`kqueue`/`wepoll`.
     pub(crate) sys: sys::Reactor,
