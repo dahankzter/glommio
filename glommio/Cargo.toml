@@ -130,3 +130,14 @@ harness = false
 [[bench]]
 name = "competing_io"
 harness = false
+
+# Optimized benchmark profile for more deterministic CI results
+[profile.bench]
+# Thin LTO for faster compile times while still getting cross-crate optimizations
+lto = "thin"
+# Single codegen unit for more consistent performance (no parallel codegen variance)
+codegen-units = 1
+# Maximum optimization level
+opt-level = 3
+# Include debug info for profiling (doesn't affect performance)
+debug = true

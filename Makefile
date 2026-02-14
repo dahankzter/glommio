@@ -4,6 +4,7 @@
 
 .PHONY: help test build fmt lint check bench clean all
 .PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
+.PHONY: bench-timer bench-ci
 
 # =============================================================================
 # Platform Detection & Smart Cargo Commands
@@ -60,7 +61,11 @@ help:
 	@echo "Testing:"
 	@echo "  make test              - Run all tests"
 	@echo "  make test-lib          - Run library tests only"
-	@echo "  make bench             - Run benchmarks"
+	@echo ""
+	@echo "Benchmarking:"
+	@echo "  make bench             - Run all benchmarks"
+	@echo "  make bench-timer       - Run timer benchmarks only"
+	@echo "  make bench-ci          - Run benchmarks in CI format"
 	@echo ""
 	@echo "Coverage:"
 	@echo "  make coverage-summary  - Quick coverage summary in terminal"
@@ -102,6 +107,14 @@ test-lib:
 bench:
 	@echo "→ Running benchmarks on $(PLATFORM)..."
 	@$(call run_cargo,bench --benches)
+
+bench-timer:
+	@echo "→ Running timer benchmarks on $(PLATFORM)..."
+	@$(call run_cargo,bench --bench timer_benchmark)
+
+bench-ci:
+	@echo "→ Running benchmarks in CI mode (bencher format) on $(PLATFORM)..."
+	@$(call run_cargo,bench --bench timer_benchmark -- --output-format bencher)
 
 # =============================================================================
 # Coverage
