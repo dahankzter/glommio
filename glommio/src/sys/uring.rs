@@ -2023,7 +2023,13 @@ fn queue_request_into_ring(
 }
 
 impl Drop for Reactor {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        // Explicitly close the eventfd to prevent file descriptor leak
+        // even when Arc<SleepNotifier> references still exist in tasks.
+        // This fixes issue #448 where repeated executor creation/destruction
+        // would eventually exhaust file descriptors.
+        self.notifier.close_eventfd();
+    }
 }
 
 #[cfg(test)]
