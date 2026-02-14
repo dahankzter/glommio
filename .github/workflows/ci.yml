@@ -68,7 +68,7 @@ jobs:
       - name: Run tests
         run: |
           # Set memlock limits for io_uring
-          sudo -E bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo test --lib -- --test-threads=$(nproc)"
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo test --lib -- --test-threads=$(nproc)"
 
   clippy:
     name: Clippy
