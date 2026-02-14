@@ -258,7 +258,9 @@ impl fmt::Debug for OsError {
 #[derive(Debug)]
 pub(crate) struct SleepNotifier {
     id: usize,
-    eventfd: std::fs::File,
+    /// Eventfd wrapped in Mutex<Option<>> to allow explicit cleanup on drop
+    /// even when Arc references still exist (fixes issue #448)
+    eventfd: std::sync::Mutex<Option<std::fs::File>>,
     should_notify: AtomicBool,
     foreign_wakes: crossbeam::channel::Receiver<Waker>,
     waker_sender: crossbeam::channel::Sender<Waker>,
@@ -290,7 +292,7 @@ impl SleepNotifier {
         let (waker_sender, foreign_wakes) = crossbeam::channel::unbounded();
 
         Ok(Arc::new(Self {
-            eventfd,
+            eventfd: std::sync::Mutex::new(Some(eventfd)),
             id,
             should_notify: AtomicBool::new(false),
             waker_sender,
@@ -299,7 +301,11 @@ impl SleepNotifier {
     }
 
     pub(crate) fn eventfd_fd(&self) -> RawFd {
-        self.eventfd.as_raw_fd()
+        self.eventfd
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|f| f.as_raw_fd()))
+            .unwrap_or(-1)
     }
 
     pub(crate) fn id(&self) -> usize {
@@ -313,7 +319,31 @@ impl SleepNotifier {
             .is_ok()
             || force
         {
-            write_eventfd(self.eventfd_fd());
+            let fd = self.eventfd_fd();
+            if fd >= 0 {
+                // Only write if eventfd is still open
+                write_eventfd(fd);
+            }
+            // Silently ignore if closed - executor is shutting down
+        }
+    }
+
+    /// Explicitly closes the eventfd file descriptor.
+    ///
+    /// This method allows the eventfd to be closed even when Arc<SleepNotifier>
+    /// references still exist in non-runnable tasks. This prevents the eventfd
+    /// leak described in issue #448 where executors that are repeatedly created
+    /// and destroyed would eventually exhaust file descriptors.
+    ///
+    /// This method is idempotent and can be safely called multiple times.
+    /// Subsequent calls to notify() will silently ignore the closed eventfd.
+    pub(crate) fn close_eventfd(&self) {
+        if let Ok(mut guard) = self.eventfd.lock() {
+            if let Some(fd) = guard.take() {
+                // File::drop will close the file descriptor
+                drop(fd);
+                debug!("Explicitly closed eventfd for executor {}", self.id);
+            }
         }
     }
 
