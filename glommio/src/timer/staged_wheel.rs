@@ -58,10 +58,10 @@ const INLINE_THRESHOLD: usize = 256;
 
 /// A timer entry in inline storage
 #[derive(Debug)]
-struct InlineTimer {
-    id: u64,
-    expires_at: Instant,
-    waker: Waker,
+pub(crate) struct InlineTimer {
+    pub(crate) id: u64,
+    pub(crate) expires_at: Instant,
+    pub(crate) waker: Waker,
 }
 
 /// Staged timing wheel with inline storage for small counts
@@ -196,7 +196,9 @@ impl StagedWheel {
     /// Returns an iterator over (timer_id, waker) pairs
     pub fn drain_expired(&mut self) -> DrainExpired<'_> {
         match &mut self.storage {
-            Storage::Inline { expired, .. } => DrainExpired::Inline(expired.drain(..)),
+            Storage::Inline { expired, .. } => {
+                DrainExpired::Inline(Box::new(expired.drain(..).map(|t| (t.id, t.waker))))
+            }
             Storage::Wheel(wheel) => DrainExpired::Wheel(Box::new(wheel.drain_expired())),
         }
     }
@@ -250,8 +252,19 @@ impl StagedWheel {
 
 /// Iterator over expired timers
 pub enum DrainExpired<'a> {
-    Inline(std::vec::Drain<'a, InlineTimer>),
+    /// Draining expired timers from inline storage
+    Inline(Box<dyn Iterator<Item = (u64, Waker)> + 'a>),
+    /// Draining expired timers from wheel storage
     Wheel(Box<dyn Iterator<Item = (u64, Waker)> + 'a>),
+}
+
+impl<'a> std::fmt::Debug for DrainExpired<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Inline(_) => f.debug_tuple("Inline").field(&"Box<dyn Iterator>").finish(),
+            Self::Wheel(_) => f.debug_tuple("Wheel").field(&"Box<dyn Iterator>").finish(),
+        }
+    }
 }
 
 impl Iterator for DrainExpired<'_> {
@@ -259,7 +272,7 @@ impl Iterator for DrainExpired<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            DrainExpired::Inline(drain) => drain.next().map(|t| (t.id, t.waker)),
+            DrainExpired::Inline(iter) => iter.next(),
             DrainExpired::Wheel(iter) => iter.next(),
         }
     }

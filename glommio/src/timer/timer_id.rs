@@ -61,6 +61,7 @@ impl TimerId {
     }
 
     /// Get the generation component
+    #[allow(dead_code)]
     pub(crate) fn generation(&self) -> u32 {
         self.generation
     }

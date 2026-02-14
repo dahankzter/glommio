@@ -109,6 +109,7 @@ impl Timer {
 
     // Useful in generating repeat timers that have a constant
     // id. Not for external usage. With timing-wheel, just delegates to new().
+    #[allow(dead_code)]
     fn from_id(_id: u64, dur: Duration) -> Timer {
         Self::new(dur)
     }
@@ -223,6 +224,7 @@ pub struct TimerActionRepeat {
     handle: JoinHandle<()>,
     // With timing-wheel, we don't track individual timer IDs
     // since each iteration creates a new Timer with its own ID
+    #[allow(dead_code)]
     reactor: Weak<Reactor>,
 }
 

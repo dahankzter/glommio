@@ -115,11 +115,13 @@ impl ReactorTimers {
     }
 
     /// Get the number of active timers
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.id_to_expiry.len()
     }
 
     /// Check if there are no active timers
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.id_to_expiry.is_empty()
     }
