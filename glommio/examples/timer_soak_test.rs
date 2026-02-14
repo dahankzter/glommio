@@ -63,12 +63,6 @@ async fn timer_churner(task_id: usize, end_time: Instant, stats: Rc<Cell<u64>>) 
 }
 
 fn main() {
-    #[cfg(not(feature = "timing-wheel"))]
-    {
-        eprintln!("ERROR: This test requires --features timing-wheel");
-        std::process::exit(1);
-    }
-
     println!("{}", "=".repeat(70));
     println!("TIMER RE-ENTRANCY SOAK TEST");
     println!("{}", "=".repeat(70));
