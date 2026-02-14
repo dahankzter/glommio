@@ -211,6 +211,8 @@ jobs:
         run: |
           # Set memlock limits for io_uring
           sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --lcov --output-path lcov.info"
+          # Fix ownership for Codecov upload
+          sudo chown runner:docker lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -222,6 +224,8 @@ jobs:
       - name: Generate HTML report
         run: |
           sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --html"
+          # Fix ownership so upload-artifact can read the files
+          sudo chown -R runner:docker target/llvm-cov/html/
 
       - name: Upload HTML report
         uses: actions/upload-artifact@v4
