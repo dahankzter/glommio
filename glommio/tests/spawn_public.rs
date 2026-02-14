@@ -11,7 +11,7 @@ fn test_spawn_before_run() {
     let task = executor.spawn(async { 42 });
 
     // Now run the executor and await the task
-    let result = executor.run(async move { task.await });
+    let result = executor.run(task);
 
     assert_eq!(result, 42);
 }
@@ -49,7 +49,7 @@ fn test_spawn_with_computation() {
         sum
     });
 
-    let result = executor.run(async move { task.await });
+    let result = executor.run(task);
 
     assert_eq!(result, 5050); // Sum of 1 to 100
 }

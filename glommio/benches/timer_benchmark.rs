@@ -55,10 +55,7 @@ impl BTreeMapTimers {
     fn process_expired(&mut self, now: Instant) -> Vec<Waker> {
         // This is the expensive operation in BTreeMap approach
         let ready = self.timers.split_off(&(now, 0));
-        std::mem::replace(&mut self.timers, ready)
-            .into_iter()
-            .map(|(_, waker)| waker)
-            .collect()
+        std::mem::replace(&mut self.timers, ready).into_values().collect()
     }
 
     #[allow(dead_code)]

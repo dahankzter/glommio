@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn test_timer_id_clone() {
         let id1 = TimerId::new(100, 5);
-        let id2 = id1.clone();
+        let id2 = id1;
         assert_eq!(id1, id2);
     }
 }
