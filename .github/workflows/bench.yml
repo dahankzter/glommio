@@ -56,10 +56,8 @@ jobs:
           alert-threshold: '120%'
           # Add comment on regression
           comment-on-alert: true
-          # Fail the workflow on alert (optional - set to false for warnings only)
+          # Don't fail the workflow on alert
           fail-on-alert: false
-          # Store long-term history
-          external-data-json-path: ./cache/benchmark-data.json
 
       - name: Compare benchmark result (PR only)
         if: github.event_name == 'pull_request'
@@ -76,8 +74,6 @@ jobs:
           comment-on-alert: true
           # Don't fail PR on regression (just warn)
           fail-on-alert: false
-          # Read baseline from gh-pages
-          external-data-json-path: ./cache/benchmark-data.json
 
       - name: Upload benchmark results as artifact
         uses: actions/upload-artifact@v4
