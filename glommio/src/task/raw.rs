@@ -441,7 +441,16 @@ where
             });
 
             // Finally, deallocate the memory reserved by the task.
-            alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
+            // BUT: Don't deallocate arena-allocated memory (it will be bulk-freed)
+            let should_dealloc = if TASK_ARENA.is_set() {
+                !TASK_ARENA.with(|arena| arena.contains(ptr as *const u8))
+            } else {
+                true
+            };
+
+            if should_dealloc {
+                alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
+            }
         });
     }
 

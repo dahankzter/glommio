@@ -20,7 +20,8 @@ scoped_tls::scoped_thread_local!(pub(crate) static TASK_ARENA: TaskArena);
 const MAX_TASK_SIZE: usize = 512;
 
 /// Number of tasks to pre-allocate
-const ARENA_CAPACITY: usize = 10_000;
+/// Note: Reduced for Phase 1 prototype to avoid OOM during benchmarking
+const ARENA_CAPACITY: usize = 2_000;
 
 /// Simple task arena with free-list allocation
 pub(crate) struct TaskArena {
@@ -89,6 +90,16 @@ impl TaskArena {
     /// Record a heap fallback allocation
     pub(crate) fn record_heap_fallback(&self) {
         *self.heap_fallback_allocs.borrow_mut() += 1;
+    }
+
+    /// Check if a pointer was allocated from this arena
+    ///
+    /// SAFETY: Caller must ensure ptr is a valid pointer
+    pub(crate) unsafe fn contains(&self, ptr: *const u8) -> bool {
+        let start = self.memory.as_ptr() as usize;
+        let end = start + self.capacity;
+        let addr = ptr as usize;
+        addr >= start && addr < end
     }
 
     /// Get statistics for measuring arena effectiveness
