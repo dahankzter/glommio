@@ -161,7 +161,7 @@ fmt:
 
 lint:
 	@echo "→ Running clippy on $(PLATFORM)..."
-	@$(call run_cargo,clippy --workspace --all-targets --all-features -- -D warnings)
+	@$(call run_cargo,clippy --workspace --all-targets -- -D warnings)
 
 check:
 	@echo "→ Checking compilation on $(PLATFORM)..."

@@ -1,14 +1,15 @@
 // Copyright 2024 Glommio Project Authors. Licensed under Apache-2.0.
 
-//! Simple task arena for fast allocation
+//! Task arena with recyclable slab allocator
 //!
-//! This is a prototype arena allocator for tasks. It pre-allocates memory for
-//! a fixed number of tasks and serves allocations from a free list.
+//! This arena pre-allocates fixed-size slots for tasks and recycles them
+//! when tasks complete. Uses an intrusive free-list stored in unused slots.
 //!
-//! **Prototype Status:**
-//! - No recycling yet (allocate-only for measuring best case)
-//! - Falls back to heap when full
-//! - Not yet optimized for production
+//! **Phase 2 Status:**
+//! - Recyclable slab allocator with O(1) alloc/dealloc
+//! - 512-byte fixed slots, 2,000 slot capacity (1MB total)
+//! - Intrusive free-list (no separate allocation overhead)
+//! - Falls back to heap for oversized/over-aligned tasks
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::RefCell;
@@ -16,32 +17,45 @@ use std::ptr::NonNull;
 
 scoped_tls::scoped_thread_local!(pub(crate) static TASK_ARENA: TaskArena);
 
-/// Maximum task size we'll allocate in the arena (512 bytes)
-const MAX_TASK_SIZE: usize = 512;
+/// Fixed slot size for all arena allocations (512 bytes)
+const SLOT_SIZE: usize = 512;
 
-/// Number of tasks to pre-allocate
-/// Note: Reduced for Phase 1 prototype to avoid OOM during benchmarking
-const ARENA_CAPACITY: usize = 2_000;
+/// Maximum task size we'll allocate in the arena
+const MAX_TASK_SIZE: usize = SLOT_SIZE;
 
-/// Simple task arena with free-list allocation
+/// Maximum alignment we support (64-byte cache line)
+const MAX_ALIGN: usize = 64;
+
+/// Number of slots to pre-allocate
+const SLOT_CAPACITY: usize = 2_000;
+
+/// Sentinel value for end of free list
+const FREE_LIST_END: u32 = u32::MAX;
+
+/// Task arena with recyclable slab allocator
 pub(crate) struct TaskArena {
-    /// Pre-allocated memory block
+    /// Pre-allocated memory block (aligned to MAX_ALIGN)
     memory: NonNull<u8>,
     /// Total capacity in bytes
     capacity: usize,
-    /// Next free offset (bump allocator style for prototype)
-    next_offset: RefCell<usize>,
-    /// Track how many allocations from arena vs heap
+    /// Head of intrusive free list (stored as slot index, or FREE_LIST_END)
+    free_head: RefCell<u32>,
+    /// Track allocation statistics
     arena_allocs: RefCell<usize>,
+    arena_deallocs: RefCell<usize>,
     heap_fallback_allocs: RefCell<usize>,
+    /// Current number of active slots
+    active_slots: RefCell<usize>,
+    /// Peak active slots (high water mark)
+    peak_active: RefCell<usize>,
 }
 
 impl TaskArena {
-    /// Create a new task arena
+    /// Create a new task arena with initialized free list
     pub(crate) fn new() -> Self {
-        let capacity = ARENA_CAPACITY * MAX_TASK_SIZE;
-        let layout = Layout::from_size_align(capacity, 64)
-            .expect("Failed to create arena layout");
+        let capacity = SLOT_CAPACITY * SLOT_SIZE;
+        let layout =
+            Layout::from_size_align(capacity, MAX_ALIGN).expect("Failed to create arena layout");
 
         // SAFETY: We allocate a large block upfront and manage it ourselves
         let memory = unsafe {
@@ -49,42 +63,121 @@ impl TaskArena {
             NonNull::new(ptr).expect("Failed to allocate task arena")
         };
 
-        Self {
+        let arena = Self {
             memory,
             capacity,
-            next_offset: RefCell::new(0),
+            free_head: RefCell::new(FREE_LIST_END),
             arena_allocs: RefCell::new(0),
+            arena_deallocs: RefCell::new(0),
             heap_fallback_allocs: RefCell::new(0),
+            active_slots: RefCell::new(0),
+            peak_active: RefCell::new(0),
+        };
+
+        // Initialize free list: 0 → 1 → 2 → ... → (SLOT_CAPACITY-1) → END
+        arena.initialize_free_list();
+
+        arena
+    }
+
+    /// Initialize the intrusive free list
+    ///
+    /// Each slot stores the index of the next free slot as a u32 at offset 0.
+    fn initialize_free_list(&self) {
+        unsafe {
+            let base = self.memory.as_ptr();
+
+            // Link all slots: slot[i] → slot[i+1]
+            for i in 0..(SLOT_CAPACITY - 1) {
+                let slot_ptr = base.add(i * SLOT_SIZE) as *mut u32;
+                *slot_ptr = (i + 1) as u32;
+            }
+
+            // Last slot points to END
+            let last_slot = base.add((SLOT_CAPACITY - 1) * SLOT_SIZE) as *mut u32;
+            *last_slot = FREE_LIST_END;
+
+            // Head points to first slot
+            *self.free_head.borrow_mut() = 0;
         }
     }
 
-    /// Try to allocate from arena, returns None if full
+    /// Try to allocate from arena, returns None if full or layout unsupported
     ///
-    /// SAFETY: Caller must ensure the layout is valid and doesn't exceed MAX_TASK_SIZE
+    /// SAFETY: Caller must ensure the layout is valid
     pub(crate) unsafe fn try_allocate(&self, layout: Layout) -> Option<NonNull<u8>> {
-        // For prototype: only handle tasks up to MAX_TASK_SIZE
-        if layout.size() > MAX_TASK_SIZE {
+        // Reject oversized or over-aligned allocations
+        if layout.size() > MAX_TASK_SIZE || layout.align() > MAX_ALIGN {
             return None;
         }
 
-        let mut offset = self.next_offset.borrow_mut();
+        let mut head = self.free_head.borrow_mut();
 
-        // Align the offset
-        let aligned_offset = (*offset + layout.align() - 1) & !(layout.align() - 1);
-        let new_offset = aligned_offset + layout.size();
-
-        // Check if we have space
-        if new_offset > self.capacity {
-            return None;  // Arena full
+        // Check if free list is empty
+        if *head == FREE_LIST_END {
+            return None; // Arena full
         }
 
-        // Allocate from arena
-        *offset = new_offset;
-        *self.arena_allocs.borrow_mut() += 1;
+        // Pop from free list head
+        let slot_index = *head as usize;
+        let slot_ptr = self.memory.as_ptr().add(slot_index * SLOT_SIZE);
 
-        // SAFETY: We've checked bounds and alignment
-        let ptr = self.memory.as_ptr().add(aligned_offset);
-        Some(NonNull::new_unchecked(ptr))
+        // Read next free slot from current slot's first u32
+        let next_free = *(slot_ptr as *const u32);
+        *head = next_free;
+
+        // Update statistics
+        *self.arena_allocs.borrow_mut() += 1;
+        let mut active = self.active_slots.borrow_mut();
+        *active += 1;
+        let mut peak = self.peak_active.borrow_mut();
+        if *active > *peak {
+            *peak = *active;
+        }
+
+        // Return the slot pointer
+        // SAFETY: Slot is aligned to MAX_ALIGN (64), which satisfies layout.align() <= MAX_ALIGN
+        Some(NonNull::new_unchecked(slot_ptr))
+    }
+
+    /// Try to deallocate back to arena, returns true if recycled
+    ///
+    /// Returns false if the pointer wasn't allocated from this arena.
+    ///
+    /// SAFETY: Caller must ensure ptr was allocated by this arena or from heap.
+    /// Caller must ensure the slot is no longer in use (no aliasing references).
+    pub(crate) unsafe fn try_deallocate(&self, ptr: *const u8) -> bool {
+        // Check if pointer is within arena bounds
+        let start = self.memory.as_ptr() as usize;
+        let end = start + self.capacity;
+        let addr = ptr as usize;
+
+        if addr < start || addr >= end {
+            return false; // Not from arena
+        }
+
+        // Calculate slot index
+        let offset = addr - start;
+        let slot_index = offset / SLOT_SIZE;
+
+        // Verify slot alignment (should be exact multiple)
+        debug_assert_eq!(
+            offset % SLOT_SIZE,
+            0,
+            "Arena deallocation of misaligned pointer"
+        );
+
+        // Push slot back onto free list head (LIFO)
+        let mut head = self.free_head.borrow_mut();
+        let slot_ptr = ptr as *mut u32;
+        *slot_ptr = *head; // Store old head as next
+        *head = slot_index as u32; // New head is this slot
+
+        // Update statistics
+        *self.arena_deallocs.borrow_mut() += 1;
+        *self.active_slots.borrow_mut() -= 1;
+
+        true
     }
 
     /// Record a heap fallback allocation
@@ -92,31 +185,30 @@ impl TaskArena {
         *self.heap_fallback_allocs.borrow_mut() += 1;
     }
 
-    /// Check if a pointer was allocated from this arena
-    ///
-    /// SAFETY: Caller must ensure ptr is a valid pointer
-    pub(crate) unsafe fn contains(&self, ptr: *const u8) -> bool {
-        let start = self.memory.as_ptr() as usize;
-        let end = start + self.capacity;
-        let addr = ptr as usize;
-        addr >= start && addr < end
-    }
-
     /// Get statistics for measuring arena effectiveness
+    #[allow(dead_code)]
     pub(crate) fn stats(&self) -> ArenaStats {
         ArenaStats {
             arena_allocs: *self.arena_allocs.borrow(),
+            arena_deallocs: *self.arena_deallocs.borrow(),
             heap_fallback_allocs: *self.heap_fallback_allocs.borrow(),
-            bytes_used: *self.next_offset.borrow(),
-            bytes_capacity: self.capacity,
+            active_slots: *self.active_slots.borrow(),
+            peak_active: *self.peak_active.borrow(),
+            slot_capacity: SLOT_CAPACITY,
         }
     }
 
-    /// Reset arena (for benchmarking)
+    /// Reset arena (for benchmarking) - rebuilds entire free list
+    #[allow(dead_code)]
     pub(crate) fn reset(&self) {
-        *self.next_offset.borrow_mut() = 0;
         *self.arena_allocs.borrow_mut() = 0;
+        *self.arena_deallocs.borrow_mut() = 0;
         *self.heap_fallback_allocs.borrow_mut() = 0;
+        *self.active_slots.borrow_mut() = 0;
+        *self.peak_active.borrow_mut() = 0;
+
+        // Rebuild free list from scratch
+        self.initialize_free_list();
     }
 }
 
@@ -137,14 +229,18 @@ unsafe impl Send for TaskArena {}
 
 /// Statistics for measuring arena effectiveness
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub(crate) struct ArenaStats {
     pub arena_allocs: usize,
+    pub arena_deallocs: usize,
     pub heap_fallback_allocs: usize,
-    pub bytes_used: usize,
-    pub bytes_capacity: usize,
+    pub active_slots: usize,
+    pub peak_active: usize,
+    pub slot_capacity: usize,
 }
 
 impl ArenaStats {
+    #[allow(dead_code)]
     pub fn arena_hit_rate(&self) -> f64 {
         let total = self.arena_allocs + self.heap_fallback_allocs;
         if total == 0 {
@@ -154,8 +250,18 @@ impl ArenaStats {
         }
     }
 
+    #[allow(dead_code)]
     pub fn utilization(&self) -> f64 {
-        (self.bytes_used as f64 / self.bytes_capacity as f64) * 100.0
+        (self.active_slots as f64 / self.slot_capacity as f64) * 100.0
+    }
+
+    #[allow(dead_code)]
+    pub fn recycle_rate(&self) -> f64 {
+        if self.arena_allocs == 0 {
+            0.0
+        } else {
+            (self.arena_deallocs as f64 / self.arena_allocs as f64) * 100.0
+        }
     }
 }
 
@@ -166,8 +272,6 @@ mod tests {
     #[test]
     fn test_arena_basic_allocation() {
         let arena = TaskArena::new();
-
-        // Allocate a few tasks
         let layout = Layout::from_size_align(256, 8).unwrap();
 
         unsafe {
@@ -183,47 +287,202 @@ mod tests {
 
         let stats = arena.stats();
         assert_eq!(stats.arena_allocs, 2);
+        assert_eq!(stats.active_slots, 2);
         assert_eq!(stats.heap_fallback_allocs, 0);
     }
 
     #[test]
-    fn test_arena_full() {
+    fn test_arena_full_then_recycle() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(MAX_TASK_SIZE, 8).unwrap();
 
-        // Fill the arena
-        let mut count = 0;
+        // Fill the arena completely
+        let mut ptrs = Vec::new();
         unsafe {
-            while arena.try_allocate(layout).is_some() {
-                count += 1;
+            for _ in 0..SLOT_CAPACITY {
+                let ptr = arena.try_allocate(layout).expect("Arena should have space");
+                ptrs.push(ptr);
+            }
+
+            // Arena should be full now
+            assert!(arena.try_allocate(layout).is_none());
+        }
+
+        let stats = arena.stats();
+        assert_eq!(stats.arena_allocs, SLOT_CAPACITY);
+        assert_eq!(stats.active_slots, SLOT_CAPACITY);
+
+        // Free half the slots
+        unsafe {
+            for ptr in ptrs.iter().take(SLOT_CAPACITY / 2) {
+                let recycled = arena.try_deallocate(ptr.as_ptr());
+                assert!(recycled, "Should recycle arena pointer");
             }
         }
 
-        // Should have allocated ARENA_CAPACITY tasks
-        assert_eq!(count, ARENA_CAPACITY);
+        let stats = arena.stats();
+        assert_eq!(stats.arena_deallocs, SLOT_CAPACITY / 2);
+        assert_eq!(stats.active_slots, SLOT_CAPACITY / 2);
 
-        // Next allocation should fail
+        // Should be able to allocate again (recycled slots)
         unsafe {
-            assert!(arena.try_allocate(layout).is_none());
+            for _ in 0..(SLOT_CAPACITY / 2) {
+                let ptr = arena.try_allocate(layout);
+                assert!(ptr.is_some(), "Should allocate from recycled slots");
+            }
         }
+
+        let stats = arena.stats();
+        assert_eq!(stats.arena_allocs, SLOT_CAPACITY + SLOT_CAPACITY / 2);
+        assert_eq!(stats.active_slots, SLOT_CAPACITY);
     }
 
     #[test]
-    fn test_arena_reset() {
+    fn test_free_list_lifo_order() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(256, 8).unwrap();
 
         unsafe {
-            arena.try_allocate(layout);
-            arena.try_allocate(layout);
+            // Allocate 3 slots
+            let p1 = arena.try_allocate(layout).unwrap();
+            let p2 = arena.try_allocate(layout).unwrap();
+            let p3 = arena.try_allocate(layout).unwrap();
+
+            // Free them in order: p1, p2, p3
+            arena.try_deallocate(p1.as_ptr());
+            arena.try_deallocate(p2.as_ptr());
+            arena.try_deallocate(p3.as_ptr());
+
+            // Re-allocate: should get LIFO order (p3, p2, p1)
+            let r1 = arena.try_allocate(layout).unwrap();
+            assert_eq!(r1.as_ptr(), p3.as_ptr(), "Should get last freed (p3)");
+
+            let r2 = arena.try_allocate(layout).unwrap();
+            assert_eq!(
+                r2.as_ptr(),
+                p2.as_ptr(),
+                "Should get second last freed (p2)"
+            );
+
+            let r3 = arena.try_allocate(layout).unwrap();
+            assert_eq!(r3.as_ptr(), p1.as_ptr(), "Should get first freed (p1)");
+        }
+    }
+
+    #[test]
+    fn test_deallocate_non_arena_pointer() {
+        let arena = TaskArena::new();
+
+        // Allocate on heap
+        let heap_layout = Layout::from_size_align(256, 8).unwrap();
+        let heap_ptr = unsafe { alloc(heap_layout) };
+
+        // Try to deallocate heap pointer to arena
+        let recycled = unsafe { arena.try_deallocate(heap_ptr) };
+        assert!(!recycled, "Heap pointer should not be recycled to arena");
+
+        // Clean up heap allocation
+        unsafe {
+            dealloc(heap_ptr, heap_layout);
+        }
+    }
+
+    #[test]
+    fn test_stats_tracking() {
+        let arena = TaskArena::new();
+        let layout = Layout::from_size_align(256, 8).unwrap();
+
+        unsafe {
+            let p1 = arena.try_allocate(layout).unwrap();
+            let p2 = arena.try_allocate(layout).unwrap();
+            let p3 = arena.try_allocate(layout).unwrap();
+
+            let stats = arena.stats();
+            assert_eq!(stats.arena_allocs, 3);
+            assert_eq!(stats.arena_deallocs, 0);
+            assert_eq!(stats.active_slots, 3);
+            assert_eq!(stats.peak_active, 3);
+
+            arena.try_deallocate(p2.as_ptr());
+
+            let stats = arena.stats();
+            assert_eq!(stats.arena_allocs, 3);
+            assert_eq!(stats.arena_deallocs, 1);
+            assert_eq!(stats.active_slots, 2);
+            assert_eq!(stats.peak_active, 3); // Peak should not decrease
+
+            let p4 = arena.try_allocate(layout).unwrap();
+
+            let stats = arena.stats();
+            assert_eq!(stats.arena_allocs, 4);
+            assert_eq!(stats.active_slots, 3);
+            assert_eq!(stats.peak_active, 3);
+
+            // Clean up
+            arena.try_deallocate(p1.as_ptr());
+            arena.try_deallocate(p3.as_ptr());
+            arena.try_deallocate(p4.as_ptr());
+        }
+    }
+
+    #[test]
+    fn test_arena_reset_rebuilds_free_list() {
+        let arena = TaskArena::new();
+        let layout = Layout::from_size_align(256, 8).unwrap();
+
+        unsafe {
+            // Allocate and deallocate some slots
+            let p1 = arena.try_allocate(layout).unwrap();
+            let _p2 = arena.try_allocate(layout).unwrap();
+            arena.try_deallocate(p1.as_ptr());
         }
 
         assert_eq!(arena.stats().arena_allocs, 2);
+        assert_eq!(arena.stats().active_slots, 1);
 
+        // Reset arena
         arena.reset();
 
         let stats = arena.stats();
         assert_eq!(stats.arena_allocs, 0);
-        assert_eq!(stats.bytes_used, 0);
+        assert_eq!(stats.arena_deallocs, 0);
+        assert_eq!(stats.active_slots, 0);
+        assert_eq!(stats.peak_active, 0);
+
+        // Should be able to allocate full capacity again
+        unsafe {
+            for _ in 0..SLOT_CAPACITY {
+                let ptr = arena.try_allocate(layout);
+                assert!(ptr.is_some(), "Should allocate after reset");
+            }
+        }
+
+        assert_eq!(arena.stats().arena_allocs, SLOT_CAPACITY);
+    }
+
+    #[test]
+    fn test_oversized_rejected() {
+        let arena = TaskArena::new();
+
+        // Try to allocate > MAX_TASK_SIZE
+        let layout = Layout::from_size_align(MAX_TASK_SIZE + 1, 8).unwrap();
+
+        unsafe {
+            let ptr = arena.try_allocate(layout);
+            assert!(ptr.is_none(), "Oversized allocation should be rejected");
+        }
+    }
+
+    #[test]
+    fn test_high_alignment_rejected() {
+        let arena = TaskArena::new();
+
+        // Try to allocate with alignment > MAX_ALIGN
+        let layout = Layout::from_size_align(256, MAX_ALIGN * 2).unwrap();
+
+        unsafe {
+            let ptr = arena.try_allocate(layout);
+            assert!(ptr.is_none(), "Over-aligned allocation should be rejected");
+        }
     }
 }

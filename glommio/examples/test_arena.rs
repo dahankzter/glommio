@@ -25,13 +25,10 @@ fn main() {
     LocalExecutor::default().run(async {
         let mut handles = Vec::new();
         for i in 0..1000 {
-            handles.push(spawn_local(async move {
-                i * 2
-            }));
+            handles.push(spawn_local(async move { i * 2 }));
         }
 
-        let results: Vec<_> =
-            futures_lite::future::block_on(async { join_all(handles).await });
+        let results: Vec<_> = futures_lite::future::block_on(async { join_all(handles).await });
 
         assert_eq!(results.len(), 1000);
         println!("  Completed {} tasks", results.len());
@@ -43,18 +40,29 @@ fn main() {
     LocalExecutor::default().run(async {
         let mut handles = Vec::new();
         for i in 0..3000 {
-            handles.push(spawn_local(async move {
-                i
-            }));
+            handles.push(spawn_local(async move { i }));
         }
 
-        let results: Vec<_> =
-            futures_lite::future::block_on(async { join_all(handles).await });
+        let results: Vec<_> = futures_lite::future::block_on(async { join_all(handles).await });
 
         assert_eq!(results.len(), 3000);
-        println!("  Completed {} tasks (some from arena, some from heap)", results.len());
+        println!(
+            "  Completed {} tasks (some from arena, some from heap)",
+            results.len()
+        );
     });
     println!("✓ Test 3 passed");
+
+    // Test 4: Sequential spawn+await with recycling
+    println!("\nTest 4: Recycling test (5000 sequential spawn+await, capacity=2000)");
+    LocalExecutor::default().run(async {
+        for i in 0..5000 {
+            let result = spawn_local(async move { i * 2 }).await;
+            assert_eq!(result, i * 2);
+        }
+        println!("  Completed 5000 tasks via recycling (2.5x arena capacity)");
+    });
+    println!("✓ Test 4 passed");
 
     println!("\n✅ All arena tests passed!");
 }

@@ -195,10 +195,17 @@ glommio/
    - Add comments explaining safety/correctness
    - Update documentation as needed
 
-5. **Test thoroughly:**
+5. **Format and test before committing:**
    ```bash
-   make all  # Format, lint, and test
+   make fmt   # ALWAYS run before committing (formats all code)
+   make lint  # Check for linting issues
+   make test  # Run all tests
+
+   # Or run all at once:
+   make all   # Format, lint, and test
    ```
+
+   **CRITICAL:** Always run `make fmt` before committing to avoid CI warnings!
 
 6. **Create commit** (see Commit Message Conventions below):
    ```bash
@@ -541,6 +548,7 @@ gh repo sync dahankzter/glommio --source DataDog/glommio
 
 ## Code Style
 
+- **ALWAYS run `make fmt` before committing** - prevents CI warnings
 - **Follow existing patterns** in the codebase
 - **Keep changes minimal** - don't refactor unrelated code
 - **Comment safety invariants** especially in unsafe code
@@ -596,6 +604,10 @@ When starting a new session:
 ### Essential Commands
 
 ```bash
+# BEFORE EVERY COMMIT - Format code to avoid CI warnings!
+make fmt            # Format all code (ALWAYS run before committing!)
+
+# Testing and quality checks
 make test           # Test everything
 make all            # Pre-commit checks (format, lint, test)
 make help           # Show all available commands
