@@ -521,6 +521,36 @@ make bench             # Run benchmarks
 
 On macOS, this runs in Lima. On Linux, it runs natively.
 
+### Testing Unsafe Code with Miri
+
+Miri is Rust's interpreter for detecting undefined behavior in unsafe code. Use it to validate arena allocator safety:
+
+```bash
+# One-time setup (installs nightly + Miri)
+make miri-setup
+
+# Test arena allocator unsafe code (fast, ~30 seconds)
+make miri-arena
+
+# Test all library unsafe code (slow, several minutes)
+make miri
+```
+
+**What Miri detects:**
+- Use of uninitialized memory
+- Use-after-free and double-free
+- Invalid pointer arithmetic
+- Data races
+- Violations of pointer aliasing rules
+
+**When to use Miri:**
+- After modifying unsafe code in arena.rs or raw.rs
+- Before pushing changes that touch unsafe blocks
+- When debugging memory corruption issues
+- As part of thorough testing for safety-critical changes
+
+**Note:** Miri is slower than regular tests (interprets every instruction), but catches undefined behavior that normal tests might miss.
+
 ## Git Configuration
 
 ### Remote Setup
