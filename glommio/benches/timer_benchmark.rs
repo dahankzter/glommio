@@ -2,13 +2,29 @@
 //
 // Run with: cargo bench --bench timer_benchmark --features timing-wheel
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
+};
 use glommio::timer::staged_wheel::StagedWheel;
 use glommio::timer::timing_wheel::TimingWheel;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
+
+// ============================================================================
+// Criterion configuration for reduced variance
+// ============================================================================
+
+fn criterion_config() -> Criterion {
+    Criterion::default()
+        // Increase sample size from default 100 to 200 for better statistics
+        .sample_size(200)
+        // Increase warm-up time to stabilize caches and allocators
+        .warm_up_time(Duration::from_secs(5))
+        // Increase measurement time for more accurate results
+        .measurement_time(Duration::from_secs(10))
+}
 
 // ============================================================================
 // Dummy waker for benchmarks
@@ -76,17 +92,21 @@ fn bench_insert_btreemap(c: &mut Criterion) {
     for size in [100, 1_000, 10_000, 100_000].iter() {
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
-            b.iter(|| {
-                let mut timers = BTreeMapTimers::new();
-                let start = Instant::now();
-
-                for i in 0..size {
-                    let expires_at = start + Duration::from_millis(i as u64);
-                    timers.insert(expires_at, dummy_waker());
-                }
-
-                black_box(timers);
-            });
+            b.iter_batched(
+                || {
+                    // Setup: create empty timer structure
+                    (BTreeMapTimers::new(), Instant::now())
+                },
+                |(mut timers, start)| {
+                    // Measurement: insert operations
+                    for i in 0..size {
+                        let expires_at = start + Duration::from_millis(i as u64);
+                        timers.insert(expires_at, dummy_waker());
+                    }
+                    black_box(timers);
+                },
+                criterion::BatchSize::SmallInput,
+            );
         });
     }
 
@@ -99,17 +119,22 @@ fn bench_insert_timing_wheel(c: &mut Criterion) {
     for size in [100, 1_000, 10_000, 100_000].iter() {
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
-            b.iter(|| {
-                let start = Instant::now();
-                let mut wheel = TimingWheel::new_at(start);
-
-                for i in 0..size {
-                    let expires_at = start + Duration::from_millis(i as u64);
-                    wheel.insert(expires_at, dummy_waker());
-                }
-
-                black_box(wheel);
-            });
+            b.iter_batched(
+                || {
+                    // Setup: create empty wheel
+                    let start = Instant::now();
+                    (TimingWheel::new_at(start), start)
+                },
+                |(mut wheel, start)| {
+                    // Measurement: insert operations
+                    for i in 0..size {
+                        let expires_at = start + Duration::from_millis(i as u64);
+                        wheel.insert(expires_at, dummy_waker());
+                    }
+                    black_box(wheel);
+                },
+                criterion::BatchSize::SmallInput,
+            );
         });
     }
 
@@ -644,39 +669,43 @@ fn bench_churn_staged_wheel(c: &mut Criterion) {
 }
 
 // ============================================================================
-// Register all benchmarks
+// Register all benchmarks with custom configuration
 // ============================================================================
 
-criterion_group!(
-    insert_benches,
-    bench_insert_btreemap,
-    bench_insert_timing_wheel,
-    bench_insert_staged_wheel,
-    bench_single_insert_btreemap,
-    bench_single_insert_timing_wheel,
-    bench_single_insert_staged_wheel,
-);
+criterion_group! {
+    name = insert_benches;
+    config = criterion_config();
+    targets = bench_insert_btreemap,
+        bench_insert_timing_wheel,
+        bench_insert_staged_wheel,
+        bench_single_insert_btreemap,
+        bench_single_insert_timing_wheel,
+        bench_single_insert_staged_wheel
+}
 
-criterion_group!(
-    remove_benches,
-    bench_remove_btreemap,
-    bench_remove_timing_wheel,
-    bench_remove_staged_wheel,
-);
+criterion_group! {
+    name = remove_benches;
+    config = criterion_config();
+    targets = bench_remove_btreemap,
+        bench_remove_timing_wheel,
+        bench_remove_staged_wheel
+}
 
-criterion_group!(
-    process_benches,
-    bench_process_expired_btreemap,
-    bench_process_expired_timing_wheel,
-    bench_process_expired_staged_wheel,
-);
+criterion_group! {
+    name = process_benches;
+    config = criterion_config();
+    targets = bench_process_expired_btreemap,
+        bench_process_expired_timing_wheel,
+        bench_process_expired_staged_wheel
+}
 
-criterion_group!(
-    mixed_benches,
-    bench_mixed_workload_btreemap,
-    bench_mixed_workload_timing_wheel,
-    bench_mixed_workload_staged_wheel,
-);
+criterion_group! {
+    name = mixed_benches;
+    config = criterion_config();
+    targets = bench_mixed_workload_btreemap,
+        bench_mixed_workload_timing_wheel,
+        bench_mixed_workload_staged_wheel
+}
 
 // ============================================================================
 // Benchmark: Churn (insert + cancel pattern)
@@ -773,12 +802,13 @@ fn bench_churn_timing_wheel(c: &mut Criterion) {
 // Register all benchmarks
 // ============================================================================
 
-criterion_group!(
-    churn_benches,
-    bench_churn_btreemap,
-    bench_churn_timing_wheel,
-    bench_churn_staged_wheel,
-);
+criterion_group! {
+    name = churn_benches;
+    config = criterion_config();
+    targets = bench_churn_btreemap,
+        bench_churn_timing_wheel,
+        bench_churn_staged_wheel
+}
 
 criterion_main!(
     insert_benches,
