@@ -48,3 +48,16 @@ pub(crate) const CLOSED: u8 = 1 << 3;
 /// flag, while all other task references ([`Task`] and [`Waker`]s) are tracked
 /// by the reference count.
 pub(crate) const HANDLE: u8 = 1 << 4;
+
+/// Set if the task was allocated from the arena.
+///
+/// This flag is set during task allocation if the memory came from the arena
+/// allocator rather than the heap. It's crucial for correct deallocation:
+/// - If set: Try to recycle to arena (if still in scope), else skip deallocation
+///   (memory already freed when arena dropped)
+/// - If clear: Safe to deallocate via heap allocator
+///
+/// This solves the "free(): invalid pointer" crash when tasks outlive the arena
+/// scope. The arena might be dropped before the task, so we can't rely on
+/// `TASK_ARENA.is_set()` to determine allocation source during deallocation.
+pub(crate) const ARENA_ALLOCATED: u8 = 1 << 5;

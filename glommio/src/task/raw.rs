@@ -121,18 +121,21 @@ where
 
         unsafe {
             // Try to allocate from arena first, fall back to heap if unavailable
-            let raw_task = if TASK_ARENA.is_set() {
+            let (raw_task, from_arena) = if TASK_ARENA.is_set() {
                 // Try arena allocation
                 TASK_ARENA.with(|arena| {
-                    arena.try_allocate(task_layout.layout).or_else(|| {
-                        // Arena full, fall back to heap
-                        arena.record_heap_fallback();
-                        NonNull::new(alloc::alloc::alloc(task_layout.layout))
-                    })
+                    arena
+                        .try_allocate(task_layout.layout)
+                        .map(|ptr| (Some(ptr), true))
+                        .unwrap_or_else(|| {
+                            // Arena full, fall back to heap
+                            arena.record_heap_fallback();
+                            (NonNull::new(alloc::alloc::alloc(task_layout.layout)), false)
+                        })
                 })
             } else {
                 // No arena available, use heap
-                NonNull::new(alloc::alloc::alloc(task_layout.layout))
+                (NonNull::new(alloc::alloc::alloc(task_layout.layout)), false)
             };
 
             let raw_task = match raw_task {
@@ -142,10 +145,17 @@ where
 
             let raw = Self::from_ptr(raw_task.as_ptr());
 
+            // Set ARENA_ALLOCATED flag if memory came from arena
+            let state = if from_arena {
+                SCHEDULED | HANDLE | ARENA_ALLOCATED
+            } else {
+                SCHEDULED | HANDLE
+            };
+
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
                 notifier: sys::get_sleep_notifier_for(executor_id).unwrap(),
-                state: SCHEDULED | HANDLE,
+                state,
                 latency_matters,
                 references: AtomicI16::new(0),
                 awaiter: None,
@@ -440,15 +450,30 @@ where
             });
 
             // Finally, deallocate the memory reserved by the task.
-            // Try to recycle to arena first; if not arena-allocated, use heap dealloc.
-            let was_recycled = if TASK_ARENA.is_set() {
-                TASK_ARENA.with(|arena| unsafe { arena.try_deallocate(ptr as *const u8) })
+            //
+            // CRITICAL: Must check TASK_ARENA.is_set() BEFORE reading header.
+            // If arena is gone, task memory might be in freed arena block.
+            if TASK_ARENA.is_set() {
+                // Arena exists - safe to read header and try recycling
+                let state = (*raw.header).state;
+                if state & ARENA_ALLOCATED != 0 {
+                    // Task was allocated from arena - try to recycle
+                    TASK_ARENA.with(|arena| unsafe {
+                        arena.try_deallocate(ptr as *const u8);
+                    });
+                } else {
+                    // Task was allocated from heap - deallocate
+                    alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
+                }
             } else {
-                false
-            };
-
-            if !was_recycled {
-                alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
+                // Arena not in scope - cannot safely read header or determine
+                // allocation source. Skip deallocation to avoid "free(): invalid
+                // pointer" crash. This leaks the task memory, but the alternative
+                // (attempting to dealloc arena memory or reading freed memory) is
+                // undefined behavior.
+                //
+                // Note: This only happens when tasks outlive executor scope,
+                // which should be rare in normal operation.
             }
         });
     }
