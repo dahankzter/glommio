@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771175634631,
+  "lastUpdate": 1771180845431,
   "repoUrl": "https://github.com/dahankzter/glommio",
   "entries": {
     "Timer Benchmarks": [
@@ -2555,6 +2555,432 @@ window.BENCHMARK_DATA = {
             "name": "timer_churn_staged_wheel/100000",
             "value": 2217022,
             "range": "± 249010",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "committer": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "distinct": true,
+          "id": "d5610fafa65ae9d24c707928dbc4386fab12c177",
+          "message": "fix: Prevent use-after-free when tasks outlive arena scope\n\nTasks could outlive the arena's lifetime when executors shut down,\ncausing \"free(): invalid pointer\" crashes. The previous logic checked\nTASK_ARENA.is_set() at deallocation time, but the arena might already\nbe dropped, leading to incorrect heap deallocation of arena pointers.\n\nSolution: Track allocation source via ARENA_ALLOCATED state bit (bit 5).\nSet during allocation, checked during deallocation. If arena-allocated\nbut arena is gone, skip deallocation since arena's memory block was\nalready freed when arena dropped.\n\nThis fixes test failures in CI where parallel tests (--test-threads=4)\nallowed tasks to outlive their arena scope during cleanup.\n\nSigned-off-by: Henrik Ma Johansson <dahankzter@gmail.com>",
+          "timestamp": "2026-02-15T18:00:41+01:00",
+          "tree_id": "ee352f01e6a3bbdd583747345db56da424c68fed",
+          "url": "https://github.com/dahankzter/glommio/commit/d5610fafa65ae9d24c707928dbc4386fab12c177"
+        },
+        "date": 1771180845028,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "timer_insert_btreemap/100",
+            "value": 5576,
+            "range": "± 73",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/1000",
+            "value": 84737,
+            "range": "± 2221",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/10000",
+            "value": 1038286,
+            "range": "± 6430",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/100000",
+            "value": 11696536,
+            "range": "± 252620",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100",
+            "value": 15724,
+            "range": "± 158",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/1000",
+            "value": 96241,
+            "range": "± 765",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/10000",
+            "value": 807008,
+            "range": "± 17012",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100000",
+            "value": 7775337,
+            "range": "± 132205",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100",
+            "value": 4205,
+            "range": "± 403",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/1000",
+            "value": 95197,
+            "range": "± 1158",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/10000",
+            "value": 832626,
+            "range": "± 10952",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100000",
+            "value": 8212287,
+            "range": "± 94792",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/0",
+            "value": 131,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/1000",
+            "value": 129,
+            "range": "± 27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/10000",
+            "value": 133,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/100000",
+            "value": 151,
+            "range": "± 37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/0",
+            "value": 84,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/1000",
+            "value": 86,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/10000",
+            "value": 84,
+            "range": "± 17",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/100000",
+            "value": 100,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/0",
+            "value": 82,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/1000",
+            "value": 81,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/10000",
+            "value": 84,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/100000",
+            "value": 102,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100",
+            "value": 4485,
+            "range": "± 195",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/1000",
+            "value": 48273,
+            "range": "± 659",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/10000",
+            "value": 603669,
+            "range": "± 3646",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100000",
+            "value": 6366412,
+            "range": "± 202805",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100",
+            "value": 11785,
+            "range": "± 25516",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/1000",
+            "value": 58930,
+            "range": "± 483582",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/10000",
+            "value": 546415,
+            "range": "± 39743",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100000",
+            "value": 6900316,
+            "range": "± 277950",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100",
+            "value": 3344,
+            "range": "± 381",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/1000",
+            "value": 57069,
+            "range": "± 408081",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/10000",
+            "value": 558182,
+            "range": "± 37216",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100000",
+            "value": 6862493,
+            "range": "± 287104",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100",
+            "value": 3200,
+            "range": "± 45909",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/1000",
+            "value": 29364,
+            "range": "± 104148",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/10000",
+            "value": 288941,
+            "range": "± 45476",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100000",
+            "value": 2879362,
+            "range": "± 85221",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100",
+            "value": 13565,
+            "range": "± 143",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/1000",
+            "value": 90034,
+            "range": "± 1050",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/10000",
+            "value": 1006034,
+            "range": "± 4704",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100000",
+            "value": 16736017,
+            "range": "± 169280",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100",
+            "value": 3767,
+            "range": "± 29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/1000",
+            "value": 90931,
+            "range": "± 749",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/10000",
+            "value": 1042814,
+            "range": "± 7155",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100000",
+            "value": 17226492,
+            "range": "± 230108",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/1000",
+            "value": 39825,
+            "range": "± 1014",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/10000",
+            "value": 295372,
+            "range": "± 2652",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/100000",
+            "value": 3191284,
+            "range": "± 131643",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/1000",
+            "value": 49153,
+            "range": "± 28140",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/10000",
+            "value": 282839,
+            "range": "± 34730",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/100000",
+            "value": 2802455,
+            "range": "± 61421",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100",
+            "value": 6357,
+            "range": "± 253",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/1000",
+            "value": 152576,
+            "range": "± 2228",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/10000",
+            "value": 1536209,
+            "range": "± 8307",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100000",
+            "value": 19548837,
+            "range": "± 161257",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/1000",
+            "value": 104854,
+            "range": "± 5426",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/10000",
+            "value": 300659,
+            "range": "± 1752",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/100000",
+            "value": 2149335,
+            "range": "± 192712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/1000",
+            "value": 91813,
+            "range": "± 2506",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/10000",
+            "value": 297709,
+            "range": "± 39518",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/100000",
+            "value": 2218180,
+            "range": "± 232003",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/1000",
+            "value": 90844,
+            "range": "± 176107",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/10000",
+            "value": 295449,
+            "range": "± 42621",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/100000",
+            "value": 2213481,
+            "range": "± 251934",
             "unit": "ns/iter"
           }
         ]
