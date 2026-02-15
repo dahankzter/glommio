@@ -210,7 +210,8 @@ jobs:
       - name: Generate coverage
         run: |
           # Set memlock limits for io_uring
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --lcov --output-path lcov.info"
+          # Skip slow stress tests that take >60s under coverage instrumentation
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --lcov --output-path lcov.info -- --skip test_shares_high_disparity"
           # Fix ownership for Codecov upload
           sudo chown runner:docker lcov.info
 
@@ -223,7 +224,8 @@ jobs:
 
       - name: Generate HTML report
         run: |
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --html"
+          # Skip slow stress tests that take >60s under coverage instrumentation
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --html -- --skip test_shares_high_disparity"
           # Fix ownership so upload-artifact can read the files
           sudo chown -R runner:docker target/llvm-cov/html/
 

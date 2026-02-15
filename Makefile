@@ -122,14 +122,15 @@ bench-ci:
 
 coverage-summary:
 	@echo "→ Generating coverage summary on $(PLATFORM)..."
-	@$(call run_cargo,llvm-cov --lib --summary-only)
+	@$(call run_cargo,llvm-cov --lib --summary-only -- --skip test_shares_high_disparity)
 
 coverage:
 	@echo "→ Generating HTML coverage report on $(PLATFORM)..."
-	@$(call run_cargo,llvm-cov --lib --html)
+	@$(call run_cargo,llvm-cov --lib --html -- --skip test_shares_high_disparity)
 	@echo ""
 	@echo "✓ Coverage report generated!"
 	@echo "  View at: target/llvm-cov/html/index.html"
+	@echo "  Note: Skips slow stress tests (test_shares_high_disparity)"
 
 coverage-open: coverage
 	@echo "→ Opening coverage report..."
@@ -142,8 +143,8 @@ endif
 
 coverage-lcov:
 	@echo "→ Generating lcov coverage report on $(PLATFORM)..."
-	@$(call run_cargo,llvm-cov --lib --lcov --output-path lcov.info)
-	@echo "✓ lcov.info generated"
+	@$(call run_cargo,llvm-cov --lib --lcov --output-path lcov.info -- --skip test_shares_high_disparity)
+	@echo "✓ lcov.info generated (skips slow stress tests)"
 
 # =============================================================================
 # Code Quality
