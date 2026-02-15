@@ -20,6 +20,7 @@ use crate::task::debugging::TaskDebugger;
 use crate::{
     dbg_context, sys,
     task::{
+        arena::TASK_ARENA,
         header::Header,
         state::*,
         utils::{abort, abort_on_panic, extend},
@@ -119,10 +120,25 @@ where
         let task_layout = abort_on_panic(Self::task_layout);
 
         unsafe {
-            // Allocate enough space for the entire task.
-            let raw_task = match NonNull::new(alloc::alloc::alloc(task_layout.layout) as *mut ()) {
+            // Try to allocate from arena first, fall back to heap if unavailable
+            let raw_task = if TASK_ARENA.is_set() {
+                // Try arena allocation
+                TASK_ARENA.with(|arena| {
+                    arena.try_allocate(task_layout.layout)
+                        .or_else(|| {
+                            // Arena full, fall back to heap
+                            arena.record_heap_fallback();
+                            NonNull::new(alloc::alloc::alloc(task_layout.layout))
+                        })
+                })
+            } else {
+                // No arena available, use heap
+                NonNull::new(alloc::alloc::alloc(task_layout.layout))
+            };
+
+            let raw_task = match raw_task {
                 None => abort(),
-                Some(p) => p,
+                Some(p) => NonNull::new_unchecked(p.as_ptr() as *mut ()),
             };
 
             let raw = Self::from_ptr(raw_task.as_ptr());

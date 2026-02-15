@@ -38,7 +38,11 @@ use crate::{
     io::DmaBuffer,
     parking, reactor,
     sys::{self, blocking::BlockingThreadPool},
-    task::{self, waker_fn::dummy_waker},
+    task::{
+        self,
+        arena::{TaskArena, TASK_ARENA},
+        waker_fn::dummy_waker,
+    },
     GlommioError, IoRequirements, IoStats, Latency, Reactor, Shares,
 };
 use ahash::AHashMap;
@@ -1583,7 +1587,8 @@ impl LocalExecutor {
                 !LOCAL_EX.is_set(),
                 "There is already an LocalExecutor running on this thread"
             );
-            LOCAL_EX.set(self, || run(self))
+            let arena = TaskArena::new();
+            TASK_ARENA.set(&arena, || LOCAL_EX.set(self, || run(self)))
         }
 
         #[cfg(feature = "native-tls")]
@@ -1593,9 +1598,12 @@ impl LocalExecutor {
                 "There is already an LocalExecutor running on this thread"
             );
 
-            defer!(LOCAL_EX = std::ptr::null());
-            LOCAL_EX = self as *const Self;
-            run(self)
+            let arena = TaskArena::new();
+            TASK_ARENA.set(&arena, || {
+                defer!(LOCAL_EX = std::ptr::null());
+                LOCAL_EX = self as *const Self;
+                run(self)
+            })
         }
     }
 }
