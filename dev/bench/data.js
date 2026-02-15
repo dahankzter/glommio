@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771116705269,
+  "lastUpdate": 1771146104571,
   "repoUrl": "https://github.com/dahankzter/glommio",
   "entries": {
     "Timer Benchmarks": [
@@ -851,6 +851,432 @@ window.BENCHMARK_DATA = {
             "name": "timer_churn_staged_wheel/100000",
             "value": 2121937,
             "range": "± 230037",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "committer": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "distinct": true,
+          "id": "45ce63a90cd7dd39038b3f1c1f58c1309e2e4e6f",
+          "message": "chore: Apply rustfmt formatting to benches and task mod\n\nFormats import statements and reorders module declarations\nper rustfmt conventions.\n\nSigned-off-by: Henrik Ma Johansson <dahankzter@gmail.com>",
+          "timestamp": "2026-02-15T09:39:31+01:00",
+          "tree_id": "90ca85fee5f82ed0faf88dd997830b55bd2a2f89",
+          "url": "https://github.com/dahankzter/glommio/commit/45ce63a90cd7dd39038b3f1c1f58c1309e2e4e6f"
+        },
+        "date": 1771146104279,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "timer_insert_btreemap/100",
+            "value": 5582,
+            "range": "± 239",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/1000",
+            "value": 85639,
+            "range": "± 686",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/10000",
+            "value": 1033697,
+            "range": "± 10279",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/100000",
+            "value": 11197390,
+            "range": "± 379170",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100",
+            "value": 15459,
+            "range": "± 207",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/1000",
+            "value": 95729,
+            "range": "± 1011",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/10000",
+            "value": 797011,
+            "range": "± 11334",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100000",
+            "value": 7746429,
+            "range": "± 80560",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100",
+            "value": 4121,
+            "range": "± 282",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/1000",
+            "value": 93328,
+            "range": "± 801",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/10000",
+            "value": 805769,
+            "range": "± 24826",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100000",
+            "value": 8156965,
+            "range": "± 92932",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/0",
+            "value": 125,
+            "range": "± 28",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/1000",
+            "value": 128,
+            "range": "± 29",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/10000",
+            "value": 126,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/100000",
+            "value": 165,
+            "range": "± 37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/0",
+            "value": 78,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/1000",
+            "value": 89,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/10000",
+            "value": 97,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/100000",
+            "value": 107,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/0",
+            "value": 89,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/1000",
+            "value": 85,
+            "range": "± 16",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/10000",
+            "value": 92,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/100000",
+            "value": 109,
+            "range": "± 21",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100",
+            "value": 4487,
+            "range": "± 281",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/1000",
+            "value": 48527,
+            "range": "± 1947",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/10000",
+            "value": 607676,
+            "range": "± 3854",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100000",
+            "value": 6988908,
+            "range": "± 214865",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100",
+            "value": 11725,
+            "range": "± 230",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/1000",
+            "value": 58421,
+            "range": "± 441655",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/10000",
+            "value": 546730,
+            "range": "± 41978",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100000",
+            "value": 6884228,
+            "range": "± 300064",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100",
+            "value": 3403,
+            "range": "± 385",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/1000",
+            "value": 56877,
+            "range": "± 456315",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/10000",
+            "value": 554979,
+            "range": "± 38403",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100000",
+            "value": 7054258,
+            "range": "± 293844",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100",
+            "value": 3216,
+            "range": "± 46659",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/1000",
+            "value": 29525,
+            "range": "± 104480",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/10000",
+            "value": 290352,
+            "range": "± 22694",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100000",
+            "value": 2929457,
+            "range": "± 97680",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100",
+            "value": 13468,
+            "range": "± 154",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/1000",
+            "value": 89554,
+            "range": "± 943",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/10000",
+            "value": 1013236,
+            "range": "± 6310",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100000",
+            "value": 16866230,
+            "range": "± 396877",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100",
+            "value": 4273,
+            "range": "± 38",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/1000",
+            "value": 99798,
+            "range": "± 2518",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/10000",
+            "value": 1124231,
+            "range": "± 8787",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100000",
+            "value": 17344321,
+            "range": "± 340303",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/1000",
+            "value": 40378,
+            "range": "± 102444",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/10000",
+            "value": 296429,
+            "range": "± 23944",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/100000",
+            "value": 3503432,
+            "range": "± 501913",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/1000",
+            "value": 48298,
+            "range": "± 230211",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/10000",
+            "value": 282579,
+            "range": "± 64832",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/100000",
+            "value": 2831163,
+            "range": "± 214528",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100",
+            "value": 6582,
+            "range": "± 188",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/1000",
+            "value": 160684,
+            "range": "± 1454",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/10000",
+            "value": 1564909,
+            "range": "± 5108",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100000",
+            "value": 18852715,
+            "range": "± 385488",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/1000",
+            "value": 106619,
+            "range": "± 17288",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/10000",
+            "value": 303453,
+            "range": "± 28829",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/100000",
+            "value": 2163611,
+            "range": "± 304204",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/1000",
+            "value": 90779,
+            "range": "± 376926",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/10000",
+            "value": 297076,
+            "range": "± 49075",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/100000",
+            "value": 2219219,
+            "range": "± 316614",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/1000",
+            "value": 91893,
+            "range": "± 221543",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/10000",
+            "value": 295815,
+            "range": "± 50670",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/100000",
+            "value": 2223466,
+            "range": "± 337711",
             "unit": "ns/iter"
           }
         ]
