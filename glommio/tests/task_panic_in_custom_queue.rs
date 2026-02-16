@@ -19,25 +19,21 @@ fn test_panic_in_default_queue() {
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         ex.run(async move {
             let tq = glommio::executor().current_task_queue();
-            let task1 = unsafe {
-                glommio::spawn_local_into(
-                    async move {
-                        glommio::timer::sleep(Duration::from_millis(1)).await;
-                        panic!("intentional panic in default queue");
-                    },
-                    tq,
-                )
-            }
+            let task1 = glommio::spawn_local_into(
+                async move {
+                    glommio::timer::sleep(Duration::from_millis(1)).await;
+                    panic!("intentional panic in default queue");
+                },
+                tq,
+            )
             .unwrap();
 
-            let task2 = unsafe {
-                glommio::spawn_local_into(
-                    async move {
-                        glommio::timer::sleep(Duration::from_secs(10)).await;
-                    },
-                    tq,
-                )
-            }
+            let task2 = glommio::spawn_local_into(
+                async move {
+                    glommio::timer::sleep(Duration::from_secs(10)).await;
+                },
+                tq,
+            )
             .unwrap();
 
             join!(task1, task2);
@@ -66,25 +62,21 @@ fn test_panic_in_custom_queue() {
                 "custom queue",
             );
 
-            let task1 = unsafe {
-                glommio::spawn_local_into(
-                    async move {
-                        glommio::timer::sleep(Duration::from_millis(1)).await;
-                        panic!("intentional panic in custom queue");
-                    },
-                    tq,
-                )
-            }
+            let task1 = glommio::spawn_local_into(
+                async move {
+                    glommio::timer::sleep(Duration::from_millis(1)).await;
+                    panic!("intentional panic in custom queue");
+                },
+                tq,
+            )
             .unwrap();
 
-            let task2 = unsafe {
-                glommio::spawn_local_into(
-                    async move {
-                        glommio::timer::sleep(Duration::from_secs(10)).await;
-                    },
-                    tq,
-                )
-            }
+            let task2 = glommio::spawn_local_into(
+                async move {
+                    glommio::timer::sleep(Duration::from_secs(10)).await;
+                },
+                tq,
+            )
             .unwrap();
 
             join!(task1, task2);
@@ -120,26 +112,22 @@ fn test_multiple_panics_in_custom_queues() {
                 "queue 2",
             );
 
-            let task1 = unsafe {
-                glommio::spawn_local_into(
-                    async move {
-                        glommio::timer::sleep(Duration::from_millis(1)).await;
-                        panic!("panic in queue 1");
-                    },
-                    tq1,
-                )
-            }
+            let task1 = glommio::spawn_local_into(
+                async move {
+                    glommio::timer::sleep(Duration::from_millis(1)).await;
+                    panic!("panic in queue 1");
+                },
+                tq1,
+            )
             .unwrap();
 
-            let task2 = unsafe {
-                glommio::spawn_local_into(
-                    async move {
-                        glommio::timer::sleep(Duration::from_millis(2)).await;
-                        panic!("panic in queue 2");
-                    },
-                    tq2,
-                )
-            }
+            let task2 = glommio::spawn_local_into(
+                async move {
+                    glommio::timer::sleep(Duration::from_millis(2)).await;
+                    panic!("panic in queue 2");
+                },
+                tq2,
+            )
             .unwrap();
 
             join!(task1, task2);
