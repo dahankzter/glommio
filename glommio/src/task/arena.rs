@@ -1,15 +1,28 @@
 // Copyright 2024 Glommio Project Authors. Licensed under Apache-2.0.
 
-//! Task arena with recyclable slab allocator
+//! Task arena with recyclable mega-slab allocator
 //!
-//! This arena pre-allocates fixed-size slots for tasks and recycles them
-//! when tasks complete. Uses an intrusive free-list stored in unused slots.
+//! # Architectural Contract: Shared-Nothing Engine
 //!
-//! **Phase 2 Status:**
+//! **Tasks and wakers are STRICTLY OWNED by their executor.**
+//!
+//! When an executor drops, its arena memory is IMMEDIATELY reclaimed. Any
+//! attempt to access tasks/wakers from a dropped executor is UNDEFINED BEHAVIOR.
+//!
+//! This design trades safety for performance:
+//! - ✅ Zero atomic overhead (no Arc per task)
+//! - ✅ Sub-20ns spawn latency target
+//! - ✅ Fixed 50MB memory (100K slots × 512 bytes)
+//! - ❌ Tasks must not outlive their executor
+//! - ❌ Wakers must not outlive their executor
+//!
+//! Developers must ensure: **Executors outlive all references to their tasks.**
+//!
+//! ## Implementation Details
 //! - Recyclable slab allocator with O(1) alloc/dealloc
-//! - 512-byte fixed slots, 2,000 slot capacity (1MB total)
-//! - Intrusive free-list (no separate allocation overhead)
-//! - Falls back to heap for oversized/over-aligned tasks
+//! - 512-byte fixed slots, 100,000 slot capacity (50MB total)
+//! - Intrusive free-list (zero allocation overhead)
+//! - Bulk deallocation on executor drop (no per-task free)
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::cell::RefCell;

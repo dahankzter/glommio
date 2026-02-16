@@ -21,7 +21,7 @@ use crate::{
     dbg_context, sys,
     task::{
         arena::TASK_ARENA,
-        header::Header,
+        header::{Header, TASK_MAGIC},
         state::*,
         utils::{abort_on_panic, extend},
         Task,
@@ -137,6 +137,7 @@ where
 
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
+                magic: TASK_MAGIC,
                 notifier: sys::get_sleep_notifier_for(executor_id).unwrap(),
                 state: SCHEDULED | HANDLE,
                 latency_matters,
@@ -230,6 +231,18 @@ where
     /// Wakes a waker.
     unsafe fn do_wake(ptr: *const ()) {
         let raw = Self::from_ptr(ptr);
+
+        // DEFENSIVE CHECK: Validate magic number before dereferencing header.
+        // If executor was dropped, arena memory is freed and this will be garbage.
+        // This is a best-effort check - if it fails, we silently bail.
+        // Architectural contract: Tasks/wakers must not outlive their executor.
+        let magic = (*raw.header).magic;
+        if magic != TASK_MAGIC {
+            // Task memory likely freed (executor dropped). Silently ignore wake.
+            // This is programmer error - waker outlived executor.
+            return;
+        }
+
         if Self::thread_id() != Some(raw.my_id()) {
             dbg_context!(ptr, "foreign", {
                 let notifier = raw.notifier();

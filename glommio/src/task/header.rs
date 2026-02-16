@@ -16,10 +16,19 @@ use crate::{
     task::{raw::TaskVTable, state::*, utils::abort_on_panic},
 };
 
+/// Magic number for arena-allocated task validation.
+/// Checked before dereferencing to detect use-after-free from dead executors.
+pub(crate) const TASK_MAGIC: u32 = 0x474C_4F4D; // "GLOM" in ASCII
+
 /// The header of a task.
 ///
-/// This header is stored right at the beginning of every heap-allocated task.
+/// This header is stored right at the beginning of every arena-allocated task.
 pub(crate) struct Header {
+    /// Magic number for defensive validation (0x474C4F4D = "GLOM")
+    /// Helps detect use-after-free when wakers outlive their executor.
+    /// Non-atomic check - if arena freed, this will be garbage.
+    pub(crate) magic: u32,
+
     /// ID of the executor to which task belongs to or in other words by which
     /// task was spawned by
     pub(crate) notifier: Arc<SleepNotifier>,
