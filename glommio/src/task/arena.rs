@@ -346,6 +346,10 @@ impl Drop for TaskArena {
         //
         // Note: Glommio requires io_uring, which is Linux-only, so we always
         // have mprotect available.
+        //
+        // Miri compatibility: mprotect is a foreign function that Miri can't
+        // execute, so we skip it and just free the memory when running under Miri.
+        #[cfg(not(miri))]
         unsafe {
             let result = libc::mprotect(
                 self.memory.as_ptr() as *mut libc::c_void,
@@ -362,6 +366,14 @@ impl Drop for TaskArena {
                 libc::free(self.memory.as_ptr() as *mut libc::c_void);
             }
             // Success: Memory now inaccessible, any access = SIGSEGV
+        }
+
+        // When running under Miri, we can't use mprotect (foreign function),
+        // so we just free the memory normally.
+        #[cfg(miri)]
+        unsafe {
+            // SAFETY: Memory was allocated with posix_memalign, so free it with libc::free
+            libc::free(self.memory.as_ptr() as *mut libc::c_void);
         }
     }
 }
