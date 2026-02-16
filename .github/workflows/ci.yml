@@ -43,6 +43,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,8 +68,10 @@ jobs:
 
       - name: Run tests
         run: |
-          # Set memlock limits for io_uring
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo test --lib -- --test-threads=$(nproc)"
+          # Set higher memlock limits for io_uring (allow more parallel executors)
+          # Arena allocator: 100MB per executor, support 4 parallel tests = 400MB
+          # Add buffer for io_uring overhead: 512MB total
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo test --lib -- --test-threads=4"
 
   clippy:
     name: Clippy
@@ -179,6 +182,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -209,9 +213,9 @@ jobs:
 
       - name: Generate coverage
         run: |
-          # Set memlock limits for io_uring
+          # Set higher memlock limits for io_uring (allow more parallel executors)
           # Skip slow stress tests that take >60s under coverage instrumentation
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --lcov --output-path lcov.info -- --skip test_shares_high_disparity"
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo llvm-cov --lib --lcov --output-path lcov.info -- --skip test_shares_high_disparity --test-threads=2"
           # Fix ownership for Codecov upload
           sudo chown runner:docker lcov.info
 
@@ -225,7 +229,7 @@ jobs:
       - name: Generate HTML report
         run: |
           # Skip slow stress tests that take >60s under coverage instrumentation
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 512 && ulimit -Hl 512 && cargo llvm-cov --lib --html -- --skip test_shares_high_disparity"
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo llvm-cov --lib --html -- --skip test_shares_high_disparity --test-threads=2"
           # Fix ownership so upload-artifact can read the files
           sudo chown -R runner:docker target/llvm-cov/html/
 
