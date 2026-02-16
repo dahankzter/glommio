@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771246489733,
+  "lastUpdate": 1771246633023,
   "repoUrl": "https://github.com/dahankzter/glommio",
   "entries": {
     "Timer Benchmarks": [
@@ -3833,6 +3833,432 @@ window.BENCHMARK_DATA = {
             "name": "timer_churn_staged_wheel/100000",
             "value": 2461707,
             "range": "± 278997",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "committer": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "distinct": true,
+          "id": "67a98e615c9633e6db64d4db45aea7b35c55f7d1",
+          "message": "fix: run fmt directly on macOS to avoid Lima filesystem issues\n\nMake 'make fmt' run cargo fmt directly on macOS instead of through Lima,\nsince Lima has read-only filesystem issues when trying to write formatted\nfiles back to macOS.\n\nChanges:\n- macOS: cargo fmt --all (direct, no Lima)\n- Linux: cargo fmt --all (through run_cargo as before)\n\nThis fixes the \"Read-only file system (os error 30)\" error when running\n'make fmt' on macOS.\n\nOther commands (lint, check, test) continue to run through Lima since\nthey are read-only operations.\n\nSigned-off-by: Henrik Ma Johansson <dahankzter@gmail.com>",
+          "timestamp": "2026-02-16T13:33:32+01:00",
+          "tree_id": "09ab67fd6b186a707414ba89f23abacc9c795b92",
+          "url": "https://github.com/dahankzter/glommio/commit/67a98e615c9633e6db64d4db45aea7b35c55f7d1"
+        },
+        "date": 1771246632712,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "timer_insert_btreemap/100",
+            "value": 5636,
+            "range": "± 163",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/1000",
+            "value": 87615,
+            "range": "± 2244",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/10000",
+            "value": 1054180,
+            "range": "± 10579",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/100000",
+            "value": 11530425,
+            "range": "± 184833",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100",
+            "value": 15772,
+            "range": "± 102",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/1000",
+            "value": 96690,
+            "range": "± 1455",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/10000",
+            "value": 793762,
+            "range": "± 10211",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100000",
+            "value": 7872413,
+            "range": "± 33532",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100",
+            "value": 4216,
+            "range": "± 311",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/1000",
+            "value": 96224,
+            "range": "± 1191",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/10000",
+            "value": 826922,
+            "range": "± 50754",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100000",
+            "value": 8101060,
+            "range": "± 69429",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/0",
+            "value": 120,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/1000",
+            "value": 121,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/10000",
+            "value": 133,
+            "range": "± 32",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/100000",
+            "value": 151,
+            "range": "± 41",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/0",
+            "value": 84,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/1000",
+            "value": 83,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/10000",
+            "value": 86,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/100000",
+            "value": 110,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/0",
+            "value": 76,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/1000",
+            "value": 76,
+            "range": "± 14",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/10000",
+            "value": 83,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/100000",
+            "value": 109,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100",
+            "value": 4390,
+            "range": "± 95",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/1000",
+            "value": 47446,
+            "range": "± 981",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/10000",
+            "value": 607637,
+            "range": "± 5831",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100000",
+            "value": 6385240,
+            "range": "± 140391",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100",
+            "value": 11824,
+            "range": "± 25885",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/1000",
+            "value": 59003,
+            "range": "± 446132",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/10000",
+            "value": 547701,
+            "range": "± 42734",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100000",
+            "value": 6755502,
+            "range": "± 284975",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100",
+            "value": 3177,
+            "range": "± 366",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/1000",
+            "value": 57207,
+            "range": "± 430708",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/10000",
+            "value": 558530,
+            "range": "± 43730",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100000",
+            "value": 6762226,
+            "range": "± 385302",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100",
+            "value": 3272,
+            "range": "± 50673",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/1000",
+            "value": 30512,
+            "range": "± 107078",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/10000",
+            "value": 297445,
+            "range": "± 25186",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100000",
+            "value": 3083201,
+            "range": "± 81357",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100",
+            "value": 13612,
+            "range": "± 126",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/1000",
+            "value": 90744,
+            "range": "± 929",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/10000",
+            "value": 1007648,
+            "range": "± 14539",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100000",
+            "value": 17623826,
+            "range": "± 281709",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100",
+            "value": 3800,
+            "range": "± 110",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/1000",
+            "value": 93165,
+            "range": "± 103900",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/10000",
+            "value": 1053379,
+            "range": "± 6075",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100000",
+            "value": 17424198,
+            "range": "± 193278",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/1000",
+            "value": 40517,
+            "range": "± 93194",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/10000",
+            "value": 301064,
+            "range": "± 4890",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/100000",
+            "value": 3244378,
+            "range": "± 149608",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/1000",
+            "value": 48971,
+            "range": "± 335942",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/10000",
+            "value": 285331,
+            "range": "± 62870",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/100000",
+            "value": 2767669,
+            "range": "± 210759",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100",
+            "value": 6616,
+            "range": "± 295",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/1000",
+            "value": 155489,
+            "range": "± 1563",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/10000",
+            "value": 1563711,
+            "range": "± 10193",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100000",
+            "value": 19474106,
+            "range": "± 219254",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/1000",
+            "value": 106361,
+            "range": "± 13782",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/10000",
+            "value": 311313,
+            "range": "± 33529",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/100000",
+            "value": 2230833,
+            "range": "± 56094",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/1000",
+            "value": 90574,
+            "range": "± 1682",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/10000",
+            "value": 294506,
+            "range": "± 36577",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/100000",
+            "value": 2226635,
+            "range": "± 262731",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/1000",
+            "value": 91497,
+            "range": "± 1984",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/10000",
+            "value": 297067,
+            "range": "± 37974",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/100000",
+            "value": 2222316,
+            "range": "± 245251",
             "unit": "ns/iter"
           }
         ]
