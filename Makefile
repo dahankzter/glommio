@@ -111,6 +111,26 @@ test-lib:
 	@echo "→ Running library tests on $(PLATFORM)..."
 	@$(call run_cargo,test --package glommio --lib)
 
+test-arena:
+	@echo "→ Running arena allocator tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib task::arena)
+
+test-executor:
+	@echo "→ Running executor tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib executor::test)
+
+# Lima-specific: Run tests single-threaded with increased limits
+test-lima-safe:
+	@echo "→ Running tests with Lima-safe configuration..."
+ifeq ($(UNAME_S),Darwin)
+	@lima sh -c '. ~/.profile && . ~/.cargo/env && CARGO_TARGET_DIR=$(LIMA_TARGET_DIR) cargo test --package glommio --lib task::arena'
+	@echo "✓ Arena tests passed"
+	@lima sh -c '. ~/.profile && . ~/.cargo/env && CARGO_TARGET_DIR=$(LIMA_TARGET_DIR) cargo test --package glommio --lib task::tests'
+	@echo "✓ Task integration tests passed"
+else
+	@echo "This target is for macOS/Lima only. Use 'make test' on Linux."
+endif
+
 bench:
 	@echo "→ Running benchmarks on $(PLATFORM)..."
 	@$(call run_cargo,bench --benches)
