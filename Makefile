@@ -263,8 +263,13 @@ coverage-lcov:
 # =============================================================================
 
 fmt:
-	@echo "→ Formatting code on $(PLATFORM)..."
+	@echo "→ Formatting code..."
+ifeq ($(UNAME_S),Darwin)
+	@echo "  (Running directly on macOS - Lima has filesystem write issues)"
+	@cargo fmt --all
+else
 	@$(call run_cargo,fmt --all)
+endif
 
 lint:
 	@echo "→ Running clippy on $(PLATFORM)..."
