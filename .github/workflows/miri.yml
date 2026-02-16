@@ -1,0 +1,107 @@
+name: Miri (Undefined Behavior Detection)
+
+on:
+  pull_request:
+    paths:
+      - 'glommio/src/task/arena.rs'
+      - 'glommio/src/task/raw.rs'
+      - '.github/workflows/miri.yml'
+  push:
+    branches: [ master ]
+    paths:
+      - 'glommio/src/task/arena.rs'
+      - 'glommio/src/task/raw.rs'
+      - '.github/workflows/miri.yml'
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+  # Miri flags for stricter checking
+  MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check
+
+jobs:
+  miri-unsafe-code:
+    name: Test Unsafe Code for UB
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Nightly with Miri
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: miri
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-miri-
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri on Arena Allocator Tests
+        run: |
+          echo "🔍 Testing arena allocator for undefined behavior..."
+          cargo miri test --package glommio --lib task::arena
+          echo "✅ No undefined behavior detected in arena code!"
+
+      - name: Comment on PR (if Miri passes)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ **Miri Check Passed** - No undefined behavior detected in arena allocator unsafe code!'
+            })
+
+  # Optional: Full library Miri check (manual only, takes several minutes)
+  miri-full:
+    name: Full Library UB Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust Nightly with Miri
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: miri
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-miri-full-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-miri-full-
+
+      - name: Setup Miri
+        run: cargo miri setup
+
+      - name: Run Miri on Full Library
+        run: |
+          echo "🔍 Testing full library for undefined behavior..."
+          echo "⚠️  This may take several minutes..."
+          cargo miri test --package glommio --lib
+          echo "✅ No undefined behavior detected in full library!"
