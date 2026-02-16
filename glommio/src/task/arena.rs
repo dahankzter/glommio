@@ -24,11 +24,14 @@
 //! - Intrusive free-list (zero allocation overhead)
 //! - Bulk deallocation on executor drop (no per-task free)
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::Layout;
 use std::cell::RefCell;
 use std::ptr::NonNull;
 
 scoped_tls::scoped_thread_local!(pub(crate) static TASK_ARENA: TaskArena);
+
+/// Page size for mprotect alignment (required for PROT_NONE to work)
+const PAGE_SIZE: usize = 4096;
 
 /// Fixed slot size for all arena allocations (1024 bytes)
 ///
@@ -76,13 +79,21 @@ impl TaskArena {
     /// Create a new task arena with initialized free list
     pub(crate) fn new() -> Self {
         let capacity = SLOT_CAPACITY * SLOT_SIZE;
-        let layout =
-            Layout::from_size_align(capacity, MAX_ALIGN).expect("Failed to create arena layout");
 
-        // SAFETY: We allocate a large block upfront and manage it ourselves
+        // Allocate page-aligned memory for mprotect compatibility
+        // SAFETY: posix_memalign requires:
+        // 1. alignment is a power of 2 (PAGE_SIZE = 4096 ✓)
+        // 2. alignment is a multiple of sizeof(void*) (4096 > 8 ✓)
+        // 3. size is a multiple of alignment (capacity % PAGE_SIZE == 0 ✓)
         let memory = unsafe {
-            let ptr = alloc(layout);
-            NonNull::new(ptr).expect("Failed to allocate task arena")
+            let mut ptr: *mut libc::c_void = std::ptr::null_mut();
+            let result = libc::posix_memalign(&mut ptr, PAGE_SIZE, capacity);
+
+            if result != 0 {
+                panic!("Failed to allocate page-aligned task arena: errno={}", result);
+            }
+
+            NonNull::new(ptr as *mut u8).expect("posix_memalign returned null")
         };
 
         let arena = Self {
@@ -346,12 +357,11 @@ impl Drop for TaskArena {
                     errno
                 );
                 eprintln!(
-                    "⚠️  Falling back to dealloc - use-after-free protection disabled!"
+                    "⚠️  Falling back to free - use-after-free protection disabled!"
                 );
                 // Fallback: deallocate normally (less safe)
-                let layout = Layout::from_size_align(self.capacity, 64)
-                    .expect("Failed to create arena layout");
-                dealloc(self.memory.as_ptr(), layout);
+                // SAFETY: Memory was allocated with posix_memalign, so free it with libc::free
+                libc::free(self.memory.as_ptr() as *mut libc::c_void);
             }
             // Success: Memory now inaccessible, any access = SIGSEGV
         }
