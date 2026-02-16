@@ -149,3 +149,16 @@ codegen-units = 1
 opt-level = 3
 # Include debug info for profiling (doesn't affect performance)
 debug = true
+
+# Examples that use spawn_local need the unsafe_detached feature
+[[example]]
+name = "simple_spawn_bench"
+required-features = ["unsafe_detached"]
+
+[[example]]
+name = "timer_soak_test"
+required-features = ["unsafe_detached"]
+
+[[example]]
+name = "test_arena"
+required-features = ["unsafe_detached"]

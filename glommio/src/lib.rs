@@ -456,10 +456,11 @@ pub use crate::{
     sys::hardware_topology::CpuLocation,
 };
 
-// Internal: always available for crate code
+// When feature is disabled: internal only (pub(crate))
+// When feature is enabled: public (pub, which is also accessible internally)
+#[cfg(not(feature = "unsafe_detached"))]
 pub(crate) use crate::executor::{spawn_local, spawn_local_into};
 
-// External: gated by unsafe_detached feature flag
 #[cfg(feature = "unsafe_detached")]
 pub use crate::executor::{spawn_local, spawn_local_into};
 

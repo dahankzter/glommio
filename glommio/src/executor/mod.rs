@@ -1958,6 +1958,16 @@ pub async fn yield_if_needed() {
 ///     assert_eq!(task.await, 3);
 /// });
 /// ```
+#[cfg_attr(not(feature = "unsafe_detached"), allow(dead_code))]
+#[cfg(feature = "unsafe_detached")]
+pub fn spawn_local<T>(future: impl Future<Output = T> + 'static) -> Task<T>
+where
+    T: 'static,
+{
+    executor().spawn_local(future)
+}
+
+#[cfg(not(feature = "unsafe_detached"))]
 pub(crate) fn spawn_local<T>(future: impl Future<Output = T> + 'static) -> Task<T>
 where
     T: 'static,
@@ -2026,6 +2036,18 @@ pub fn allocate_dma_buffer_global(size: usize) -> DmaBuffer {
 /// assert_eq!(task.await, 3);
 /// # });
 /// ```
+#[cfg(feature = "unsafe_detached")]
+pub fn spawn_local_into<T>(
+    future: impl Future<Output = T> + 'static,
+    handle: TaskQueueHandle,
+) -> Result<Task<T>>
+where
+    T: 'static,
+{
+    executor().spawn_local_into(future, handle)
+}
+
+#[cfg(not(feature = "unsafe_detached"))]
 pub(crate) fn spawn_local_into<T>(
     future: impl Future<Output = T> + 'static,
     handle: TaskQueueHandle,
@@ -2561,6 +2583,24 @@ impl ExecutorProxy {
     ///     assert_eq!(task.await, 3);
     /// });
     /// ```
+    #[cfg(feature = "unsafe_detached")]
+    pub fn spawn_local<T>(&self, future: impl Future<Output = T> + 'static) -> Task<T>
+    where
+        T: 'static,
+    {
+        #[cfg(not(feature = "native-tls"))]
+        return LOCAL_EX.with(|local_ex| Task::<T>(local_ex.spawn_internal(future)));
+
+        #[cfg(feature = "native-tls")]
+        return Task::<T>(unsafe {
+            LOCAL_EX
+                .as_ref()
+                .expect("this thread doesn't have a LocalExecutor running")
+                .spawn_internal(future)
+        });
+    }
+
+    #[cfg(not(feature = "unsafe_detached"))]
     pub(crate) fn spawn_local<T>(&self, future: impl Future<Output = T> + 'static) -> Task<T>
     where
         T: 'static,
@@ -2664,6 +2704,29 @@ impl ExecutorProxy {
     /// assert_eq!(task.await, 3);
     /// # });
     /// ```
+    #[cfg(feature = "unsafe_detached")]
+    pub fn spawn_local_into<T>(
+        &self,
+        future: impl Future<Output = T> + 'static,
+        handle: TaskQueueHandle,
+    ) -> Result<Task<T>>
+    where
+        T: 'static,
+    {
+        #[cfg(not(feature = "native-tls"))]
+        return LOCAL_EX.with(|local_ex| local_ex.spawn_into(future, handle).map(Task::<T>));
+
+        #[cfg(feature = "native-tls")]
+        return unsafe {
+            LOCAL_EX
+                .as_ref()
+                .expect("this thread doesn't have a LocalExecutor running")
+                .spawn_into(future, handle)
+        }
+        .map(Task::<T>);
+    }
+
+    #[cfg(not(feature = "unsafe_detached"))]
     pub(crate) fn spawn_local_into<T>(
         &self,
         future: impl Future<Output = T> + 'static,
