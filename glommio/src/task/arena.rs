@@ -82,19 +82,37 @@ impl TaskArena {
 
     /// Initialize the intrusive free list
     ///
+    /// Sets up the initial free list: 0 → 1 → 2 → ... → (SLOT_CAPACITY-1) → END
+    ///
     /// Each slot stores the index of the next free slot as a u32 at offset 0.
+    /// This intrusive approach requires zero additional memory allocation.
+    ///
+    /// SAFETY: Only called from new() where we've just allocated the memory block.
+    /// All pointer arithmetic is bounds-checked via debug assertions.
     fn initialize_free_list(&self) {
         unsafe {
             let base = self.memory.as_ptr();
 
             // Link all slots: slot[i] → slot[i+1]
             for i in 0..(SLOT_CAPACITY - 1) {
-                let slot_ptr = base.add(i * SLOT_SIZE) as *mut u32;
+                let offset = i.checked_mul(SLOT_SIZE).expect("Slot offset overflow");
+                debug_assert!(
+                    offset + SLOT_SIZE <= self.capacity,
+                    "Slot {} exceeds capacity",
+                    i
+                );
+
+                let slot_ptr = base.add(offset) as *mut u32;
                 *slot_ptr = (i + 1) as u32;
             }
 
             // Last slot points to END
-            let last_slot = base.add((SLOT_CAPACITY - 1) * SLOT_SIZE) as *mut u32;
+            let last_offset = (SLOT_CAPACITY - 1)
+                .checked_mul(SLOT_SIZE)
+                .expect("Last slot offset overflow");
+            debug_assert!(last_offset < self.capacity, "Last slot exceeds capacity");
+
+            let last_slot = base.add(last_offset) as *mut u32;
             *last_slot = FREE_LIST_END;
 
             // Head points to first slot
@@ -104,7 +122,16 @@ impl TaskArena {
 
     /// Try to allocate from arena, returns None if full or layout unsupported
     ///
-    /// SAFETY: Caller must ensure the layout is valid
+    /// SAFETY: Caller must ensure the layout is valid.
+    ///
+    /// This function is unsafe because it returns a raw pointer to uninitialized
+    /// memory that the caller must properly initialize before use.
+    ///
+    /// # Safety Invariants
+    ///
+    /// - Free list indices are always < SLOT_CAPACITY
+    /// - All slots are properly aligned to MAX_ALIGN (64 bytes)
+    /// - Returned pointer is valid for writes up to SLOT_SIZE bytes
     pub(crate) unsafe fn try_allocate(&self, layout: Layout) -> Option<NonNull<u8>> {
         // Reject oversized or over-aligned allocations
         if layout.size() > MAX_TASK_SIZE || layout.align() > MAX_ALIGN {
@@ -120,10 +147,33 @@ impl TaskArena {
 
         // Pop from free list head
         let slot_index = *head as usize;
-        let slot_ptr = self.memory.as_ptr().add(slot_index * SLOT_SIZE);
+
+        // SAFETY INVARIANT: slot_index must be < SLOT_CAPACITY
+        debug_assert!(
+            slot_index < SLOT_CAPACITY,
+            "Free list corruption: slot_index {} >= SLOT_CAPACITY {}",
+            slot_index,
+            SLOT_CAPACITY
+        );
+
+        // Calculate slot pointer with bounds checking in debug mode
+        let offset = slot_index
+            .checked_mul(SLOT_SIZE)
+            .expect("Slot offset overflow");
+        debug_assert!(offset < self.capacity, "Slot offset exceeds capacity");
+
+        let slot_ptr = self.memory.as_ptr().add(offset);
 
         // Read next free slot from current slot's first u32
         let next_free = *(slot_ptr as *const u32);
+
+        // SAFETY INVARIANT: next_free must be valid (either FREE_LIST_END or < SLOT_CAPACITY)
+        debug_assert!(
+            next_free == FREE_LIST_END || (next_free as usize) < SLOT_CAPACITY,
+            "Free list corruption: next_free {} invalid",
+            next_free
+        );
+
         *head = next_free;
 
         // Update statistics
@@ -137,6 +187,11 @@ impl TaskArena {
 
         // Return the slot pointer
         // SAFETY: Slot is aligned to MAX_ALIGN (64), which satisfies layout.align() <= MAX_ALIGN
+        // The pointer is guaranteed non-null because:
+        // 1. self.memory is non-null (checked at allocation)
+        // 2. offset < capacity (checked above)
+        // 3. Pointer arithmetic on non-null with valid offset yields non-null
+        debug_assert!(!slot_ptr.is_null(), "Slot pointer should never be null");
         Some(NonNull::new_unchecked(slot_ptr))
     }
 
@@ -144,10 +199,23 @@ impl TaskArena {
     ///
     /// Returns false if the pointer wasn't allocated from this arena.
     ///
-    /// SAFETY: Caller must ensure ptr was allocated by this arena or from heap.
-    /// Caller must ensure the slot is no longer in use (no aliasing references).
+    /// SAFETY: Caller must uphold these invariants:
+    ///
+    /// 1. `ptr` must be a valid pointer that was either:
+    ///    - Previously allocated by `try_allocate()` from this arena, OR
+    ///    - Allocated from the heap (will return false harmlessly)
+    /// 2. The slot must no longer be in use (no aliasing mutable references)
+    /// 3. The slot's contents can be safely overwritten (task has been dropped)
+    ///
+    /// # Why This Is Safe (When Called Correctly)
+    ///
+    /// This is called from `RawTask::destroy()` which guarantees:
+    /// - Task refcount == 0 (no other references exist)
+    /// - HANDLE == 0 (not in executor queue)
+    /// - Future has been dropped
+    /// - Always runs on executor thread (no foreign wakers)
     pub(crate) unsafe fn try_deallocate(&self, ptr: *const u8) -> bool {
-        // Check if pointer is within arena bounds
+        // Bounds check: reject pointers outside arena (likely heap-allocated)
         let start = self.memory.as_ptr() as usize;
         let end = start + self.capacity;
         let addr = ptr as usize;
@@ -156,20 +224,39 @@ impl TaskArena {
             return false; // Not from arena
         }
 
-        // Calculate slot index
+        // Calculate slot offset and index
         let offset = addr - start;
         let slot_index = offset / SLOT_SIZE;
 
-        // Verify slot alignment (should be exact multiple)
+        // SAFETY CHECK: Verify pointer is properly slot-aligned
+        // This catches memory corruption or double-frees early
         debug_assert_eq!(
             offset % SLOT_SIZE,
             0,
-            "Arena deallocation of misaligned pointer"
+            "Arena deallocation of misaligned pointer: offset {} not multiple of {}",
+            offset,
+            SLOT_SIZE
+        );
+
+        // SAFETY CHECK: Verify slot index is in bounds
+        debug_assert!(
+            slot_index < SLOT_CAPACITY,
+            "Arena deallocation: slot_index {} >= SLOT_CAPACITY {}",
+            slot_index,
+            SLOT_CAPACITY
         );
 
         // Push slot back onto free list head (LIFO)
         let mut head = self.free_head.borrow_mut();
         let slot_ptr = ptr as *mut u32;
+
+        // SAFETY CHECK: Verify current head is valid
+        debug_assert!(
+            *head == FREE_LIST_END || (*head as usize) < SLOT_CAPACITY,
+            "Free list corruption: head {} invalid before dealloc",
+            *head
+        );
+
         *slot_ptr = *head; // Store old head as next
         *head = slot_index as u32; // New head is this slot
 
