@@ -273,22 +273,6 @@ impl TaskArena {
         true
     }
 
-    /// Record a heap fallback allocation
-    pub(crate) fn record_heap_fallback(&self) {
-        *self.heap_fallback_allocs.borrow_mut() += 1;
-    }
-
-    /// Check if a pointer is within this arena's address range
-    ///
-    /// Returns true if pointer is within [memory, memory+capacity).
-    /// Does NOT verify the pointer is valid or properly aligned.
-    pub(crate) fn contains(&self, ptr: *const u8) -> bool {
-        let start = self.memory.as_ptr() as usize;
-        let end = start + self.capacity;
-        let addr = ptr as usize;
-        addr >= start && addr < end
-    }
-
     /// Get statistics for measuring arena effectiveness
     #[allow(dead_code)]
     pub(crate) fn stats(&self) -> ArenaStats {

@@ -23,7 +23,7 @@ use crate::{
         arena::TASK_ARENA,
         header::Header,
         state::*,
-        utils::{abort, abort_on_panic, extend},
+        utils::{abort_on_panic, extend},
         Task,
     },
 };
@@ -424,7 +424,6 @@ where
             TaskDebugger::unregister(ptr);
 
             let raw = Self::from_ptr(ptr);
-            let task_layout = Self::task_layout();
 
             // We need a safeguard against panics because destructors can panic.
             abort_on_panic(|| {
