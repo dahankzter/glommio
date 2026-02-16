@@ -4,7 +4,7 @@ fn main() {
     // Test that mprotect works without warnings
     LocalExecutor::default().run(async {
         let result = glommio::executor()
-            .spawn_scope(|scope| async move {
+            .spawn(|scope| async move {
                 let h1 = scope.spawn(async { 1 + 1 });
                 let h2 = scope.spawn(async { 2 + 2 });
 

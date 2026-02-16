@@ -8,7 +8,7 @@ fn main() {
         // Warm up
         for _ in 0..1000 {
             glommio::executor()
-                .spawn_scope(|scope| async move {
+                .spawn(|scope| async move {
                     let _ = scope.spawn(async { 42 }).await;
                 })
                 .await;
@@ -20,7 +20,7 @@ fn main() {
 
         for _ in 0..iterations {
             glommio::executor()
-                .spawn_scope(|scope| async move {
+                .spawn(|scope| async move {
                     let _ = scope.spawn(async { 42 }).await;
                 })
                 .await;
@@ -42,7 +42,7 @@ fn main() {
 
         for _ in 0..batch_iterations {
             glommio::executor()
-                .spawn_scope(|scope| async move {
+                .spawn(|scope| async move {
                     let mut handles = Vec::with_capacity(batch_size);
                     for i in 0..batch_size {
                         handles.push(scope.spawn(async move { i }));
@@ -70,7 +70,7 @@ fn main() {
         let start = Instant::now();
 
         glommio::executor()
-            .spawn_scope(|scope| async move {
+            .spawn(|scope| async move {
                 let mut handles = Vec::with_capacity(concurrent_tasks);
                 for i in 0..concurrent_tasks {
                     handles.push(scope.spawn(async move { i }));
@@ -97,7 +97,7 @@ fn main() {
 
         for _ in 0..recycling_iterations {
             glommio::executor()
-                .spawn_scope(|scope| async move {
+                .spawn(|scope| async move {
                     let _ = scope.spawn(async { 42 }).await;
                 })
                 .await;
