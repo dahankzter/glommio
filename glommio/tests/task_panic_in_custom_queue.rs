@@ -7,7 +7,9 @@ use glommio::{Latency, LocalExecutorBuilder, Placement, Shares};
 use std::panic;
 use std::time::Duration;
 
+// These tests require spawn_local_into (unsafe detached spawn)
 #[test]
+#[cfg(feature = "unsafe_detached")]
 fn test_panic_in_default_queue() {
     // This should work - panic in default queue is handled correctly
     let ex = LocalExecutorBuilder::new(Placement::Fixed(0))
@@ -18,7 +20,7 @@ fn test_panic_in_default_queue() {
         ex.run(async move {
             let tq = glommio::executor().current_task_queue();
             let task1 = unsafe {
-                glommio::spawn_scoped_local_into(
+                glommio::spawn_local_into(
                     async move {
                         glommio::timer::sleep(Duration::from_millis(1)).await;
                         panic!("intentional panic in default queue");
@@ -29,7 +31,7 @@ fn test_panic_in_default_queue() {
             .unwrap();
 
             let task2 = unsafe {
-                glommio::spawn_scoped_local_into(
+                glommio::spawn_local_into(
                     async move {
                         glommio::timer::sleep(Duration::from_secs(10)).await;
                     },
@@ -46,6 +48,7 @@ fn test_panic_in_default_queue() {
 }
 
 #[test]
+#[cfg(feature = "unsafe_detached")]
 fn test_panic_in_custom_queue() {
     // This is the critical test - panic in custom queue should NOT abort process
     // Before fix: This would abort the entire process
@@ -64,7 +67,7 @@ fn test_panic_in_custom_queue() {
             );
 
             let task1 = unsafe {
-                glommio::spawn_scoped_local_into(
+                glommio::spawn_local_into(
                     async move {
                         glommio::timer::sleep(Duration::from_millis(1)).await;
                         panic!("intentional panic in custom queue");
@@ -75,7 +78,7 @@ fn test_panic_in_custom_queue() {
             .unwrap();
 
             let task2 = unsafe {
-                glommio::spawn_scoped_local_into(
+                glommio::spawn_local_into(
                     async move {
                         glommio::timer::sleep(Duration::from_secs(10)).await;
                     },
@@ -96,6 +99,7 @@ fn test_panic_in_custom_queue() {
 }
 
 #[test]
+#[cfg(feature = "unsafe_detached")]
 fn test_multiple_panics_in_custom_queues() {
     // Test multiple custom queues with panics
     let ex = LocalExecutorBuilder::new(Placement::Fixed(0))
@@ -117,7 +121,7 @@ fn test_multiple_panics_in_custom_queues() {
             );
 
             let task1 = unsafe {
-                glommio::spawn_scoped_local_into(
+                glommio::spawn_local_into(
                     async move {
                         glommio::timer::sleep(Duration::from_millis(1)).await;
                         panic!("panic in queue 1");
@@ -128,7 +132,7 @@ fn test_multiple_panics_in_custom_queues() {
             .unwrap();
 
             let task2 = unsafe {
-                glommio::spawn_scoped_local_into(
+                glommio::spawn_local_into(
                     async move {
                         glommio::timer::sleep(Duration::from_millis(2)).await;
                         panic!("panic in queue 2");
