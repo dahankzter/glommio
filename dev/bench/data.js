@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771180845431,
+  "lastUpdate": 1771246208199,
   "repoUrl": "https://github.com/dahankzter/glommio",
   "entries": {
     "Timer Benchmarks": [
@@ -2981,6 +2981,432 @@ window.BENCHMARK_DATA = {
             "name": "timer_churn_staged_wheel/100000",
             "value": 2213481,
             "range": "± 251934",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "committer": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "distinct": true,
+          "id": "ac558d8c9c9c456512fd7b10f212620c2211b6a9",
+          "message": "feat: add make targets for all test modules\n\nAdd granular test targets for each major module, making it easy to\ntest specific areas of the codebase without running the full suite.\n\nNew targets:\n- make test-arena        - Arena allocator tests (8 tests)\n- make test-channels     - Channel tests\n- make test-controllers  - Controller tests\n- make test-error        - Error handling tests (19 tests)\n- make test-executor     - Executor tests\n- make test-io           - I/O tests\n- make test-net          - Network tests\n- make test-sync         - Synchronization tests\n- make test-task         - Task tests (22 tests, includes arena integration)\n- make test-timer        - Timer tests\n\nBenefits:\n- Fast iteration on specific modules\n- Works perfectly on Lima (no resource limits)\n- Clear test organization\n- Easy to run related tests together\n\nUpdated help output to list all module targets in organized sections.\nAll targets tested and working on macOS/Lima.\n\nSigned-off-by: Henrik Ma Johansson <dahankzter@gmail.com>",
+          "timestamp": "2026-02-16T12:01:58+01:00",
+          "tree_id": "723f827dda00478e40f03d9e2209af694dab9ba9",
+          "url": "https://github.com/dahankzter/glommio/commit/ac558d8c9c9c456512fd7b10f212620c2211b6a9"
+        },
+        "date": 1771246207723,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "timer_insert_btreemap/100",
+            "value": 5605,
+            "range": "± 711",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/1000",
+            "value": 84756,
+            "range": "± 1380",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/10000",
+            "value": 1035048,
+            "range": "± 6366",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/100000",
+            "value": 12745769,
+            "range": "± 867717",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100",
+            "value": 15901,
+            "range": "± 445",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/1000",
+            "value": 96069,
+            "range": "± 1656",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/10000",
+            "value": 799011,
+            "range": "± 15108",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100000",
+            "value": 8136084,
+            "range": "± 424650",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100",
+            "value": 4215,
+            "range": "± 213",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/1000",
+            "value": 94711,
+            "range": "± 1464",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/10000",
+            "value": 820170,
+            "range": "± 9499",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100000",
+            "value": 8471572,
+            "range": "± 565347",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/0",
+            "value": 122,
+            "range": "± 35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/1000",
+            "value": 117,
+            "range": "± 25",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/10000",
+            "value": 123,
+            "range": "± 27",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/100000",
+            "value": 167,
+            "range": "± 41",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/0",
+            "value": 102,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/1000",
+            "value": 103,
+            "range": "± 22",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/10000",
+            "value": 104,
+            "range": "± 24",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/100000",
+            "value": 129,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/0",
+            "value": 95,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/1000",
+            "value": 102,
+            "range": "± 20",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/10000",
+            "value": 105,
+            "range": "± 19",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/100000",
+            "value": 128,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100",
+            "value": 4409,
+            "range": "± 72",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/1000",
+            "value": 47424,
+            "range": "± 989",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/10000",
+            "value": 596372,
+            "range": "± 11971",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100000",
+            "value": 7135382,
+            "range": "± 363530",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100",
+            "value": 11815,
+            "range": "± 199",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/1000",
+            "value": 58967,
+            "range": "± 434433",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/10000",
+            "value": 552624,
+            "range": "± 43279",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100000",
+            "value": 6938398,
+            "range": "± 379784",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100",
+            "value": 3972,
+            "range": "± 339",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/1000",
+            "value": 57068,
+            "range": "± 461035",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/10000",
+            "value": 559535,
+            "range": "± 42026",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100000",
+            "value": 6851122,
+            "range": "± 283071",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100",
+            "value": 3172,
+            "range": "± 45844",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/1000",
+            "value": 29539,
+            "range": "± 105588",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/10000",
+            "value": 289641,
+            "range": "± 50079",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100000",
+            "value": 3125561,
+            "range": "± 362847",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100",
+            "value": 13631,
+            "range": "± 223",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/1000",
+            "value": 90121,
+            "range": "± 1786",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/10000",
+            "value": 1022258,
+            "range": "± 7044",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100000",
+            "value": 16762950,
+            "range": "± 388161",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100",
+            "value": 3764,
+            "range": "± 76",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/1000",
+            "value": 91576,
+            "range": "± 2982",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/10000",
+            "value": 1076132,
+            "range": "± 24498",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100000",
+            "value": 17134819,
+            "range": "± 464365",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/1000",
+            "value": 39283,
+            "range": "± 63369",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/10000",
+            "value": 293663,
+            "range": "± 20828",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/100000",
+            "value": 3237380,
+            "range": "± 461101",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/1000",
+            "value": 48800,
+            "range": "± 226712",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/10000",
+            "value": 285350,
+            "range": "± 60379",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/100000",
+            "value": 2901684,
+            "range": "± 232596",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100",
+            "value": 6370,
+            "range": "± 227",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/1000",
+            "value": 151347,
+            "range": "± 2449",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/10000",
+            "value": 1503742,
+            "range": "± 6328",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100000",
+            "value": 20303341,
+            "range": "± 787949",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/1000",
+            "value": 105825,
+            "range": "± 19385",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/10000",
+            "value": 299126,
+            "range": "± 5907",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/100000",
+            "value": 2335418,
+            "range": "± 298352",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/1000",
+            "value": 90524,
+            "range": "± 165912",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/10000",
+            "value": 319498,
+            "range": "± 1776379",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/100000",
+            "value": 2224361,
+            "range": "± 233448",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/1000",
+            "value": 90864,
+            "range": "± 4723",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/10000",
+            "value": 296121,
+            "range": "± 35538",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/100000",
+            "value": 2220672,
+            "range": "± 243404",
             "unit": "ns/iter"
           }
         ]
