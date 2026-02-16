@@ -6,6 +6,8 @@
 .PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
 .PHONY: bench-timer bench-ci
 .PHONY: miri miri-arena miri-setup
+.PHONY: test-lib test-lima-safe test-arena test-channels test-controllers
+.PHONY: test-error test-executor test-io test-net test-sync test-task test-timer
 
 # =============================================================================
 # Platform Detection & Smart Cargo Commands
@@ -64,6 +66,18 @@ help:
 	@echo "  make test-lib          - Run library tests only"
 	@echo "  make test-lima-safe    - Run core tests in batches (macOS/Lima only)"
 	@echo ""
+	@echo "Module Tests (run individual modules):"
+	@echo "  make test-arena        - Arena allocator tests"
+	@echo "  make test-channels     - Channel tests"
+	@echo "  make test-controllers  - Controller tests"
+	@echo "  make test-error        - Error handling tests"
+	@echo "  make test-executor     - Executor tests"
+	@echo "  make test-io           - I/O tests"
+	@echo "  make test-net          - Network tests"
+	@echo "  make test-sync         - Synchronization tests"
+	@echo "  make test-task         - Task tests"
+	@echo "  make test-timer        - Timer tests"
+	@echo ""
 	@echo "Benchmarking:"
 	@echo "  make bench             - Run all benchmarks"
 	@echo "  make bench-timer       - Run timer benchmarks only"
@@ -112,13 +126,46 @@ test-lib:
 	@echo "→ Running library tests on $(PLATFORM)..."
 	@$(call run_cargo,test --package glommio --lib)
 
+# Module-specific test targets
 test-arena:
 	@echo "→ Running arena allocator tests on $(PLATFORM)..."
 	@$(call run_cargo,test --package glommio --lib task::arena)
 
+test-channels:
+	@echo "→ Running channel tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib channels)
+
+test-controllers:
+	@echo "→ Running controller tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib controllers)
+
+test-error:
+	@echo "→ Running error handling tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib error)
+
 test-executor:
 	@echo "→ Running executor tests on $(PLATFORM)..."
-	@$(call run_cargo,test --package glommio --lib executor::test)
+	@$(call run_cargo,test --package glommio --lib executor)
+
+test-io:
+	@echo "→ Running I/O tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib io)
+
+test-net:
+	@echo "→ Running network tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib net)
+
+test-sync:
+	@echo "→ Running synchronization tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib sync)
+
+test-task:
+	@echo "→ Running task tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib task)
+
+test-timer:
+	@echo "→ Running timer tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib timer)
 
 # Lima-specific: Run tests in batches to avoid resource exhaustion
 test-lima-safe:
