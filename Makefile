@@ -5,6 +5,7 @@
 .PHONY: help test build fmt lint check bench clean all
 .PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
 .PHONY: bench-timer bench-ci
+.PHONY: miri miri-arena miri-setup
 
 # =============================================================================
 # Platform Detection & Smart Cargo Commands
@@ -74,6 +75,11 @@ help:
 	@echo "  make coverage-open     - Generate and open HTML report"
 	@echo "  make coverage-lcov     - Generate lcov format (for CI)"
 	@echo ""
+	@echo "Miri (Undefined Behavior Detection):"
+	@echo "  make miri-setup        - Install and configure Miri"
+	@echo "  make miri-arena        - Test arena allocator unsafe code"
+	@echo "  make miri              - Test all library unsafe code (slow)"
+	@echo ""
 	@echo "Code Quality:"
 	@echo "  make fmt               - Format all code"
 	@echo "  make lint              - Run clippy linter"
@@ -120,6 +126,31 @@ bench-spawn:
 bench-ci:
 	@echo "→ Running benchmarks in CI mode (bencher format) on $(PLATFORM)..."
 	@$(call run_cargo,bench --bench timer_benchmark -- --output-format bencher)
+
+# =============================================================================
+# Miri - Undefined Behavior Detection
+# =============================================================================
+
+miri-setup:
+	@echo "→ Setting up Miri (requires nightly Rust)..."
+	@rustup toolchain install nightly --component miri
+	@rustup override set nightly
+	@cargo miri setup
+	@echo "✓ Miri ready! Run 'make miri-arena' to test unsafe code"
+
+miri-arena:
+	@echo "→ Running Miri on arena allocator tests..."
+	@echo "  (Testing unsafe code for undefined behavior)"
+	@$(call run_cargo,+nightly miri test --package glommio --lib task::arena)
+	@echo ""
+	@echo "✓ Miri found no undefined behavior in arena code!"
+
+miri:
+	@echo "→ Running Miri on full library test suite..."
+	@echo "  (This may take several minutes)"
+	@$(call run_cargo,+nightly miri test --package glommio --lib)
+	@echo ""
+	@echo "✓ Miri found no undefined behavior!"
 
 # =============================================================================
 # Coverage
