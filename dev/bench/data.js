@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1771246633023,
+  "lastUpdate": 1771249019063,
   "repoUrl": "https://github.com/dahankzter/glommio",
   "entries": {
     "Timer Benchmarks": [
@@ -4259,6 +4259,432 @@ window.BENCHMARK_DATA = {
             "name": "timer_churn_staged_wheel/100000",
             "value": 2222316,
             "range": "± 245251",
+            "unit": "ns/iter"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "committer": {
+            "email": "dahankzter@gmail.com",
+            "name": "Henrik Ma Johansson",
+            "username": "dahankzter"
+          },
+          "distinct": true,
+          "id": "a91f006b8c7e52e5bea201b53f885b5af976ac6c",
+          "message": "docs: fix rustdoc links to conditionally-public spawn functions\n\nFixed rustdoc errors where public documentation linked to\nspawn_local and spawn_local_into, which are private (pub(crate))\nwhen the unsafe_detached feature is not enabled.\n\nChanges:\n- Removed intra-doc links to spawn_local and spawn_local_into\n- Changed to plain text mentions (e.g., `spawn_local_into()`)\n- Removed unused link reference `[local_into]`\n\nThis allows documentation to build successfully with RUSTDOCFLAGS=\"-D warnings\"\nboth with and without the unsafe_detached feature.\n\nFixes CI error: \"public documentation links to private item\"\n\nSigned-off-by: Henrik Johansson <henrik.johansson@example.com>\nSigned-off-by: Henrik Ma Johansson <dahankzter@gmail.com>",
+          "timestamp": "2026-02-16T14:11:57+01:00",
+          "tree_id": "1fa3ecceb4c88e8ab378c266e4dd9019df549bda",
+          "url": "https://github.com/dahankzter/glommio/commit/a91f006b8c7e52e5bea201b53f885b5af976ac6c"
+        },
+        "date": 1771249018586,
+        "tool": "cargo",
+        "benches": [
+          {
+            "name": "timer_insert_btreemap/100",
+            "value": 5775,
+            "range": "± 81",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/1000",
+            "value": 74469,
+            "range": "± 1406",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/10000",
+            "value": 1068181,
+            "range": "± 24903",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_btreemap/100000",
+            "value": 12685331,
+            "range": "± 122682",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100",
+            "value": 16488,
+            "range": "± 172",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/1000",
+            "value": 99054,
+            "range": "± 2504",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/10000",
+            "value": 831300,
+            "range": "± 25894",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_timing_wheel/100000",
+            "value": 8021220,
+            "range": "± 162660",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100",
+            "value": 4211,
+            "range": "± 297",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/1000",
+            "value": 96686,
+            "range": "± 1693",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/10000",
+            "value": 856875,
+            "range": "± 18512",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_insert_staged_wheel/100000",
+            "value": 8153221,
+            "range": "± 60762",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/0",
+            "value": 148,
+            "range": "± 34",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/1000",
+            "value": 147,
+            "range": "± 37",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/10000",
+            "value": 154,
+            "range": "± 35",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_btreemap/100000",
+            "value": 168,
+            "range": "± 47",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/0",
+            "value": 78,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/1000",
+            "value": 80,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/10000",
+            "value": 83,
+            "range": "± 15",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_timing_wheel/100000",
+            "value": 95,
+            "range": "± 18",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/0",
+            "value": 74,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/1000",
+            "value": 77,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/10000",
+            "value": 69,
+            "range": "± 13",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_single_insert_staged_wheel/100000",
+            "value": 104,
+            "range": "± 26",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100",
+            "value": 4630,
+            "range": "± 65",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/1000",
+            "value": 49624,
+            "range": "± 710",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/10000",
+            "value": 654838,
+            "range": "± 5725",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_btreemap/100000",
+            "value": 7030314,
+            "range": "± 145427",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100",
+            "value": 13004,
+            "range": "± 16544",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/1000",
+            "value": 65642,
+            "range": "± 584577",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/10000",
+            "value": 609583,
+            "range": "± 9661",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_timing_wheel/100000",
+            "value": 7722188,
+            "range": "± 413374",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100",
+            "value": 3338,
+            "range": "± 492",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/1000",
+            "value": 63407,
+            "range": "± 526214",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/10000",
+            "value": 615031,
+            "range": "± 55562",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_remove_staged_wheel/100000",
+            "value": 7666938,
+            "range": "± 397656",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100",
+            "value": 3453,
+            "range": "± 28555",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/1000",
+            "value": 32538,
+            "range": "± 116192",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/10000",
+            "value": 326724,
+            "range": "± 29775",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_btreemap/100000",
+            "value": 3352753,
+            "range": "± 29588",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100",
+            "value": 14555,
+            "range": "± 145",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/1000",
+            "value": 94434,
+            "range": "± 1855",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/10000",
+            "value": 1041725,
+            "range": "± 4911",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_timing_wheel/100000",
+            "value": 17559089,
+            "range": "± 126344",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100",
+            "value": 3948,
+            "range": "± 43",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/1000",
+            "value": 96259,
+            "range": "± 982",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/10000",
+            "value": 1084562,
+            "range": "± 15639",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_process_expired_staged_wheel/100000",
+            "value": 18081969,
+            "range": "± 162154",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/1000",
+            "value": 42360,
+            "range": "± 45095",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/10000",
+            "value": 315666,
+            "range": "± 20780",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_btreemap/100000",
+            "value": 3848449,
+            "range": "± 94420",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/1000",
+            "value": 53119,
+            "range": "± 127289",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/10000",
+            "value": 302368,
+            "range": "± 68726",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_timing_wheel/100000",
+            "value": 2971155,
+            "range": "± 221163",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100",
+            "value": 6177,
+            "range": "± 198",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/1000",
+            "value": 157440,
+            "range": "± 4698",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/10000",
+            "value": 1569901,
+            "range": "± 8387",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_mixed_workload_staged_wheel/100000",
+            "value": 20519148,
+            "range": "± 337229",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/1000",
+            "value": 104975,
+            "range": "± 23444",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/10000",
+            "value": 314380,
+            "range": "± 39610",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_btreemap/100000",
+            "value": 2380556,
+            "range": "± 274518",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/1000",
+            "value": 97229,
+            "range": "± 2337",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/10000",
+            "value": 319643,
+            "range": "± 42207",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_timing_wheel/100000",
+            "value": 2396435,
+            "range": "± 265555",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/1000",
+            "value": 94681,
+            "range": "± 201585",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/10000",
+            "value": 315508,
+            "range": "± 43341",
+            "unit": "ns/iter"
+          },
+          {
+            "name": "timer_churn_staged_wheel/100000",
+            "value": 2399500,
+            "range": "± 262065",
             "unit": "ns/iter"
           }
         ]
