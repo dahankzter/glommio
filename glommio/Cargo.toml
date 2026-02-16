@@ -21,6 +21,10 @@ rust-version = "1.92"
 bench = []
 debugging = []
 
+# UNSAFE: Allow detached task spawning (tasks can outlive executor)
+# WARNING: Violates Shared-Nothing contract, use only if you understand the risks
+unsafe_detached = []
+
 # Unstable features based on nightly
 native-tls = []
 nightly = ["native-tls"]

@@ -318,12 +318,42 @@ impl TaskArena {
 
 impl Drop for TaskArena {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.capacity, 64)
-            .expect("Failed to create arena layout for deallocation");
-
-        // SAFETY: We allocated this memory in new()
+        // SAFETY STRATEGY: Use mprotect instead of dealloc to catch use-after-free
+        //
+        // Instead of freeing the memory (which allows reuse), we mark it as
+        // inaccessible using mprotect(PROT_NONE). This ensures any attempt to
+        // access tasks from a dropped executor triggers a clean SIGSEGV.
+        //
+        // Cost: 100MB virtual address space per dropped executor (not RSS)
+        // Benefit: Catches contract violations with clear crash location
+        //
+        // On 64-bit systems, virtual address space is ~128TB, so this is
+        // negligible. Memory will be reclaimed by OS on process exit.
+        //
+        // Note: Glommio requires io_uring, which is Linux-only, so we always
+        // have mprotect available.
         unsafe {
-            dealloc(self.memory.as_ptr(), layout);
+            let result = libc::mprotect(
+                self.memory.as_ptr() as *mut libc::c_void,
+                self.capacity,
+                libc::PROT_NONE,
+            );
+
+            if result != 0 {
+                let errno = *libc::__errno_location();
+                eprintln!(
+                    "⚠️  WARNING: mprotect failed for arena (errno={})",
+                    errno
+                );
+                eprintln!(
+                    "⚠️  Falling back to dealloc - use-after-free protection disabled!"
+                );
+                // Fallback: deallocate normally (less safe)
+                let layout = Layout::from_size_align(self.capacity, 64)
+                    .expect("Failed to create arena layout");
+                dealloc(self.memory.as_ptr(), layout);
+            }
+            // Success: Memory now inaccessible, any access = SIGSEGV
         }
     }
 }
