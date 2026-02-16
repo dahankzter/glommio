@@ -12,7 +12,7 @@
 //! This design trades safety for performance:
 //! - ✅ Zero atomic overhead (no Arc per task)
 //! - ✅ Sub-20ns spawn latency target
-//! - ✅ Fixed 50MB memory (100K slots × 512 bytes)
+//! - ✅ Fixed 100MB memory (100K slots × 1KB)
 //! - ❌ Tasks must not outlive their executor
 //! - ❌ Wakers must not outlive their executor
 //!
@@ -20,7 +20,7 @@
 //!
 //! ## Implementation Details
 //! - Recyclable slab allocator with O(1) alloc/dealloc
-//! - 512-byte fixed slots, 100,000 slot capacity (50MB total)
+//! - 1024-byte fixed slots, 100,000 slot capacity (100MB total)
 //! - Intrusive free-list (zero allocation overhead)
 //! - Bulk deallocation on executor drop (no per-task free)
 
@@ -30,8 +30,11 @@ use std::ptr::NonNull;
 
 scoped_tls::scoped_thread_local!(pub(crate) static TASK_ARENA: TaskArena);
 
-/// Fixed slot size for all arena allocations (512 bytes)
-const SLOT_SIZE: usize = 512;
+/// Fixed slot size for all arena allocations (1024 bytes)
+///
+/// Increased from 512 to 1024 to accommodate larger task closures
+/// (e.g., spawn_blocking captures). Total memory: 100K × 1KB = 100MB.
+const SLOT_SIZE: usize = 1024;
 
 /// Maximum task size we'll allocate in the arena
 const MAX_TASK_SIZE: usize = SLOT_SIZE;
@@ -41,7 +44,7 @@ const MAX_ALIGN: usize = 64;
 
 /// Number of slots to pre-allocate
 ///
-/// Set to 100,000 slots (50MB) to eliminate heap fallback entirely.
+/// Set to 100,000 slots (100MB) to eliminate heap fallback entirely.
 /// This is a trivial amount of memory for server workloads but ensures
 /// the arena can handle high concurrency without falling back to heap.
 /// Since all tasks are arena-allocated, deallocation logic is greatly
