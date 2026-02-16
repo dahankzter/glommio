@@ -50,7 +50,7 @@ impl Inner {
 /// of execution.
 ///
 /// In most situations you will want to use [`TimerActionOnce`] which is a convenience wrapper around spawning a new
-/// detached task on the executor into the current task queue [crate::spawn_local_into] that does a sleep before running
+/// detached task on the executor into the current task queue (via `spawn_local_into()`) that does a sleep before running
 /// a provided future). Detaching is important so that the future is actually scheduled immediately without needing to
 /// be awaited.
 ///

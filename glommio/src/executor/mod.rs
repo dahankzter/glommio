@@ -2238,7 +2238,7 @@ impl ExecutorProxy {
     /// system, and tasks within a queue will be scheduled in serial.
     ///
     /// Returns an opaque handle that can later be used to launch tasks into
-    /// that queue with [`local_into`].
+    /// that queue with `spawn_local_into()`.
     ///
     /// # Examples
     ///
@@ -2263,7 +2263,6 @@ impl ExecutorProxy {
     /// });
     /// ```
     ///
-    /// [`local_into`]: crate::spawn_local_into
     /// [`Shares`]: enum.Shares.html
     /// [`Latency`]: enum.Latency.html
     pub fn create_task_queue(
@@ -2285,9 +2284,9 @@ impl ExecutorProxy {
     }
 
     /// Returns the [`TaskQueueHandle`] that represents the TaskQueue currently
-    /// running. This can be passed directly into [`crate::spawn_local_into`].
+    /// running. This can be passed directly into `spawn_local_into()`.
     /// This must be run from a task that was generated through
-    /// [`crate::spawn_local`] or [`crate::spawn_local_into`]
+    /// `spawn_local()` or `spawn_local_into()`
     ///
     /// # Examples
     /// ```
