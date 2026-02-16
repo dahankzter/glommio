@@ -39,6 +39,22 @@ Investigation of confusing `spawn_local()` API that panics even when called on a
 - Maintains thread-safety via `!Send` trait
 - No breaking changes to existing API
 
+### [Unsafe Code Centralization Analysis](./investigations/unsafe-centralization/)
+**Status:** Analysis complete
+**Complexity:** High (7-12 weeks refactoring)
+
+Comprehensive analysis of eliminating or centralizing unsafe code in glommio without performance degradation. Identifies 320 unsafe blocks scattered across 43+ files and proposes centralization into 4 core modules.
+
+**Key Findings:**
+- Unsafe code cannot be eliminated without 10-100x performance loss
+- Can be centralized from 43+ files to 4 core modules (~1000 lines)
+- Current scattering makes auditing and maintenance difficult
+
+**Recommended Approach:**
+1. Short-term: Document all unsafe with safety comments
+2. Medium-term: Add Miri CI for continuous validation
+3. Long-term: Incrementally refactor into `core/` modules
+
 ## Repository Structure
 
 ```
@@ -46,10 +62,12 @@ docs/
 ├── README.md (this file)
 └── investigations/
     ├── issue_448/
-    │   ├── README.md         # Detailed analysis
+    │   ├── README.md         # Eventfd leak analysis
     │   └── reproduce.rs      # Test demonstrating the leak
-    └── issue_695/
-        └── README.md         # API design investigation
+    ├── issue_695/
+    │   └── README.md         # API design investigation
+    └── unsafe-centralization/
+        └── README.md         # Unsafe code analysis & centralization strategy
 ```
 
 ## Contributing
