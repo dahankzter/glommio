@@ -412,6 +412,7 @@ impl ArenaStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{alloc, dealloc};
 
     #[test]
     fn test_arena_basic_allocation() {

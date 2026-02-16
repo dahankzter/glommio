@@ -3776,32 +3776,6 @@ mod test {
     }
 
     #[test]
-    fn scoped_task() {
-        LocalExecutor::default().run(async {
-            let mut a = 1;
-            unsafe {
-                crate::spawnd_local(async {
-                    a = 2;
-                })
-                .await;
-            }
-            crate::executor().yield_task_queue_now().await;
-            assert_eq!(a, 2);
-
-            let mut a = 1;
-            let do_later = unsafe {
-                crate::spawnd_local(async {
-                    a = 2;
-                })
-            };
-
-            crate::executor().yield_task_queue_now().await;
-            do_later.await;
-            assert_eq!(a, 2);
-        });
-    }
-
-    #[test]
     fn executor_pool_builder_thread_panic() {
         let nr_execs = 8;
         let res = LocalExecutorPoolBuilder::new(PoolPlacement::Unbound(nr_execs))

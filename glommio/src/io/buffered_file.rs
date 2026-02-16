@@ -381,10 +381,10 @@ mod test {
             .write_at(vec![7, 8, 9, 10, 11, 12, 13], (cluster_size * 2).into())
             .await
             .unwrap();
-        assert_eq!(r, 7.try_into().unwrap());
+        assert_eq!(r, 7usize);
 
         let stat = reader.stat().await.unwrap();
-        assert_eq!(stat.file_size, (cluster_size * 2 + 7).into());
+        assert_eq!(stat.file_size, (cluster_size * 2 + 7) as u64);
         assert_eq!(stat.allocated_file_size, cluster_size.into());
         assert_eq!(stat.fs_cluster_size, cluster_size);
 
