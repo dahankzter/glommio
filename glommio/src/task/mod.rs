@@ -48,9 +48,9 @@
 
 #![warn(missing_docs, missing_debug_implementations)]
 
+pub(crate) mod arena;
 #[cfg(feature = "debugging")]
 pub mod debugging;
-pub(crate) mod arena;
 pub(crate) mod header;
 pub(crate) mod join_handle;
 pub(crate) mod raw;

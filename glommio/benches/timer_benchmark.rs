@@ -2,9 +2,7 @@
 //
 // Run with: cargo bench --bench timer_benchmark --features timing-wheel
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use glommio::timer::staged_wheel::StagedWheel;
 use glommio::timer::timing_wheel::TimingWheel;
 use std::collections::BTreeMap;
