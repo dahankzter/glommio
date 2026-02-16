@@ -1,5 +1,9 @@
 # Task Arena Allocator - Phase 1 Prototype
 
+> **📌 Historical Document**: This describes the Phase 1 bump allocator prototype.
+> **Current Status**: Phase 2 (recyclable slab) is complete. See [`phase2-completion.md`](phase2-completion.md) for current implementation.
+> **Key Evolution**: Phase 1 achieved 32ns spawn latency with bump allocation. Phase 2 achieved **25ns with recycling**, enabling indefinite execution.
+
 ## Overview
 
 Implemented a prototype task arena allocator to reduce `spawn_local()` latency from ~80ns to ~20ns by replacing heap allocations with fast bump-pointer allocation.

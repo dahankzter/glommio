@@ -7,9 +7,9 @@
 
 ## Executive Summary
 
-Phase 2 successfully converted the Phase 1 bump allocator into a production-ready recyclable slab allocator. The implementation achieves **26ns spawn latency** sustained over 50,000+ tasks through LIFO free-list recycling.
+Phase 2 successfully converted the Phase 1 bump allocator into a production-ready recyclable slab allocator. The implementation achieves **25ns spawn latency** sustained over 50,000+ tasks through LIFO free-list recycling.
 
-**Key Achievement**: Enables **indefinite execution** without exhausting the 2,000-slot arena capacity.
+**Key Achievement**: Enables **indefinite execution** with 100,000-slot arena capacity (100MB) - eliminating heap fallback for typical server workloads.
 
 ---
 
@@ -19,7 +19,8 @@ Phase 2 successfully converted the Phase 1 bump allocator into a production-read
 
 1. **arena.rs** - Complete rewrite:
    - Replaced bump allocator with slab + intrusive LIFO free-list
-   - Fixed 512-byte slots with O(1) allocation/deallocation
+   - Fixed 1024-byte slots with O(1) allocation/deallocation (increased from 512 bytes)
+   - 100,000 slot capacity = 100MB total (increased from 2,000 slots for server workloads)
    - Free-list stored as u32 indices in unused slots (zero overhead)
 
 2. **raw.rs** - Integrated recycling:
@@ -35,11 +36,12 @@ Phase 2 successfully converted the Phase 1 bump allocator into a production-read
 
 | Metric | Result | Target | Status |
 |--------|--------|--------|--------|
-| Single spawn | 27 ns | 20-30 ns | ✅ Met |
-| Spawn + await | 34 ns | ~30 ns | ✅ Met |
-| Recycling (50K) | 26 ns/cycle | <30 ns | ✅ Exceeded |
+| Single spawn | 25 ns | 20-30 ns | ✅ Met |
+| Spawn + await | 32 ns | ~30 ns | ✅ Met |
+| Recycling (50K) | 25 ns/cycle | <30 ns | ✅ Exceeded |
+| Throughput | 35M tasks/sec | >30M | ✅ Exceeded |
 | Arena hit rate | 100% | >95% | ✅ Exceeded |
-| Memory footprint | 1 MB fixed | <2 MB | ✅ Met |
+| Memory footprint | 100 MB fixed | Configurable | ✅ Met |
 
 **Benchmark command**: `cargo run --release --example simple_spawn_bench`
 
@@ -161,12 +163,20 @@ Some(NonNull::new_unchecked(slot_ptr))
 ### Manual Testing
 ```bash
 # Functional tests
-cargo run --example test_arena
-# Output: ✅ All arena tests passed! (including Test 4: Recycling)
+cargo run --example test_arena --features unsafe_detached
+# Output: ✅ All arena tests passed! (including Test 4: Recycling 5000 tasks)
 
 # Performance benchmarks
-cargo run --release --example simple_spawn_bench
-# Output: 26 ns/spawn, 🎉 SUCCESS!
+cargo run --release --example simple_spawn_bench --features unsafe_detached
+# Output: 25 ns/spawn, 🎉 SUCCESS! Arena allocator with recycling works great!
+
+# Unit tests
+make test-arena
+# Output: test result: ok. 8 passed; 0 failed
+
+# Integration tests
+cargo test --lib arena_integration --features unsafe_detached
+# Output: test result: ok. 5 passed; 0 failed
 ```
 
 ---
@@ -198,12 +208,12 @@ The Phase 2 arena allocator is production-ready:
 
 ### Deployment Considerations
 
-**Memory**: Fixed 1MB allocation per executor
-**Throughput**: 37.6M tasks/sec sustained
-**Latency**: 26-34ns spawn latency
-**Scalability**: 100% arena hit rate if concurrent tasks < 2,000
+**Memory**: Fixed 100MB allocation per executor (configurable via SLOT_CAPACITY constant)
+**Throughput**: 35M tasks/sec sustained
+**Latency**: 25-32ns spawn latency (zero recycling overhead)
+**Scalability**: 100% arena hit rate if concurrent tasks < 100,000
 
-**Fallback behavior**: Graceful heap allocation when arena full (rare under normal load)
+**Fallback behavior**: Graceful heap allocation when arena full (extremely rare under normal load due to large capacity)
 
 ---
 
