@@ -65,6 +65,7 @@ help:
 	@echo "Benchmarking:"
 	@echo "  make bench             - Run all benchmarks"
 	@echo "  make bench-timer       - Run timer benchmarks only"
+	@echo "  make bench-spawn       - Run spawn benchmarks only"
 	@echo "  make bench-ci          - Run benchmarks in CI format"
 	@echo ""
 	@echo "Coverage:"
@@ -111,6 +112,10 @@ bench:
 bench-timer:
 	@echo "→ Running timer benchmarks on $(PLATFORM)..."
 	@$(call run_cargo,bench --bench timer_benchmark)
+
+bench-spawn:
+	@echo "→ Running spawn benchmarks on $(PLATFORM)..."
+	@$(call run_cargo,bench --bench spawn_benchmark)
 
 bench-ci:
 	@echo "→ Running benchmarks in CI mode (bencher format) on $(PLATFORM)..."

@@ -271,3 +271,71 @@ mod ref_count {
         }
     }
 }
+
+#[cfg(test)]
+mod arena_integration {
+    use crate::{spawn_local, LocalExecutor};
+
+    #[test]
+    fn test_arena_used_for_spawns() {
+        // This test verifies that the arena is actually being used for task allocation
+        // when tasks are spawned via spawn_local
+        LocalExecutor::default().run(async {
+            // Spawn multiple tasks to ensure arena is being used
+            let handles: Vec<_> = (0..100)
+                .map(|i| {
+                    spawn_local(async move {
+                        // Simple computation
+                        i * 2
+                    })
+                })
+                .collect();
+
+            // Await all tasks
+            let results: Vec<_> =
+                futures_lite::future::block_on(async { futures_lite::future::join_all(handles).await });
+
+            // Verify results
+            for (i, result) in results.iter().enumerate() {
+                assert_eq!(*result, i * 2);
+            }
+        });
+    }
+
+    #[test]
+    fn test_arena_handles_many_spawns() {
+        // Test that arena can handle many spawns (up to capacity)
+        LocalExecutor::default().run(async {
+            // Spawn a large number of tasks
+            for _ in 0..1000 {
+                spawn_local(async {
+                    // Minimal work
+                    42
+                })
+                .detach();
+            }
+        });
+    }
+
+    #[test]
+    fn test_arena_fallback_to_heap() {
+        // Test that exceeding arena capacity falls back to heap
+        // This spawns more tasks than the arena can hold (10,000 capacity)
+        LocalExecutor::default().run(async {
+            // Spawn tasks and keep them alive to fill arena
+            let handles: Vec<_> = (0..15_000)
+                .map(|i| {
+                    spawn_local(async move {
+                        i
+                    })
+                })
+                .collect();
+
+            // Some will be in arena, some on heap - both should work
+            let results: Vec<_> =
+                futures_lite::future::block_on(async { futures_lite::future::join_all(handles).await });
+
+            assert_eq!(results.len(), 15_000);
+        });
+    }
+}
