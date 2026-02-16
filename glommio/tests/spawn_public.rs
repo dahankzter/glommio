@@ -8,9 +8,7 @@ fn test_spawn_before_run() {
     let executor = LocalExecutor::default();
 
     // Spawn task with scope before calling run()
-    let task = executor.spawn(|scope| async move {
-        scope.spawn(async { 42 }).await
-    });
+    let task = executor.spawn(|scope| async move { scope.spawn(async { 42 }).await });
 
     // Now run the executor and await the task
     let result = executor.run(task);
@@ -23,15 +21,9 @@ fn test_spawn_multiple_tasks() {
     let executor = LocalExecutor::default();
 
     // Spawn multiple tasks before run() using the safe scoped API
-    let task1 = executor.spawn(|scope| async move {
-        scope.spawn(async { 1 }).await
-    });
-    let task2 = executor.spawn(|scope| async move {
-        scope.spawn(async { 2 }).await
-    });
-    let task3 = executor.spawn(|scope| async move {
-        scope.spawn(async { 3 }).await
-    });
+    let task1 = executor.spawn(|scope| async move { scope.spawn(async { 1 }).await });
+    let task2 = executor.spawn(|scope| async move { scope.spawn(async { 2 }).await });
+    let task3 = executor.spawn(|scope| async move { scope.spawn(async { 3 }).await });
 
     // Run and collect results
     let result = executor.run(async move {
@@ -50,13 +42,15 @@ fn test_spawn_with_computation() {
 
     // Spawn a task that does actual work
     let task = executor.spawn(|scope| async move {
-        scope.spawn(async {
-            let mut sum = 0;
-            for i in 1..=100 {
-                sum += i;
-            }
-            sum
-        }).await
+        scope
+            .spawn(async {
+                let mut sum = 0;
+                for i in 1..=100 {
+                    sum += i;
+                }
+                sum
+            })
+            .await
     });
 
     let result = executor.run(task);
@@ -70,9 +64,9 @@ fn test_spawn_inside_run_still_works() {
 
     // spawn() works inside run() context using the safe API
     let result = executor.run(async move {
-        glommio::executor().spawn(|scope| async move {
-            scope.spawn(async { 42 }).await
-        }).await
+        glommio::executor()
+            .spawn(|scope| async move { scope.spawn(async { 42 }).await })
+            .await
     });
 
     assert_eq!(result, 42);
@@ -84,13 +78,15 @@ fn test_spawn_with_multiple_scoped_tasks() {
 
     // Test spawning multiple tasks within a single scope
     let result = executor.run(async move {
-        glommio::executor().spawn(|scope| async move {
-            let h1 = scope.spawn(async { 10 });
-            let h2 = scope.spawn(async { 20 });
-            let h3 = scope.spawn(async { 30 });
+        glommio::executor()
+            .spawn(|scope| async move {
+                let h1 = scope.spawn(async { 10 });
+                let h2 = scope.spawn(async { 20 });
+                let h3 = scope.spawn(async { 30 });
 
-            h1.await + h2.await + h3.await
-        }).await
+                h1.await + h2.await + h3.await
+            })
+            .await
     });
 
     assert_eq!(result, 60);

@@ -123,9 +123,9 @@ where
             // Allocate from arena (no heap fallback)
             let raw_task = if TASK_ARENA.is_set() {
                 TASK_ARENA.with(|arena| {
-                    arena.try_allocate(task_layout.layout).expect(
-                        "Arena exhausted: increase SLOT_CAPACITY (currently 100K slots)",
-                    )
+                    arena
+                        .try_allocate(task_layout.layout)
+                        .expect("Arena exhausted: increase SLOT_CAPACITY (currently 100K slots)")
                 })
             } else {
                 panic!("Task spawned without executor context")

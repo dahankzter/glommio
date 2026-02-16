@@ -90,7 +90,10 @@ impl TaskArena {
             let result = libc::posix_memalign(&mut ptr, PAGE_SIZE, capacity);
 
             if result != 0 {
-                panic!("Failed to allocate page-aligned task arena: errno={}", result);
+                panic!(
+                    "Failed to allocate page-aligned task arena: errno={}",
+                    result
+                );
             }
 
             NonNull::new(ptr as *mut u8).expect("posix_memalign returned null")
@@ -352,13 +355,8 @@ impl Drop for TaskArena {
 
             if result != 0 {
                 let errno = *libc::__errno_location();
-                eprintln!(
-                    "⚠️  WARNING: mprotect failed for arena (errno={})",
-                    errno
-                );
-                eprintln!(
-                    "⚠️  Falling back to free - use-after-free protection disabled!"
-                );
+                eprintln!("⚠️  WARNING: mprotect failed for arena (errno={})", errno);
+                eprintln!("⚠️  Falling back to free - use-after-free protection disabled!");
                 // Fallback: deallocate normally (less safe)
                 // SAFETY: Memory was allocated with posix_memalign, so free it with libc::free
                 libc::free(self.memory.as_ptr() as *mut libc::c_void);

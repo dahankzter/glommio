@@ -479,8 +479,8 @@ pub mod prelude {
     pub use crate::{
         error::GlommioError, executor, yield_if_needed, ByteSliceExt, ByteSliceMutExt,
         ExecutorProxy, IoStats, Latency, LocalExecutor, LocalExecutorBuilder,
-        LocalExecutorPoolBuilder, Placement, PoolPlacement, PoolThreadHandles, RingIoStats,
-        Shares, TaskQueueHandle,
+        LocalExecutorPoolBuilder, Placement, PoolPlacement, PoolThreadHandles, RingIoStats, Shares,
+        TaskQueueHandle,
     };
 
     // spawn_local is unsafe and requires explicit opt-in via feature flag

@@ -1913,7 +1913,6 @@ impl<T> Future for Task<T> {
     }
 }
 
-
 /// Conditionally yields the current task queue. The scheduler may then
 /// process other task queues according to their latency requirements.
 /// If a call to this function results in the current queue to yield,
