@@ -11,9 +11,9 @@ use std::time::Duration;
 
 fn criterion_config() -> Criterion {
     Criterion::default()
-        .sample_size(500) // More samples for precise measurement
-        .warm_up_time(Duration::from_secs(3))
-        .measurement_time(Duration::from_secs(10))
+        .sample_size(50) // Reduced from 500 to avoid OOM (each sample creates new executor with 1MB arena)
+        .warm_up_time(Duration::from_secs(2))
+        .measurement_time(Duration::from_secs(5))
 }
 
 /// Benchmark spawning tasks that complete immediately
@@ -81,7 +81,7 @@ fn bench_spawn_latency(c: &mut Criterion) {
 fn bench_spawn_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("spawn_throughput");
 
-    for count in [1000, 10000] {
+    for count in [100, 1000] {
         group.throughput(criterion::Throughput::Elements(count));
         group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
             b.iter(|| {

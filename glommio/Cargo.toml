@@ -131,6 +131,10 @@ harness = false
 name = "competing_io"
 harness = false
 
+[[bench]]
+name = "spawn_benchmark"
+harness = false
+
 # Optimized benchmark profile for more deterministic CI results
 [profile.bench]
 # Thin LTO for faster compile times while still getting cross-crate optimizations
