@@ -120,42 +120,25 @@ where
         let task_layout = abort_on_panic(Self::task_layout);
 
         unsafe {
-            // Try to allocate from arena first, fall back to heap if unavailable
-            let (raw_task, from_arena) = if TASK_ARENA.is_set() {
-                // Try arena allocation
+            // Allocate from arena (no heap fallback)
+            let raw_task = if TASK_ARENA.is_set() {
                 TASK_ARENA.with(|arena| {
-                    arena
-                        .try_allocate(task_layout.layout)
-                        .map(|ptr| (Some(ptr), true))
-                        .unwrap_or_else(|| {
-                            // Arena full, fall back to heap
-                            arena.record_heap_fallback();
-                            (NonNull::new(alloc::alloc::alloc(task_layout.layout)), false)
-                        })
+                    arena.try_allocate(task_layout.layout).expect(
+                        "Arena exhausted: increase SLOT_CAPACITY (currently 100K slots)",
+                    )
                 })
             } else {
-                // No arena available, use heap
-                (NonNull::new(alloc::alloc::alloc(task_layout.layout)), false)
+                panic!("Task spawned without executor context")
             };
 
-            let raw_task = match raw_task {
-                None => abort(),
-                Some(p) => NonNull::new_unchecked(p.as_ptr() as *mut ()),
-            };
+            let raw_task = NonNull::new_unchecked(raw_task.as_ptr() as *mut ());
 
             let raw = Self::from_ptr(raw_task.as_ptr());
-
-            // Set ARENA_ALLOCATED flag if memory came from arena
-            let state = if from_arena {
-                SCHEDULED | HANDLE | ARENA_ALLOCATED
-            } else {
-                SCHEDULED | HANDLE
-            };
 
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
                 notifier: sys::get_sleep_notifier_for(executor_id).unwrap(),
-                state,
+                state: SCHEDULED | HANDLE,
                 latency_matters,
                 references: AtomicI16::new(0),
                 awaiter: None,
@@ -451,30 +434,17 @@ where
 
             // Finally, deallocate the memory reserved by the task.
             //
-            // CRITICAL: Must check TASK_ARENA.is_set() BEFORE reading header.
-            // If arena is gone, task memory might be in freed arena block.
+            // Simplified: All tasks are arena-allocated (no heap fallback).
+            // Try to recycle to arena if it's in scope AND pointer is from THIS arena.
             if TASK_ARENA.is_set() {
-                // Arena exists - safe to read header and try recycling
-                let state = (*raw.header).state;
-                if state & ARENA_ALLOCATED != 0 {
-                    // Task was allocated from arena - try to recycle
-                    TASK_ARENA.with(|arena| unsafe {
-                        arena.try_deallocate(ptr as *const u8);
-                    });
-                } else {
-                    // Task was allocated from heap - deallocate
-                    alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
-                }
-            } else {
-                // Arena not in scope - cannot safely read header or determine
-                // allocation source. Skip deallocation to avoid "free(): invalid
-                // pointer" crash. This leaks the task memory, but the alternative
-                // (attempting to dealloc arena memory or reading freed memory) is
-                // undefined behavior.
-                //
-                // Note: This only happens when tasks outlive executor scope,
-                // which should be rare in normal operation.
+                TASK_ARENA.with(|arena| unsafe {
+                    // try_deallocate returns true if recycled, false if not from this arena
+                    let _recycled = arena.try_deallocate(ptr as *const u8);
+                    // If false, task was from a different executor's arena - skip deallocation
+                });
             }
+            // If arena not in scope OR pointer from different arena, skip deallocation
+            // (memory will be/was freed when the originating arena drops)
         });
     }
 
