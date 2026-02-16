@@ -124,12 +124,11 @@ where
             let raw_task = if TASK_ARENA.is_set() {
                 // Try arena allocation
                 TASK_ARENA.with(|arena| {
-                    arena.try_allocate(task_layout.layout)
-                        .or_else(|| {
-                            // Arena full, fall back to heap
-                            arena.record_heap_fallback();
-                            NonNull::new(alloc::alloc::alloc(task_layout.layout))
-                        })
+                    arena.try_allocate(task_layout.layout).or_else(|| {
+                        // Arena full, fall back to heap
+                        arena.record_heap_fallback();
+                        NonNull::new(alloc::alloc::alloc(task_layout.layout))
+                    })
                 })
             } else {
                 // No arena available, use heap
@@ -441,14 +440,14 @@ where
             });
 
             // Finally, deallocate the memory reserved by the task.
-            // BUT: Don't deallocate arena-allocated memory (it will be bulk-freed)
-            let should_dealloc = if TASK_ARENA.is_set() {
-                !TASK_ARENA.with(|arena| arena.contains(ptr as *const u8))
+            // Try to recycle to arena first; if not arena-allocated, use heap dealloc.
+            let was_recycled = if TASK_ARENA.is_set() {
+                TASK_ARENA.with(|arena| unsafe { arena.try_deallocate(ptr as *const u8) })
             } else {
-                true
+                false
             };
 
-            if should_dealloc {
+            if !was_recycled {
                 alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
             }
         });

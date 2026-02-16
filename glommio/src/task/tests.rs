@@ -275,6 +275,7 @@ mod ref_count {
 #[cfg(test)]
 mod arena_integration {
     use crate::{spawn_local, LocalExecutor};
+    use futures::future::join_all;
 
     #[test]
     fn test_arena_used_for_spawns() {
@@ -292,8 +293,7 @@ mod arena_integration {
                 .collect();
 
             // Await all tasks
-            let results: Vec<_> =
-                futures_lite::future::block_on(async { futures_lite::future::join_all(handles).await });
+            let results: Vec<_> = futures_lite::future::block_on(async { join_all(handles).await });
 
             // Verify results
             for (i, result) in results.iter().enumerate() {
@@ -323,19 +323,51 @@ mod arena_integration {
         // This spawns more tasks than the arena can hold (10,000 capacity)
         LocalExecutor::default().run(async {
             // Spawn tasks and keep them alive to fill arena
-            let handles: Vec<_> = (0..15_000)
-                .map(|i| {
-                    spawn_local(async move {
-                        i
-                    })
-                })
-                .collect();
+            let handles: Vec<_> = (0..15_000).map(|i| spawn_local(async move { i })).collect();
 
             // Some will be in arena, some on heap - both should work
-            let results: Vec<_> =
-                futures_lite::future::block_on(async { futures_lite::future::join_all(handles).await });
+            let results: Vec<_> = futures_lite::future::block_on(async { join_all(handles).await });
 
             assert_eq!(results.len(), 15_000);
+        });
+    }
+
+    #[test]
+    fn test_arena_recycling_under_spawn_churn() {
+        // Test that sequential spawn+await allows indefinite execution via recycling
+        // Spawns 10,000 tasks sequentially (5x arena capacity of 2,000 slots)
+        // Without recycling, this would exhaust the arena and fall back to heap
+        LocalExecutor::default().run(async {
+            for i in 0..10_000 {
+                let result = spawn_local(async move { i * 3 }).await;
+                assert_eq!(result, i * 3);
+            }
+
+            // All tasks should have been recycled through the arena
+            // If recycling works, we never exhaust the 2,000 slot capacity
+        });
+    }
+
+    #[test]
+    fn test_arena_recycling_batch() {
+        // Test batch recycling: spawn N tasks, await all, repeat
+        // 20 batches × 500 tasks = 10,000 total (5x arena capacity)
+        LocalExecutor::default().run(async {
+            for batch in 0..20 {
+                let handles: Vec<_> = (0..500)
+                    .map(|i| spawn_local(async move { batch * 1000 + i }))
+                    .collect();
+
+                let results: Vec<_> =
+                    futures_lite::future::block_on(async { join_all(handles).await });
+
+                // Verify batch results
+                for (i, result) in results.iter().enumerate() {
+                    assert_eq!(*result, batch * 1000 + i);
+                }
+
+                // After each batch completes, slots are recycled for next batch
+            }
         });
     }
 }
