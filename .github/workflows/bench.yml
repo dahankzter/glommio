@@ -1,10 +1,8 @@
 name: Continuous Benchmarking
 
+# TEMPORARILY DISABLED - Re-enable when memory issues are resolved
+# Manual trigger only for now
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
   workflow_dispatch:
 
 env:

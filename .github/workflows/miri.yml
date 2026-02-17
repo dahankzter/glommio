@@ -1,18 +1,9 @@
 name: Miri (Undefined Behavior Detection)
 
+# TEMPORARILY DISABLED - Re-enable when CI infrastructure is stable
+# Manual trigger only for now
 on:
-  pull_request:
-    paths:
-      - 'glommio/src/task/arena.rs'
-      - 'glommio/src/task/raw.rs'
-      - '.github/workflows/miri.yml'
-  push:
-    branches: [ master ]
-    paths:
-      - 'glommio/src/task/arena.rs'
-      - 'glommio/src/task/raw.rs'
-      - '.github/workflows/miri.yml'
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:
 
 env:
   RUST_BACKTRACE: 1

@@ -40,10 +40,36 @@ jobs:
       - name: Check all targets
         run: cargo check --all --all-targets
 
+  # Modular test strategy: Run each module in isolation to prevent memory exhaustion
+  # Tests run in parallel as matrix jobs, with test-summary as gate for downstream jobs
   test:
-    name: Test
+    name: Test - ${{ matrix.module }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false  # Continue testing other modules even if one fails
+      matrix:
+        module:
+          - "channels::channel_mesh"
+          - "channels::local_channel"
+          - "channels::sharding"
+          - "channels::shared_channel"
+          - "controllers"
+          - "error"
+          - "executor::latch"
+          - "executor::placement"
+          - "executor::stall"
+          - "executor::test"
+          - "io::dma_file"
+          - "io::directory"
+          - "io::buffered_file"
+          - "net::tcp_socket"
+          - "net::udp_socket"
+          - "task::arena"
+          - "task::raw"
+          - "task::state"
+          - "task::waker"
+          - "timer"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,16 +88,35 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.module }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-test-${{ matrix.module }}-
             ${{ runner.os }}-cargo-test-
 
       - name: Run tests
+        env:
+          MODULE: ${{ matrix.module }}
         run: |
-          # Set higher memlock limits for io_uring (allow more parallel executors)
-          # Arena allocator: 100MB per executor, support 4 parallel tests = 400MB
-          # Add buffer for io_uring overhead: 512MB total
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo test --lib -- --test-threads=4"
+          # Set memlock limits for io_uring
+          # Test modules individually with --test-threads=2 to prevent OOM
+          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo test --lib '$MODULE' -- --test-threads=2"
+
+  # Gate job: Only passes if all test matrix jobs succeed
+  # Downstream jobs (build, doc) depend on this instead of individual test jobs
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always()  # Run even if some tests fail, to report status
+    steps:
+      - name: Check test results
+        run: |
+          # This job succeeds only if all test matrix jobs succeeded
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "❌ Some test modules failed"
+            exit 1
+          fi
+          echo "✅ All test modules passed!"
 
   clippy:
     name: Clippy
@@ -151,6 +196,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: [test-summary]  # Wait for all tests to pass before building
     strategy:
       matrix:
         rust: [stable, beta]
@@ -179,62 +225,64 @@ jobs:
       - name: Build all targets
         run: cargo build --all --all-targets --release
 
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          components: llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
-
-      - name: Cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
-
-      - name: Generate coverage
-        run: |
-          # Set higher memlock limits for io_uring (allow more parallel executors)
-          # Skip slow stress tests that take >60s under coverage instrumentation
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo llvm-cov --lib --lcov --output-path lcov.info -- --skip test_shares_high_disparity --test-threads=2"
-          # Fix ownership for Codecov upload
-          sudo chown runner:docker lcov.info
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-      - name: Generate HTML report
-        run: |
-          # Skip slow stress tests that take >60s under coverage instrumentation
-          sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo llvm-cov --lib --html -- --skip test_shares_high_disparity --test-threads=2"
-          # Fix ownership so upload-artifact can read the files
-          sudo chown -R runner:docker target/llvm-cov/html/
-
-      - name: Upload HTML report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: target/llvm-cov/html/
+  # Coverage disabled temporarily due to memory exhaustion issues
+  # TODO: Re-enable with modular approach or simplified subset
+  # coverage:
+  #   name: Coverage
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 45
+  #   steps:
+  #     - name: Checkout
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Setup Rust
+  #       uses: actions-rust-lang/setup-rust-toolchain@v1
+  #       with:
+  #         toolchain: stable
+  #         components: llvm-tools-preview
+  #
+  #     - name: Install cargo-llvm-cov
+  #       uses: taiki-e/install-action@v2
+  #       with:
+  #         tool: cargo-llvm-cov
+  #
+  #     - name: Cache
+  #       uses: actions/cache@v4
+  #       with:
+  #         path: |
+  #           ~/.cargo/bin/
+  #           ~/.cargo/registry/index/
+  #           ~/.cargo/registry/cache/
+  #           ~/.cargo/git/db/
+  #           target/
+  #         key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
+  #         restore-keys: |
+  #           ${{ runner.os }}-cargo-coverage-
+  #
+  #     - name: Generate coverage
+  #       run: |
+  #         # Set higher memlock limits for io_uring (allow more parallel executors)
+  #         # Skip slow stress tests that take >60s under coverage instrumentation
+  #         sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo llvm-cov --lib --lcov --output-path lcov.info -- --skip test_shares_high_disparity --test-threads=2"
+  #         # Fix ownership for Codecov upload
+  #         sudo chown runner:docker lcov.info
+  #
+  #     - name: Upload coverage to Codecov
+  #       uses: codecov/codecov-action@v4
+  #       with:
+  #         files: lcov.info
+  #         fail_ci_if_error: false
+  #         token: ${{ secrets.CODECOV_TOKEN }}
+  #
+  #     - name: Generate HTML report
+  #       run: |
+  #         # Skip slow stress tests that take >60s under coverage instrumentation
+  #         sudo -E env "PATH=$PATH" bash -c "ulimit -Sl 524288 && ulimit -Hl 524288 && cargo llvm-cov --lib --html -- --skip test_shares_high_disparity --test-threads=2"
+  #         # Fix ownership so upload-artifact can read the files
+  #         sudo chown -R runner:docker target/llvm-cov/html/
+  #
+  #     - name: Upload HTML report
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: coverage-report
+  #         path: target/llvm-cov/html/

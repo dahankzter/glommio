@@ -62,8 +62,9 @@ help:
 	@echo "Note:     $(PLATFORM_NOTE)"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test              - Run all tests (Lima: may hit resource limits)"
+	@echo "  make test              - Run all tests (may hit resource limits)"
 	@echo "  make test-lib          - Run library tests only"
+	@echo "  make test-all-modules  - ⭐ Complete suite by module (RECOMMENDED)"
 	@echo "  make test-lima-safe    - Run core tests in batches (macOS/Lima only)"
 	@echo ""
 	@echo "Module Tests (run individual modules):"
@@ -125,6 +126,12 @@ test:
 test-lib:
 	@echo "→ Running library tests on $(PLATFORM)..."
 	@$(call run_cargo,test --package glommio --lib)
+
+test-all-modules:
+	@echo "→ Running complete test suite by module on $(PLATFORM)..."
+	@echo "  (Prevents OOM by testing modules in isolation)"
+	@chmod +x scripts/test-all-modules.sh
+	@./scripts/test-all-modules.sh
 
 # Module-specific test targets
 test-arena:
