@@ -4,6 +4,13 @@
 
 set -e
 
+# Source cargo environment if needed
+if ! command -v cargo &> /dev/null; then
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    fi
+fi
+
 echo "🧪 Running Glommio Complete Test Suite (Modular)"
 echo "=================================================="
 echo ""
