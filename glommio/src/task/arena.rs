@@ -422,11 +422,9 @@ impl ArenaStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use std::alloc::{alloc, dealloc};
 
     #[test]
-    #[serial]
     fn test_arena_basic_allocation() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(256, 8).unwrap();
@@ -449,7 +447,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_arena_full_then_recycle() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(MAX_TASK_SIZE, 8).unwrap();
@@ -496,7 +493,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_free_list_lifo_order() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(256, 8).unwrap();
@@ -529,7 +525,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_deallocate_non_arena_pointer() {
         let arena = TaskArena::new();
 
@@ -548,7 +543,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_stats_tracking() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(256, 8).unwrap();
@@ -587,7 +581,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_arena_reset_rebuilds_free_list() {
         let arena = TaskArena::new();
         let layout = Layout::from_size_align(256, 8).unwrap();
@@ -623,7 +616,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_oversized_rejected() {
         let arena = TaskArena::new();
 
@@ -637,7 +629,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_high_alignment_rejected() {
         let arena = TaskArena::new();
 
