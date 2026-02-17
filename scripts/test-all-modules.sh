@@ -50,12 +50,16 @@ for module in "${MODULES[@]}"; do
   echo "Testing: $module"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-  if cargo test --lib "$module" -- --test-threads=2 2>&1 | tee /tmp/test-$module.log | tail -3; then
+  # Run test and capture output, check PIPESTATUS for cargo exit code
+  cargo test --lib "$module" -- --test-threads=2 2>&1 | tee /tmp/test-$module.log | tail -3
+  TEST_EXIT_CODE=${PIPESTATUS[0]}
+
+  if [ $TEST_EXIT_CODE -eq 0 ]; then
     echo "✅ $module passed"
-    ((PASSED++))
+    PASSED=$((PASSED + 1))
   else
-    echo "❌ $module FAILED"
-    ((FAILED++))
+    echo "❌ $module FAILED (exit code: $TEST_EXIT_CODE)"
+    FAILED=$((FAILED + 1))
     FAILED_MODULES+=("$module")
     echo "   Log saved: /tmp/test-$module.log"
   fi
