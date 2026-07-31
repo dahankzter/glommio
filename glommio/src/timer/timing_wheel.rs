@@ -519,18 +519,10 @@ impl Default for TimingWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::task::Wake;
 
-    // Helper: Create a dummy waker
+    // Helper: a waker that does nothing when woken.
     fn dummy_waker() -> Waker {
-        struct DummyWaker;
-
-        impl Wake for DummyWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        Arc::new(DummyWaker).into()
+        Waker::noop().clone()
     }
 
     #[test]

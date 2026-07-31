@@ -6,8 +6,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use glommio::timer::staged_wheel::StagedWheel;
 use glommio::timer::timing_wheel::TimingWheel;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::task::{Wake, Waker};
+use std::task::Waker;
 use std::time::{Duration, Instant};
 
 // ============================================================================
@@ -25,17 +24,11 @@ fn criterion_config() -> Criterion {
 }
 
 // ============================================================================
-// Dummy waker for benchmarks
+// No-op waker for benchmarks
 // ============================================================================
 
-struct DummyWaker;
-
-impl Wake for DummyWaker {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn dummy_waker() -> Waker {
-    Arc::new(DummyWaker).into()
+    Waker::noop().clone()
 }
 
 // ============================================================================

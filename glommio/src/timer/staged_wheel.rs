@@ -291,19 +291,11 @@ impl Default for StagedWheel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::task::Wake;
     use std::time::Duration;
 
-    // Helper: Create a dummy waker
-    struct DummyWaker;
-
-    impl Wake for DummyWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
+    // Helper: a waker that does nothing when woken.
     fn dummy_waker() -> Waker {
-        Arc::new(DummyWaker).into()
+        Waker::noop().clone()
     }
 
     #[test]

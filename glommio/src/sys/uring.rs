@@ -553,7 +553,7 @@ fn submit_event_chain(
                 continue;
             }
 
-            for (op, mut sqe) in ops.into_iter().zip(sqes.into_iter()) {
+            for (op, mut sqe) in ops.into_iter().zip(sqes) {
                 let allocator = allocator.clone();
                 fill_sqe(
                     &mut sqe,

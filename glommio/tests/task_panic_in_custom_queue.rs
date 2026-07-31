@@ -2,9 +2,15 @@
 // This test verifies that when a task panics in a custom task queue, the panic is
 // handled gracefully without aborting the process
 
+// The tests below all exercise spawn_local_into, so everything they import is
+// only in scope under the same feature gate.
+#[cfg(feature = "unsafe_detached")]
 use futures::join;
+#[cfg(feature = "unsafe_detached")]
 use glommio::{Latency, LocalExecutorBuilder, Placement, Shares};
+#[cfg(feature = "unsafe_detached")]
 use std::panic;
+#[cfg(feature = "unsafe_detached")]
 use std::time::Duration;
 
 // These tests require spawn_local_into (unsafe detached spawn)
