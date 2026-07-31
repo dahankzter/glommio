@@ -48,6 +48,7 @@
 
 #![warn(missing_docs, missing_debug_implementations)]
 
+pub(crate) mod alloc;
 #[cfg(feature = "debugging")]
 pub mod debugging;
 pub(crate) mod header;

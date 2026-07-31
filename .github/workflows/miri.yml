@@ -43,9 +43,9 @@ jobs:
 
       - name: Run Miri on Arena Allocator Tests
         run: |
-          echo "🔍 Testing arena allocator for undefined behavior..."
-          cargo miri test --package glommio --lib task::arena
-          echo "✅ No undefined behavior detected in arena code!"
+          echo "🔍 Testing task allocator for undefined behavior..."
+          cargo miri test --package glommio --lib task::alloc
+          echo "✅ No undefined behavior detected in task allocator code!"
 
       - name: Comment on PR (if Miri passes)
         if: github.event_name == 'pull_request'
@@ -56,7 +56,7 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ **Miri Check Passed** - No undefined behavior detected in arena allocator unsafe code!'
+              body: '✅ **Miri Check Passed** - No undefined behavior detected in task allocator unsafe code!'
             })
 
   # Optional: Full library Miri check (manual only, takes several minutes)

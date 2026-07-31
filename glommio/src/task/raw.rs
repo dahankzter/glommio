@@ -20,6 +20,7 @@ use crate::task::debugging::TaskDebugger;
 use crate::{
     dbg_context, sys,
     task::{
+        alloc::{alloc_task, dealloc_task},
         header::Header,
         state::*,
         utils::{abort, abort_on_panic, extend},
@@ -119,8 +120,9 @@ where
         let task_layout = abort_on_panic(Self::task_layout);
 
         unsafe {
-            // Allocate enough space for the entire task.
-            let raw_task = match NonNull::new(alloc::alloc::alloc(task_layout.layout) as *mut ()) {
+            // Allocate enough space for the entire task, via the thread-local
+            // free lists so a recently freed task block can be reused.
+            let raw_task = match NonNull::new(alloc_task(task_layout.layout) as *mut ()) {
                 None => abort(),
                 Some(p) => p,
             };
@@ -424,8 +426,10 @@ where
                 (raw.schedule as *mut S).drop_in_place();
             });
 
-            // Finally, deallocate the memory reserved by the task.
-            alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
+            // Finally, release the memory reserved by the task. This returns
+            // the block to the thread-local free lists when it fits a cached
+            // size class, and to the system allocator otherwise.
+            dealloc_task(ptr as *mut u8, task_layout.layout);
         });
     }
 
