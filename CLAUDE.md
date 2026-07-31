@@ -523,14 +523,14 @@ On macOS, this runs in Lima. On Linux, it runs natively.
 
 ### Testing Unsafe Code with Miri
 
-Miri is Rust's interpreter for detecting undefined behavior in unsafe code. Use it to validate arena allocator safety:
+Miri is Rust's interpreter for detecting undefined behavior in unsafe code. Use it to validate task allocator safety:
 
 ```bash
 # One-time setup (installs nightly + Miri)
 make miri-setup
 
-# Test arena allocator unsafe code (fast, ~30 seconds)
-make miri-arena
+# Test task allocator unsafe code (fast, ~30 seconds)
+make miri-alloc
 
 # Test all library unsafe code (slow, several minutes)
 make miri
@@ -544,7 +544,7 @@ make miri
 - Violations of pointer aliasing rules
 
 **When to use Miri:**
-- After modifying unsafe code in arena.rs or raw.rs
+- After modifying unsafe code in task/alloc.rs or task/raw.rs
 - Before pushing changes that touch unsafe blocks
 - When debugging memory corruption issues
 - As part of thorough testing for safety-critical changes

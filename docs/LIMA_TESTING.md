@@ -10,7 +10,7 @@ Running the **full test suite** (`make test` or `cargo test --workspace`) causes
 
 **Evidence:**
 - ✅ Individual tests pass perfectly
-- ✅ Specific test modules pass (arena, executor, error, etc.)
+- ✅ Specific test modules pass (alloc, executor, error, etc.)
 - ✅ Integration tests pass
 - ❌ Full suite hits cumulative resource limit → SIGKILL
 
@@ -35,7 +35,7 @@ make test-lima-safe
 ```
 
 **What it tests:**
-- ✅ Arena allocator tests (8 tests)
+- ✅ Task allocator tests
 - ✅ Executor tests
 - ✅ Error handling tests (15 tests)
 - ✅ Integration tests (5 tests)
@@ -48,11 +48,11 @@ make test-lima-safe
 Run individual test modules:
 
 ```bash
-make test-arena          # Arena allocator (your focus)
+make test-alloc          # Task allocator
 make test-executor       # Executor functionality
 
 # Or specific modules directly:
-cargo test --package glommio --lib task::arena
+cargo test --package glommio --lib task::alloc
 cargo test --package glommio --lib error::test
 cargo test --package glommio --test spawn_public
 ```
@@ -109,7 +109,7 @@ These are near-maximum practical limits for Lima. Further increases don't resolv
 ```bash
 # Works perfectly ✓
 make test-lima-safe    # Core tests in batches
-make test-arena        # Your specific work
+make test-alloc        # Task allocator
 make build             # Compilation
 make lint              # Code quality
 make bench             # Benchmarks
@@ -136,7 +136,7 @@ git push origin your-branch
 | Command | Lima | Native Linux | Use Case |
 |---------|------|--------------|----------|
 | `make test-lima-safe` | ✅ Pass | ✅ Pass | Daily development |
-| `make test-arena` | ✅ Pass | ✅ Pass | Arena-specific work |
+| `make test-alloc` | ✅ Pass | ✅ Pass | Task allocator |
 | `make test` | ❌ SIGKILL | ✅ Pass | Comprehensive testing |
 | `make bench` | ✅ Pass | ✅ Pass | Performance validation |
 

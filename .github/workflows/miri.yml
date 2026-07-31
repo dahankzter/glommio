@@ -41,7 +41,7 @@ jobs:
       - name: Setup Miri
         run: cargo miri setup
 
-      - name: Run Miri on Arena Allocator Tests
+      - name: Run Miri on Task Allocator Tests
         run: |
           echo "🔍 Testing task allocator for undefined behavior..."
           cargo miri test --package glommio --lib task::alloc

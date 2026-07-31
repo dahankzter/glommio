@@ -135,11 +135,6 @@ harness = false
 name = "competing_io"
 harness = false
 
-[[bench]]
-name = "spawn_benchmark"
-harness = false
-
-# Optimized benchmark profile for more deterministic CI results
 [profile.bench]
 # Thin LTO for faster compile times while still getting cross-crate optimizations
 lto = "thin"
@@ -151,8 +146,6 @@ opt-level = 3
 debug = true
 
 # Examples that use spawn_local need the unsafe_detached feature
-[[example]]
-name = "simple_spawn_bench"
 required-features = ["unsafe_detached"]
 
 [[example]]
