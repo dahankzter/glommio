@@ -159,3 +159,6 @@ required-features = ["unsafe_detached"]
 name = "timer_soak_test"
 required-features = ["unsafe_detached"]
 
+[[example]]
+name = "spawn_bench"
+required-features = ["unsafe_detached"]
