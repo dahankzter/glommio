@@ -6,23 +6,24 @@
 use core::{fmt, task::Waker};
 #[cfg(feature = "debugging")]
 use std::cell::Cell;
-use std::sync::{
-    atomic::{AtomicI16, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicI16, Ordering};
 
-use crate::{
-    sys::SleepNotifier,
-    task::{raw::TaskVTable, state::*, utils::abort_on_panic},
-};
+use crate::task::{raw::TaskVTable, state::*, utils::abort_on_panic};
 
 /// The header of a task.
 ///
 /// This header is stored right at the beginning of every heap-allocated task.
 pub(crate) struct Header {
     /// ID of the executor to which task belongs to or in other words by which
-    /// task was spawned by
-    pub(crate) notifier: Arc<SleepNotifier>,
+    /// task was spawned by.
+    ///
+    /// Deliberately an id rather than an `Arc<SleepNotifier>`. Holding the
+    /// notifier here would mean resolving it from the global registry on every
+    /// spawn, which serialises all executors on a single lock, and would keep
+    /// the executor's eventfd alive for as long as any task outlives it. The
+    /// notifier is instead resolved from the id on the foreign-wake path, which
+    /// is rare. See `RawTask::notifier`.
+    pub(crate) executor_id: usize,
 
     /// Current state of the task.
     pub(crate) state: u8,
@@ -109,7 +110,7 @@ impl Header {
 
         format!(
             "thread:{}|{:>9}|{:>7}|{:>9}|{:>6}|{:>6}|refs:{}",
-            self.notifier.id(),
+            self.executor_id,
             test!(SCHEDULED),
             test!(RUNNING),
             test!(COMPLETED),
@@ -131,7 +132,7 @@ impl fmt::Debug for Header {
                 "current_thread_id",
                 &crate::executor::executor_id().unwrap_or(usize::MAX),
             )
-            .field("thread_id", &self.notifier.id())
+            .field("thread_id", &self.executor_id)
             .field("scheduled", &(state & SCHEDULED != 0))
             .field("running", &(state & RUNNING != 0))
             .field("completed", &(state & COMPLETED != 0))

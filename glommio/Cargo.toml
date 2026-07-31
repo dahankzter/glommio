@@ -166,3 +166,7 @@ required-features = ["unsafe_detached"]
 [[example]]
 name = "spawn_sweep"
 required-features = ["unsafe_detached"]
+
+[[example]]
+name = "spawn_scaling"
+required-features = ["unsafe_detached"]

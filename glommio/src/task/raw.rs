@@ -131,7 +131,7 @@ where
 
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
-                notifier: sys::get_sleep_notifier_for(executor_id).unwrap(),
+                executor_id,
                 state: SCHEDULED | HANDLE,
                 latency_matters,
                 references: AtomicI16::new(0),
@@ -164,11 +164,16 @@ where
     }
 
     unsafe fn my_id(&self) -> usize {
-        self.notifier().id()
+        (*self.header).executor_id
     }
 
-    unsafe fn notifier(&self) -> &sys::SleepNotifier {
-        &(*self.header).notifier
+    /// Resolves the owning executor's notifier from the global registry.
+    ///
+    /// Only called on the foreign-wake path, so the registry lock is taken once
+    /// per cross-thread wake rather than once per spawn. Returns `None` once the
+    /// owning executor is gone, in which case no one is left to poll the task.
+    unsafe fn notifier(&self) -> Option<std::sync::Arc<sys::SleepNotifier>> {
+        sys::get_sleep_notifier_for(self.my_id())
     }
 
     fn thread_id() -> Option<usize> {
@@ -226,11 +231,14 @@ where
         let raw = Self::from_ptr(ptr);
         if Self::thread_id() != Some(raw.my_id()) {
             dbg_context!(ptr, "foreign", {
-                let notifier = raw.notifier();
-                notifier.queue_waker(
-                    Waker::from_raw(Self::clone_waker(ptr)),
-                    (*raw.header).latency_matters,
-                );
+                // If the owning executor is gone there is nothing left to wake
+                // into, so the notification is dropped.
+                if let Some(notifier) = raw.notifier() {
+                    notifier.queue_waker(
+                        Waker::from_raw(Self::clone_waker(ptr)),
+                        (*raw.header).latency_matters,
+                    );
+                }
             });
         } else {
             let state = (*raw.header).state;
@@ -306,11 +314,15 @@ where
                     // is dropped, schedule it once more to ensure the task
                     // will be destroyed
                     if Self::decrement_references(&*(raw.header as *mut Header)) == 0 {
-                        let notifier = raw.notifier();
-                        notifier.queue_waker(
-                            Waker::from_raw(Self::clone_waker(ptr)),
-                            (*raw.header).latency_matters,
-                        );
+                        // As in `do_wake`: if the owning executor is already
+                        // gone there is nobody left to run the destruction, and
+                        // queueing onto a dead notifier would only strand it.
+                        if let Some(notifier) = raw.notifier() {
+                            notifier.queue_waker(
+                                Waker::from_raw(Self::clone_waker(ptr)),
+                                (*raw.header).latency_matters,
+                            );
+                        }
                     }
                     return;
                 });
