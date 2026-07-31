@@ -20,10 +20,9 @@ use crate::task::debugging::TaskDebugger;
 use crate::{
     dbg_context, sys,
     task::{
-        arena::TASK_ARENA,
-        header::{Header, TASK_MAGIC},
+        header::Header,
         state::*,
-        utils::{abort_on_panic, extend},
+        utils::{abort, abort_on_panic, extend},
         Task,
     },
 };
@@ -120,24 +119,16 @@ where
         let task_layout = abort_on_panic(Self::task_layout);
 
         unsafe {
-            // Allocate from arena (no heap fallback)
-            let raw_task = if TASK_ARENA.is_set() {
-                TASK_ARENA.with(|arena| {
-                    arena
-                        .try_allocate(task_layout.layout)
-                        .expect("Arena exhausted: increase SLOT_CAPACITY (currently 100K slots)")
-                })
-            } else {
-                panic!("Task spawned without executor context")
+            // Allocate enough space for the entire task.
+            let raw_task = match NonNull::new(alloc::alloc::alloc(task_layout.layout) as *mut ()) {
+                None => abort(),
+                Some(p) => p,
             };
-
-            let raw_task = NonNull::new_unchecked(raw_task.as_ptr() as *mut ());
 
             let raw = Self::from_ptr(raw_task.as_ptr());
 
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
-                magic: TASK_MAGIC,
                 notifier: sys::get_sleep_notifier_for(executor_id).unwrap(),
                 state: SCHEDULED | HANDLE,
                 latency_matters,
@@ -231,18 +222,6 @@ where
     /// Wakes a waker.
     unsafe fn do_wake(ptr: *const ()) {
         let raw = Self::from_ptr(ptr);
-
-        // DEFENSIVE CHECK: Validate magic number before dereferencing header.
-        // If executor was dropped, arena memory is freed and this will be garbage.
-        // This is a best-effort check - if it fails, we silently bail.
-        // Architectural contract: Tasks/wakers must not outlive their executor.
-        let magic = (*raw.header).magic;
-        if magic != TASK_MAGIC {
-            // Task memory likely freed (executor dropped). Silently ignore wake.
-            // This is programmer error - waker outlived executor.
-            return;
-        }
-
         if Self::thread_id() != Some(raw.my_id()) {
             dbg_context!(ptr, "foreign", {
                 let notifier = raw.notifier();
@@ -437,6 +416,7 @@ where
             TaskDebugger::unregister(ptr);
 
             let raw = Self::from_ptr(ptr);
+            let task_layout = Self::task_layout();
 
             // We need a safeguard against panics because destructors can panic.
             abort_on_panic(|| {
@@ -445,18 +425,7 @@ where
             });
 
             // Finally, deallocate the memory reserved by the task.
-            //
-            // Simplified: All tasks are arena-allocated (no heap fallback).
-            // Try to recycle to arena if it's in scope AND pointer is from THIS arena.
-            if TASK_ARENA.is_set() {
-                TASK_ARENA.with(|arena| unsafe {
-                    // try_deallocate returns true if recycled, false if not from this arena
-                    let _recycled = arena.try_deallocate(ptr as *const u8);
-                    // If false, task was from a different executor's arena - skip deallocation
-                });
-            }
-            // If arena not in scope OR pointer from different arena, skip deallocation
-            // (memory will be/was freed when the originating arena drops)
+            alloc::alloc::dealloc(ptr as *mut u8, task_layout.layout);
         });
     }
 

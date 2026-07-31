@@ -273,29 +273,19 @@ mod ref_count {
 }
 
 #[cfg(test)]
-mod arena_integration {
+mod spawn_churn {
     use crate::{spawn_local, LocalExecutor};
     use futures::future::join_all;
 
     #[test]
-    fn test_arena_used_for_spawns() {
-        // This test verifies that the arena is actually being used for task allocation
-        // when tasks are spawned via spawn_local
+    fn many_concurrent_spawns() {
         LocalExecutor::default().run(async {
-            // Spawn multiple tasks to ensure arena is being used
             let handles: Vec<_> = (0..100)
-                .map(|i| {
-                    spawn_local(async move {
-                        // Simple computation
-                        i * 2
-                    })
-                })
+                .map(|i| spawn_local(async move { i * 2 }))
                 .collect();
 
-            // Await all tasks
             let results: Vec<_> = futures_lite::future::block_on(async { join_all(handles).await });
 
-            // Verify results
             for (i, result) in results.iter().enumerate() {
                 assert_eq!(*result, i * 2);
             }
@@ -303,29 +293,21 @@ mod arena_integration {
     }
 
     #[test]
-    fn test_arena_handles_many_spawns() {
-        // Test that arena can handle many spawns (up to capacity)
+    fn many_detached_spawns() {
         LocalExecutor::default().run(async {
-            // Spawn a large number of tasks
             for _ in 0..1000 {
-                spawn_local(async {
-                    // Minimal work
-                    42
-                })
-                .detach();
+                spawn_local(async { 42 }).detach();
             }
         });
     }
 
     #[test]
-    fn test_arena_fallback_to_heap() {
-        // Test that exceeding arena capacity falls back to heap
-        // This spawns more tasks than the arena can hold (10,000 capacity)
+    fn large_number_of_live_tasks() {
+        // 15k tasks live simultaneously. Any fixed-capacity task allocator must
+        // degrade gracefully rather than fail here.
         LocalExecutor::default().run(async {
-            // Spawn tasks and keep them alive to fill arena
             let handles: Vec<_> = (0..15_000).map(|i| spawn_local(async move { i })).collect();
 
-            // Some will be in arena, some on heap - both should work
             let results: Vec<_> = futures_lite::future::block_on(async { join_all(handles).await });
 
             assert_eq!(results.len(), 15_000);
@@ -333,25 +315,19 @@ mod arena_integration {
     }
 
     #[test]
-    fn test_arena_recycling_under_spawn_churn() {
-        // Test that sequential spawn+await allows indefinite execution via recycling
-        // Spawns 10,000 tasks sequentially (5x arena capacity of 2,000 slots)
-        // Without recycling, this would exhaust the arena and fall back to heap
+    fn sequential_spawn_await_churn() {
+        // Sequential spawn+await. A recycling allocator should reuse the same
+        // storage rather than growing without bound.
         LocalExecutor::default().run(async {
             for i in 0..10_000 {
                 let result = spawn_local(async move { i * 3 }).await;
                 assert_eq!(result, i * 3);
             }
-
-            // All tasks should have been recycled through the arena
-            // If recycling works, we never exhaust the 2,000 slot capacity
         });
     }
 
     #[test]
-    fn test_arena_recycling_batch() {
-        // Test batch recycling: spawn N tasks, await all, repeat
-        // 20 batches × 500 tasks = 10,000 total (5x arena capacity)
+    fn batched_spawn_churn() {
         LocalExecutor::default().run(async {
             for batch in 0..20 {
                 let handles: Vec<_> = (0..500)
@@ -361,13 +337,29 @@ mod arena_integration {
                 let results: Vec<_> =
                     futures_lite::future::block_on(async { join_all(handles).await });
 
-                // Verify batch results
                 for (i, result) in results.iter().enumerate() {
                     assert_eq!(*result, batch * 1000 + i);
                 }
-
-                // After each batch completes, slots are recycled for next batch
             }
+        });
+    }
+
+    #[test]
+    fn oversized_task_closures() {
+        // Task futures far larger than any fixed slot size must still work.
+        LocalExecutor::default().run(async {
+            let a = spawn_local(async {
+                let buf = [7u8; 2048];
+                std::hint::black_box(&buf);
+                buf[0]
+            });
+            let b = spawn_local(async {
+                let buf = [9u8; 64 * 1024];
+                std::hint::black_box(&buf);
+                buf[0]
+            });
+            assert_eq!(a.await, 7);
+            assert_eq!(b.await, 9);
         });
     }
 }

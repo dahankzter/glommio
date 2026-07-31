@@ -159,6 +159,3 @@ required-features = ["unsafe_detached"]
 name = "timer_soak_test"
 required-features = ["unsafe_detached"]
 
-[[example]]
-name = "test_arena"
-required-features = ["unsafe_detached"]
