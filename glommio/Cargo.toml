@@ -60,7 +60,17 @@ typenum = "1.19"
 [build-dependencies]
 cc = "1.2"
 
+[lints.rust]
+# The alloc_compare example selects its global allocator with these.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(alloc_system)',
+    'cfg(alloc_mimalloc)',
+    'cfg(alloc_jemalloc)',
+] }
+
 [dev-dependencies]
+mimalloc = { version = "0.1", default-features = false }
+tikv-jemallocator = "0.6"
 criterion = "0.5"
 fastrand = "2.3"
 futures = "0.3"
@@ -146,7 +156,6 @@ opt-level = 3
 debug = true
 
 # Examples that use spawn_local need the unsafe_detached feature
-required-features = ["unsafe_detached"]
 
 [[example]]
 name = "timer_soak_test"
@@ -157,9 +166,9 @@ name = "spawn_bench"
 required-features = ["unsafe_detached"]
 
 [[example]]
-name = "spawn_sweep"
+name = "spawn_scaling"
 required-features = ["unsafe_detached"]
 
 [[example]]
-name = "spawn_scaling"
+name = "alloc_compare"
 required-features = ["unsafe_detached"]

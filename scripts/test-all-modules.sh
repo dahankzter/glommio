@@ -32,7 +32,7 @@ MODULES=(
   "io::buffered_file"
   "net::tcp_socket"
   "net::udp_socket"
-  "task::alloc"
+  "task"
   "task::raw"
   "task::state"
   "task::waker"

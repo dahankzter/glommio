@@ -5,8 +5,8 @@
 .PHONY: help test build fmt lint check bench clean all
 .PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
 .PHONY: bench-timer bench-ci
-.PHONY: miri miri-alloc miri-setup
-.PHONY: test-lib test-lima-safe test-alloc test-channels test-controllers
+.PHONY: miri miri-core miri-setup
+.PHONY: test-lib test-lima-safe test-task test-channels test-controllers
 .PHONY: test-error test-executor test-io test-net test-sync test-task test-timer
 
 # =============================================================================
@@ -68,7 +68,7 @@ help:
 	@echo "  make test-lima-safe    - Run core tests in batches (macOS/Lima only)"
 	@echo ""
 	@echo "Module Tests (run individual modules):"
-	@echo "  make test-alloc        - Task allocator tests"
+	@echo "  make test-task         - Task subsystem tests"
 	@echo "  make test-channels     - Channel tests"
 	@echo "  make test-controllers  - Controller tests"
 	@echo "  make test-error        - Error handling tests"
@@ -93,7 +93,7 @@ help:
 	@echo ""
 	@echo "Miri (Undefined Behavior Detection):"
 	@echo "  make miri-setup        - Install and configure Miri"
-	@echo "  make miri-alloc        - Test task allocator unsafe code"
+	@echo "  make miri-core         - Test unsafe data structures under Miri"
 	@echo "  make miri              - Test all library unsafe code (slow)"
 	@echo ""
 	@echo "Code Quality:"
@@ -134,9 +134,9 @@ test-all-modules:
 	@./scripts/test-all-modules.sh
 
 # Module-specific test targets
-test-alloc:
-	@echo "→ Running task allocator tests on $(PLATFORM)..."
-	@$(call run_cargo,test --package glommio --lib task::alloc)
+test-task:
+	@echo "→ Running task subsystem tests on $(PLATFORM)..."
+	@$(call run_cargo,test --package glommio --lib task)
 
 test-channels:
 	@echo "→ Running channel tests on $(PLATFORM)..."
@@ -178,8 +178,8 @@ test-timer:
 test-lima-safe:
 	@echo "→ Running tests with Lima-safe configuration (batched)..."
 ifeq ($(UNAME_S),Darwin)
-	@echo "→ Running task allocator tests..."
-	@lima sh -c '. ~/.profile && . ~/.cargo/env && CARGO_TARGET_DIR=$(LIMA_TARGET_DIR) cargo test --package glommio --lib task::alloc'
+	@echo "→ Running task subsystem tests..."
+	@lima sh -c '. ~/.profile && . ~/.cargo/env && CARGO_TARGET_DIR=$(LIMA_TARGET_DIR) cargo test --package glommio --lib task'
 	@echo "→ Running executor tests..."
 	@lima sh -c '. ~/.profile && . ~/.cargo/env && CARGO_TARGET_DIR=$(LIMA_TARGET_DIR) cargo test --package glommio --lib executor::test -- --test-threads=1' || true
 	@echo "→ Running error tests..."
@@ -219,14 +219,14 @@ miri-setup:
 	@rustup toolchain install nightly --component miri
 	@rustup override set nightly
 	@cargo miri setup
-	@echo "✓ Miri ready! Run 'make miri-alloc' to test unsafe code"
+	@echo "✓ Miri ready! Run 'make miri-core' to test unsafe code"
 
-miri-alloc:
-	@echo "→ Running Miri on task allocator tests..."
+miri-core:
+	@echo "→ Running Miri on unsafe data structures..."
 	@echo "  (Testing unsafe code for undefined behavior)"
-	@$(call run_cargo,+nightly miri test --package glommio --lib task::alloc)
+	@$(call run_cargo,+nightly miri test --package glommio --lib channels::spsc_queue free_list)
 	@echo ""
-	@echo "✓ Miri found no undefined behavior in task allocator code!"
+	@echo "✓ Miri found no undefined behavior!"
 
 miri:
 	@echo "→ Running Miri on full library test suite..."

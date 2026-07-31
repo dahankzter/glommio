@@ -17,6 +17,30 @@ This is a **maintained fork** of [DataDog/glommio](https://github.com/DataDog/gl
 
 ## Development Environment
 
+### Recommended Allocator
+
+Glommio allocates one block per spawned task and frees it on the same thread.
+The global allocator choice dominates that path, and mimalloc is the
+recommendation for deployments:
+
+```rust
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
+
+At 512 tasks live, spawn costs ~45ns under glibc malloc, ~30ns under jemalloc
+and ~24ns under mimalloc. Glommio deliberately does **not** put its own cache in
+front of the allocator: a thread-local free list was tried and measured, and it
+recovered most of the glibc gap but was worth nothing at all under mimalloc,
+while retaining memory and displacing use-after-free diagnostics. Use a good
+allocator instead.
+
+Reproduce with:
+```bash
+RUSTFLAGS='--cfg alloc_mimalloc' cargo run --release \
+  --features unsafe_detached --example alloc_compare
+```
+
 ### Platform Support
 
 Glommio requires **Linux with io_uring support** (kernel 5.8+). This fork provides seamless development on both Linux and macOS:

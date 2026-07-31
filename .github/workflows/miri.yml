@@ -41,11 +41,13 @@ jobs:
       - name: Setup Miri
         run: cargo miri setup
 
-      - name: Run Miri on Task Allocator Tests
+      - name: Run Miri on Unsafe Data Structures
         run: |
-          echo "🔍 Testing task allocator for undefined behavior..."
-          cargo miri test --package glommio --lib task::alloc
-          echo "✅ No undefined behavior detected in task allocator code!"
+          echo "🔍 Testing unsafe data structures for undefined behavior..."
+          # Miri cannot execute io_uring syscalls, so this covers the unsafe
+          # data structures that do not need a running reactor.
+          cargo miri test --package glommio --lib channels::spsc_queue free_list
+          echo "✅ No undefined behavior detected!"
 
       - name: Comment on PR (if Miri passes)
         if: github.event_name == 'pull_request'
@@ -56,7 +58,7 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ **Miri Check Passed** - No undefined behavior detected in task allocator unsafe code!'
+              body: '✅ **Miri Check Passed** - No undefined behavior detected in unsafe data structures!'
             })
 
   # Optional: Full library Miri check (manual only, takes several minutes)
