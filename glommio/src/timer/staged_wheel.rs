@@ -40,12 +40,12 @@
 //!
 //! // Small count: uses inline storage
 //! for i in 0..100 {
-//!     wheel.insert(now + Duration::from_millis(i), waker);
+//!     wheel.insert(now + Duration::from_millis(i), Waker::noop().clone());
 //! }
 //!
 //! // Automatically promotes to wheel stage at 256 timers
 //! for i in 0..200 {
-//!     wheel.insert(now + Duration::from_millis(i + 100), waker);
+//!     wheel.insert(now + Duration::from_millis(i + 100), Waker::noop().clone());
 //! }
 //! ```
 

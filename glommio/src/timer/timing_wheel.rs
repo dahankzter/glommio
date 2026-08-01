@@ -33,7 +33,7 @@
 //! let now = Instant::now();
 //!
 //! // Insert timer
-//! let id = wheel.insert(now + Duration::from_millis(100), waker);
+//! let id = wheel.insert(now + Duration::from_millis(100), Waker::noop().clone());
 //!
 //! // Advance time and process expired timers
 //! wheel.advance_to(now + Duration::from_millis(100));
