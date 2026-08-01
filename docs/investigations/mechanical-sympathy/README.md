@@ -414,6 +414,12 @@ cross-core wakeup, and that is what the 2.2 µs buys. This is the same thing
 `MSG_RING` is worth revisiting as a modest cross-domain gain *after* placement
 lands, and not before. On its own it does not justify the complexity.
 
+**Superseded — see section 5.** `MSG_RING` alone is worth −3% because the
+overhead it would expose is hidden behind io_uring's default completion
+delivery. Combined with the taskrun setup flags it is worth −25%. The
+conclusion "not worth it" was right about the change measured and wrong about
+the change worth making.
+
 ### 3b. The number this turned up instead
 
 Set the two measurements side by side:
@@ -530,6 +536,84 @@ overhead dilutes it. Placement gets better, not worse, as 3b is addressed.
 
 ---
 
+## 5. Candidate 4 — glommio sets no io_uring setup flags
+
+**Measured: −12% to −29% on the raw wake round trip. Not yet attempted.**
+
+glommio's vendored `iou` wrapper exposes `SetupFlags` up to bit 5
+(`ATTACH_WQ`) — a 5.5-era view of io_uring. The kernel header vendored in the
+same repository defines them to bit 18. Two of the missing ones exist precisely
+for a runtime where one thread owns one ring, which is glommio's shape by
+construction:
+
+| flag | kernel | effect |
+|---|---|---|
+| `COOP_TASKRUN` (1<<8) | 5.19 | stop forcing completion task work with an IPI |
+| `SINGLE_ISSUER` (1<<12) | 6.0 | one submitter promised, kernel drops locking |
+| `DEFER_TASKRUN` (1<<13) | 6.0 | run completion work when the owner waits, not on completion |
+
+`probe_setup_flags.rs`, same two-thread two-ring ping-pong as 3a, varying only
+the ring setup. Best of three per cell:
+
+**same L3 (0↔4)**
+
+| setup | eventfd | `MSG_RING` |
+|---|---:|---:|
+| default (what glommio does) | 2097 ns | 1988 ns |
+| `COOP_TASKRUN` | 2120 ns (+1.1%) | 1517 ns (**−23.7%**) |
+| `SINGLE_ISSUER` | 2154 ns (+2.7%) | 1527 ns (−23.2%) |
+| `SINGLE_ISSUER｜DEFER_TASKRUN` | 1850 ns (**−11.8%**) | 1481 ns (**−25.5%**) |
+
+**cross L3 (0↔16)**
+
+| setup | eventfd | `MSG_RING` |
+|---|---:|---:|
+| default | 6327 ns | 5096 ns |
+| `COOP_TASKRUN` | 6420 ns (+1.5%) | 5045 ns (−1.0%) |
+| `SINGLE_ISSUER` | 6416 ns (+1.4%) | 4967 ns (−2.5%) |
+| `SINGLE_ISSUER｜DEFER_TASKRUN` | 5986 ns (−5.4%) | 4727 ns (−7.2%) |
+
+Keeping the current eventfd mechanism, `DEFER_TASKRUN` alone is worth −11.8%
+same-domain. Taking the whole combination — `MSG_RING` on a `DEFER_TASKRUN`
+ring — is **2097 → 1481 ns, −29.4%** same-domain and **6327 → 4727 ns, −25.3%**
+across domains.
+
+**Why 3a was misleading.** `MSG_RING` on default rings saves nothing because
+io_uring's default completion delivery dominates both mechanisms. Remove that
+with the taskrun flags and `MSG_RING` is suddenly worth a quarter of the round
+trip. Two changes that each look worthless can be worth a lot together, which no
+amount of measuring them one at a time will reveal.
+
+### Before anyone builds this
+
+**Scale it honestly first.** The raw wake is ~2.2 µs of glommio's ~8 µs shard
+round trip (3c/3e), so −29% of the wake is roughly −7% of the round trip unless
+`DEFER_TASKRUN` also helps the reactor's general completion processing. It might;
+that has not been measured and must not be assumed.
+
+**`DEFER_TASKRUN` invalidates a load-bearing assumption.** `sys/uring.rs`:
+
+```rust
+fn needs_kernel_enter(&self) -> bool {
+    // We only need to enter the kernel to submit SQEs, not to collect CQEs (the
+    // kernel posts the CQEs asynchronously for us)
+    self.waiting_kernel_submission() > 0
+}
+```
+
+Under `DEFER_TASKRUN` that comment is false: completions are only reaped inside
+an enter with `GETEVENTS`. Adopting it means reworking when glommio enters the
+kernel, which is exactly the code 3c/3e says is already responsible for the
+syscall count. This is not a flag you can simply turn on.
+
+**Version gating.** glommio supports 5.8+; `DEFER_TASKRUN` and `SINGLE_ISSUER`
+need 6.0, `COOP_TASKRUN` needs 5.19. All three have to be probed at runtime and
+fall back cleanly, and the vendored `iou` wrapper needs the constants added.
+
+**Suggested order:** extend `iou`'s `SetupFlags` first (mechanical, no behaviour
+change), then measure `COOP_TASKRUN` + `TASKRUN_FLAG` inside glommio itself,
+which is the smaller semantic step, before touching `DEFER_TASKRUN`.
+
 ## 6. What not to do next
 
 `OPTIMIZATION_PLAN.md` has **P2b: RefCell → UnsafeCell**, claiming "10-15% task
@@ -570,6 +654,7 @@ finding, on the same hardware, by a different route.
 | 1 | ZST schedule closure | −32% task switch | low | **done** — delivered 19.46 ns |
 | 2 | cache-domain placement | avoids a +58% cross-domain penalty | low | **done** — `MaxPack` now touches one domain at every size |
 | — | ~~biased reference counting~~ | 1.1-2.5 ns (7-15%) | — | **scrapped**: re-measured far smaller than thought, and Miri cannot cover the task lifecycle |
+| 4 | io_uring setup flags | −12% to −29% of the raw wake | med | **measured, not attempted** (section 5); needs `iou` extended and the CQE-collection assumption reworked |
 | — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
 | — | ~~latency-ring syscalls~~ | ~600 ns of a ~5 µs gap | — | **dropped**: an enter costs ~100 ns, and removing the preempt timer deadlocks the wake path (3d, 3f) |
 
