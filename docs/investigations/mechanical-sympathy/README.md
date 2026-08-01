@@ -225,6 +225,12 @@ it is sound as a measurement of what is available.
 
 ## Candidate 3 — glommio cannot see this machine's topology
 
+**Status: implemented.** `CpuLocation` gained a `cache_domain` field, parsed
+from the highest cache level sysfs reports, and the placement tree gained a
+`Level::CacheDomain` between `Package` and `Core`. `MaxPack` now touches exactly
+one cache domain at 2, 4, 8 and 16 shards on this part, and `MaxSpread` uses all
+four as soon as it has four shards to place. See "what it delivered" below.
+
 **Measured: cross-L3 shard placement costs +69% on a shard-to-shard round trip.**
 **Risk: low. Safe code. Pure gain on multi-CCX parts.**
 
@@ -279,6 +285,52 @@ extend the sort key in `hardware_topology.rs` (currently
 `(numa_node, package, core, cpu)`). `MaxPack` then packs within an L3 domain
 and `MaxSpread` spreads across domains deliberately rather than by accident.
 This is a new public field on a public struct, so it is a semver consideration.
+
+### What it delivered
+
+Detection on this part is exact -- four domains matching the kernel's
+`shared_cpu_list` byte for byte:
+
+```
+domain 0: package 0 numa 0 cpus [0-7, 32-39]
+domain 1: package 0 numa 0 cpus [8-15, 40-47]
+domain 2: package 0 numa 0 cpus [16-23, 48-55]
+domain 3: package 0 numa 0 cpus [24-31, 56-63]
+```
+
+Placement is now domain-coherent by construction:
+
+| | domains touched |
+|---|---|
+| `MaxPack` at n = 2, 4, 8, 16 | **1** |
+| `MaxSpread` at n = 2 | 2 |
+| `MaxSpread` at n = 4, 8, 16 | **4** |
+
+End to end, on the pairs those policies actually select:
+
+| pair | round trip |
+|---|---:|
+| same domain, different cores (24↔26) | 8133 ns |
+| **what `MaxPack` picks (24↔56)** | **9228 ns** |
+| cross domain (24↔0) | 12808 ns |
+
+**An honest wrinkle.** `MaxPack` at n=2 picks CPUs 24 and 56, which are SMT
+siblings of one physical core, and that is 13% slower than two separate cores in
+the same domain -- consistent with the ping-pong table above, where SMT siblings
+(58.5 ns) lose to same-domain separate cores (42.5 ns). This is not a regression
+and not something this change should quietly alter: `MaxPack`'s contract is to
+minimise the CPU footprint, and it now does that within one cache domain instead
+of wherever core numbering happened to land. What it buys is the elimination of
+the 12808 ns case. A communication-optimised policy that prefers separate cores
+within a domain would be a *new* placement, not a change to this one.
+
+**Guarding the fallback.** A machine that reports no cache topology falls back to
+the package id, which reproduces today's behaviour exactly -- and all 431
+pre-existing tests passing unchanged is the evidence for that, since they all
+construct topologies through the fallback path. One subtlety cost a test: the
+fallback is not unique across parents when NUMA nodes nest inside packages, so
+`from_topology` remaps cache domains against `(numa_node, package)` before
+building the tree, restoring the uniqueness the tree builder requires.
 
 ### 3a. `IORING_OP_MSG_RING` — premise measured, mostly falsified
 
@@ -459,7 +511,7 @@ finding, on the same hardware, by a different route.
 | | candidate | measured win | risk | why this order |
 |---|---|---:|---|---|
 | 1 | ZST schedule closure | −32% task switch | low | **done** — delivered 19.46 ns |
-| 2 | cache-domain placement | −41% cross-shard round trip | low | independent of 1; safe code; helps every multi-CCX deployment |
+| 2 | cache-domain placement | avoids a +58% cross-domain penalty | low | **done** — `MaxPack` now touches one domain at every size |
 | 3 | biased reference counting | −51% task switch | high | the real prize; do it once 1 has proven the header-index pattern |
 | — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
 | — | ~~latency-ring syscalls~~ | ~600 ns of a ~5 µs gap | — | **dropped**: an enter costs ~100 ns, and removing the preempt timer deadlocks the wake path (3d, 3f) |

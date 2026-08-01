@@ -14,6 +14,10 @@ pub enum Level {
     SystemRoot,
     Cpu(usize),
     Core(usize),
+    /// The set of cores sharing a last-level cache. Sits below `Package`
+    /// because a package may contain several of them -- see
+    /// [`CpuLocation::cache_domain`].
+    CacheDomain(usize),
     Package(usize),
     NumaNode(usize),
 }
@@ -204,6 +208,7 @@ impl std::convert::TryFrom<Path> for CpuLocation {
     fn try_from(path: Path) -> Result<Self, Self::Error> {
         let mut cpu = None;
         let mut core = None;
+        let mut cache = None;
         let mut pkg = None;
         let mut numa = None;
 
@@ -217,6 +222,10 @@ impl std::convert::TryFrom<Path> for CpuLocation {
                 Level::Core(id) => match core {
                     None => core = Some(id),
                     Some(_) => return Err("duplicate core in path"),
+                },
+                Level::CacheDomain(id) => match cache {
+                    None => cache = Some(id),
+                    Some(_) => return Err("duplicate cache domain in path"),
                 },
                 Level::Package(id) => match pkg {
                     None => pkg = Some(id),
@@ -235,6 +244,9 @@ impl std::convert::TryFrom<Path> for CpuLocation {
                 core,
                 package,
                 numa_node,
+                // Trees built without a cache level (the test fixtures) yield
+                // no cache domain; fall back the same way the sysfs parser does.
+                cache_domain: cache.unwrap_or(package),
             }),
             _ => Err("Failed to construct Path from CpuLocation"),
         }

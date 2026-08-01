@@ -670,29 +670,49 @@ where
         let nr_numa_node = Self::count_unique_by(&topology, |c| c.numa_node);
         let nr_package = Self::count_unique_by(&topology, |c| c.package);
 
+        // Cache domain ids must be unique across the whole tree, like every
+        // other level. They are not necessarily so as they arrive: a machine
+        // that reports no cache topology falls back to the package id, and if
+        // numa nodes nest inside packages that same id then appears under two
+        // different parents. Remap against the parents to guarantee it.
+        {
+            let mut dense = std::collections::BTreeMap::new();
+            for cpu in &topology {
+                let n = dense.len();
+                dense
+                    .entry((cpu.numa_node, cpu.package, cpu.cache_domain))
+                    .or_insert(n);
+            }
+            for cpu in &mut topology {
+                cpu.cache_domain = dense[&(cpu.numa_node, cpu.package, cpu.cache_domain)];
+            }
+        }
+
         // the topology must be sorted such that all children of a `Node` are added to a
         // parent consecutively
         let f_level: fn(&CpuLocation, usize) -> Level = if nr_package < nr_numa_node {
-            topology.sort_by_key(|l| (l.package, l.numa_node, l.core, l.cpu));
+            topology.sort_by_key(|l| (l.package, l.numa_node, l.cache_domain, l.core, l.cpu));
             |cpu_loc, depth| -> Level {
                 match depth {
                     0 => Level::SystemRoot,
                     1 => Level::Package(cpu_loc.package),
                     2 => Level::NumaNode(cpu_loc.numa_node),
-                    3 => Level::Core(cpu_loc.core),
-                    4 => Level::Cpu(cpu_loc.cpu),
+                    3 => Level::CacheDomain(cpu_loc.cache_domain),
+                    4 => Level::Core(cpu_loc.core),
+                    5 => Level::Cpu(cpu_loc.cpu),
                     _ => unreachable!("unexpected tree level: {depth}"),
                 }
             }
         } else {
-            topology.sort_by_key(|l| (l.numa_node, l.package, l.core, l.cpu));
+            topology.sort_by_key(|l| (l.numa_node, l.package, l.cache_domain, l.core, l.cpu));
             |cpu_loc, depth| -> Level {
                 match depth {
                     0 => Level::SystemRoot,
                     1 => Level::NumaNode(cpu_loc.numa_node),
                     2 => Level::Package(cpu_loc.package),
-                    3 => Level::Core(cpu_loc.core),
-                    4 => Level::Cpu(cpu_loc.cpu),
+                    3 => Level::CacheDomain(cpu_loc.cache_domain),
+                    4 => Level::Core(cpu_loc.core),
+                    5 => Level::Cpu(cpu_loc.cpu),
                     _ => unreachable!("unexpected tree level: {depth}"),
                 }
             }
@@ -756,7 +776,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::sys::hardware_topology::test_helpers::cpu_loc;
+    use crate::sys::hardware_topology::test_helpers::{cpu_loc, cpu_loc_cache};
 
     #[test]
     fn cpu_set() {
@@ -836,6 +856,69 @@ mod test {
 
         for _ in 0..n {
             let _cpu_location: CpuLocation = max_packer.next().unwrap();
+        }
+    }
+
+    /// A single-package, single-NUMA machine with four cache domains of two
+    /// cores each -- the shape of a current AMD desktop or Threadripper part,
+    /// and the shape that motivated the cache level. `package` and `numa_node`
+    /// are constant throughout, so any grouping below them can only come from
+    /// the cache domain.
+    fn topology_four_cache_domains() -> Vec<CpuLocation> {
+        let mut topology = Vec::new();
+        for domain in 0..4 {
+            for core in 0..2 {
+                let core = domain * 2 + core;
+                topology.push(cpu_loc_cache(0, 0, domain, core, core));
+            }
+        }
+        topology
+    }
+
+    #[test]
+    fn max_packer_fills_a_cache_domain_before_crossing() {
+        // Packing should exhaust one L3 domain before touching another;
+        // without a cache level it would have no reason to.
+        let mut packer = MaxPacker::from_topology(topology_four_cache_domains());
+        let first: Vec<usize> = (0..2).map(|_| packer.next().unwrap().cpu).collect();
+
+        let domain_of = |cpu: usize| cpu / 2;
+        assert_eq!(
+            domain_of(first[0]),
+            domain_of(first[1]),
+            "the first two shards landed in different cache domains: {first:?}"
+        );
+    }
+
+    #[test]
+    fn max_spreader_uses_every_cache_domain_first() {
+        // Spreading four shards over four domains should use each exactly once,
+        // rather than doubling up in one while another sits idle.
+        let mut spreader = MaxSpreader::from_topology(topology_four_cache_domains());
+        let mut per_domain = [0; 4];
+        for _ in 0..4 {
+            per_domain[spreader.next().unwrap().cpu / 2] += 1;
+        }
+        assert_eq!(
+            [1, 1, 1, 1],
+            per_domain,
+            "four shards did not land one per cache domain: {per_domain:?}"
+        );
+    }
+
+    #[test]
+    fn cache_domain_survives_the_round_trip() {
+        // The iterator yields CpuLocations rebuilt from a tree path, so the
+        // cache domain has to come back out intact.
+        let mut spreader = MaxSpreader::from_topology(topology_four_cache_domains());
+        for _ in 0..8 {
+            let loc = spreader.next().unwrap();
+            assert_eq!(
+                loc.cache_domain,
+                loc.cpu / 2,
+                "cache domain lost or garbled for cpu {}",
+                loc.cpu
+            );
         }
     }
 

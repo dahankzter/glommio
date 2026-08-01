@@ -27,6 +27,20 @@ pub struct CpuLocation {
     pub package: usize,
     /// Holds the NUMA node on which the `cpu` is located.
     pub numa_node: usize,
+    /// Holds the last-level cache domain in which the `cpu` sits, i.e. the set
+    /// of CPUs it shares an L3 with.
+    ///
+    /// This is a finer distinction than [`Self::package`] and on several
+    /// current parts it is the one that matters. A single-socket AMD
+    /// Threadripper reports one package and one NUMA node while physically
+    /// having four L3 domains, and moving a cache line between two of them
+    /// costs an order of magnitude more than keeping it inside one. Placement
+    /// that only knows about packages and NUMA nodes cannot see that
+    /// difference.
+    ///
+    /// Falls back to the package id when the kernel does not expose cache
+    /// topology, which reproduces the previous behaviour.
+    pub cache_domain: usize,
 }
 
 fn build_cpu_location(
@@ -46,7 +60,65 @@ fn build_cpu_location(
         core: get_core_id(cpu, &cpu_path, cpu_to_core)?,
         package: package_id,
         numa_node,
+        // Provisional: replaced with a dense id below, or left as the package
+        // id if this machine does not report cache topology.
+        cache_domain: get_cache_domain_id(sysfs_path, cpu).unwrap_or(package_id),
     })
+}
+
+/// Identifies the last-level cache domain `cpu` belongs to.
+///
+/// Walks `cpu/cpuN/cache/index*`, takes the highest cache level reported, and
+/// canonicalises the domain as the lowest CPU id sharing it -- so every CPU in
+/// a domain derives the same value without any cross-CPU coordination. Returns
+/// `None` when the machine does not expose cache topology at all (some
+/// containers, some architectures), in which case the caller falls back to the
+/// package.
+fn get_cache_domain_id(sysfs_path: &Path, cpu: usize) -> Option<usize> {
+    let cache_path = sysfs_path.join(format!("cpu/cpu{cpu}/cache"));
+    let mut best: Option<(usize, usize)> = None;
+
+    for entry in std::fs::read_dir(&cache_path).ok()? {
+        let dir = entry.ok()?.path();
+        if !dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("index"))
+        {
+            continue;
+        }
+
+        let level: usize = match std::fs::read_to_string(dir.join("level")) {
+            Ok(s) => match s.trim().parse() {
+                Ok(l) => l,
+                Err(_) => continue,
+            },
+            Err(_) => continue,
+        };
+
+        // Instruction caches are never the sharing domain we care about.
+        if matches!(
+            std::fs::read_to_string(dir.join("type"))
+                .as_deref()
+                .map(str::trim),
+            Ok("Instruction")
+        ) {
+            continue;
+        }
+
+        let Ok(shared) = ListIterator::from_path(&dir.join("shared_cpu_list")) else {
+            continue;
+        };
+        let Some(min_cpu) = shared.filter_map(Result::ok).min() else {
+            continue;
+        };
+
+        if best.is_none_or(|(best_level, _)| level > best_level) {
+            best = Some((level, min_cpu));
+        }
+    }
+
+    best.map(|(_, min_cpu)| min_cpu)
 }
 
 /// Request the machine topology.  Only CPUs that are currently `online`
@@ -125,6 +197,21 @@ pub fn get_machine_topology_unsorted() -> io::Result<Vec<CpuLocation>> {
 
     for cpu_location in &mut cpu_locations {
         cpu_location.core = *cpu_to_vcore.get(&cpu_location.cpu).unwrap();
+    }
+
+    // Densify cache domain ids the same way, and for the same reason: the
+    // placement tree assumes ids at a level are unique and consecutive, and the
+    // raw value so far is "lowest CPU sharing this cache", which is neither.
+    // BTreeMap keeps the mapping stable across invocations.
+    let raw_domains: std::collections::BTreeSet<usize> =
+        cpu_locations.iter().map(|l| l.cache_domain).collect();
+    let domain_to_dense: HashMap<usize, usize> = raw_domains
+        .into_iter()
+        .enumerate()
+        .map(|(dense, raw)| (raw, dense))
+        .collect();
+    for cpu_location in &mut cpu_locations {
+        cpu_location.cache_domain = domain_to_dense[&cpu_location.cache_domain];
     }
 
     Ok(cpu_locations)
@@ -230,12 +317,27 @@ pub(crate) mod test_helpers {
         }
     }
 
+    /// A CPU on a machine that reports no cache topology, so the cache domain
+    /// degenerates to the package. Existing tests use this, and their passing
+    /// is what shows the new level changes nothing on such machines.
     pub fn cpu_loc(numa_node: usize, package: usize, core: usize, cpu: usize) -> CpuLocation {
+        cpu_loc_cache(numa_node, package, package, core, cpu)
+    }
+
+    /// A CPU on a machine with several cache domains per package.
+    pub fn cpu_loc_cache(
+        numa_node: usize,
+        package: usize,
+        cache_domain: usize,
+        core: usize,
+        cpu: usize,
+    ) -> CpuLocation {
         CpuLocation {
             cpu,
             core,
             package,
             numa_node,
+            cache_domain,
         }
     }
 }
