@@ -280,17 +280,54 @@ extend the sort key in `hardware_topology.rs` (currently
 and `MaxSpread` spreads across domains deliberately rather than by accident.
 This is a new public field on a public struct, so it is a semver consideration.
 
-**The second half of this candidate is bigger than the first.** Note the
-absolute numbers: 8 µs for a round trip whose data movement costs 42 ns. Park
-and unpark are ~3.6 µs of it same-domain and ~8.2 µs cross-domain — spinning
-removes most of the penalty *and* most of the topology sensitivity. That points
-at the wake mechanism itself: glommio writes an eventfd (a syscall) and the
-peer reads it (another syscall). Since kernel 5.18, `IORING_OP_MSG_RING` posts
-a CQE directly into a peer's ring, which is precisely this operation without
-the eventfd round trip. Glommio already requires 5.8+. **Measure before
-building:** compare `IORING_OP_MSG_RING` against the eventfd path in isolation
-first — this candidate has a premise too, and it is exactly the kind that felt
-obvious to the arena's author.
+### 3a. `IORING_OP_MSG_RING` — premise measured, mostly falsified
+
+The obvious next thought: 8 µs for a round trip whose data movement costs 42 ns,
+and glommio's wake is a `write(2)` into the peer's eventfd plus a read back out.
+Since kernel 5.18 `IORING_OP_MSG_RING` posts a CQE straight into a peer's ring
+and removes both. Glommio already requires 5.8+, and its vendored liburing
+already declares the opcode. It looks like free money.
+
+It is not. `probe_msg_ring.rs` pits the two mechanisms against each other in
+isolation — two threads, one ring each, one submit-and-wait per direction, only
+the wake mechanism differing:
+
+| | eventfd write + read | `MSG_RING` | change |
+|---|---:|---:|---:|
+| same L3 (0↔4) | 2236 ns | 2165 ns | **−3.1%** |
+| cross L3 (0↔16) | 6214 ns | 4951 ns | −20.3% |
+
+**Same-domain it is noise.** The syscall was never the cost — parking and
+unparking is. Both mechanisms still block in `io_uring_enter` and still need a
+cross-core wakeup, and that is what the 2.2 µs buys. This is the same thing
+`spin_before_park` showed from the other direction.
+
+`MSG_RING` is worth revisiting as a modest cross-domain gain *after* placement
+lands, and not before. On its own it does not justify the complexity.
+
+### 3b. The number this turned up instead
+
+Set the two measurements side by side:
+
+| | round trip |
+|---|---:|
+| raw io_uring wake, parked, same L3 | 2236 ns |
+| glommio `shared_channel`, same L3 | 8002 ns |
+| glommio `shared_channel`, same L3, `spin_before_park(10us)` | 4428 ns |
+
+**Glommio spends ~5.8 µs per round trip above the kernel primitive it sits on**,
+and ~2.2 µs of that survives even when it never parks. That is a far larger
+target than the wake mechanism, and it is entirely in glommio's own code —
+the SPSC ring handoff, `process_foreign_wakes`, the reactor loop's per-iteration
+work, and the task wake that follows.
+
+It has not been attributed yet, and it should be before anyone proposes a fix
+for it. The instrument is `probe_shard_ping.rs` against `probe_msg_ring.rs` as
+the floor.
+
+Note also that the topology penalty is *larger* on the raw primitive (+178%,
+2236 → 6214 ns) than on glommio's channel (+69%), because glommio's fixed
+overhead dilutes it. Placement gets better, not worse, as 3b is addressed.
 
 ---
 
@@ -334,6 +371,8 @@ finding, on the same hardware, by a different route.
 | 1 | ZST schedule closure | −32% task switch | low | **done** — delivered 19.46 ns |
 | 2 | cache-domain placement | −41% cross-shard round trip | low | independent of 1; safe code; helps every multi-CCX deployment |
 | 3 | biased reference counting | −51% task switch | high | the real prize; do it once 1 has proven the header-index pattern |
+| — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
+| ? | glommio's 5.8 µs above the kernel primitive | unattributed | ? | biggest cross-shard number on the board; attribute it before proposing anything (3b) |
 
 Candidate 3's ceiling is already known (14.10 ns), which is the difference
 between this list and the roadmap that produced the arena.
