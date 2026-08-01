@@ -321,9 +321,59 @@ target than the wake mechanism, and it is entirely in glommio's own code —
 the SPSC ring handoff, `process_foreign_wakes`, the reactor loop's per-iteration
 work, and the task wake that follows.
 
-It has not been attributed yet, and it should be before anyone proposes a fix
-for it. The instrument is `probe_shard_ping.rs` against `probe_msg_ring.rs` as
-the floor.
+### 3c. Attributed: it is the syscall count
+
+No profiler on this box, so the executor, the three rings and the wake path
+were instrumented with counters directly and the shard ping-pong re-run.
+Per round trip, both shards combined:
+
+| | parked (default) | `spin_before_park(10us)` |
+|---|---:|---:|
+| round trip | 7328 ns | 3843 ns |
+| **`io_uring_enter`** | **8.00** | **6.00** |
+| — on `main` ring | 4.00 | 2.00 |
+| — on `latency` ring | 4.00 | 4.00 |
+| — on `poll` ring | 0.00 | 0.00 |
+| run loop iterations | 2.00 | 2.00 |
+| `run_one_task_queue` | 4.00 | 4.00 |
+| eventfd writes | 2.00 | 0.00 |
+| parks | 2.00 | 0.00 |
+| foreign wakes | 0.00 | 0.00 |
+| notifier registry lookups | 0.00 | 0.00 |
+
+**The raw primitive needs 2 `io_uring_enter` per round trip. Glommio issues 8.**
+At 7328 ns that is ~916 ns per enter, against ~1118 ns per enter for the raw
+probe — the per-syscall cost is the same order in both, so glommio is not doing
+something expensive in user space. It is doing the same thing four times over.
+
+Two things this rules out, both of which looked like plausible culprits:
+
+- **The foreign-wake path is not involved at all.** Zero foreign wakes and zero
+  `get_sleep_notifier_for` calls. `shared_channel` notifies the peer's eventfd
+  directly and the peer picks the item off the SPSC ring after waking, so the
+  process-wide registry lock never appears on this path.
+- **The poll ring costs nothing here.** Zero enters.
+
+**The latency ring is the standout.** Four enters per round trip — two per shard
+per loop iteration — in a workload where every task queue is
+`Latency::NotImportant` and nothing latency-sensitive is registered. It does not
+drop when the executor never parks, and lengthening `preempt_timer` to 10s does
+not change it either, so this is not the timer firing: it is the preempt timer
+being re-installed on the latency ring every loop iteration, which leaves
+`waiting_kernel_submission() > 0` and forces `needs_kernel_enter()`. See the
+comment at `sys/uring.rs:1765` — "we always install a preempt timer in the upper
+layers".
+
+In the spinning case, 4 of the 6 remaining syscalls are this.
+
+**What follows from it — and what still needs measuring.** The obvious moves are
+to skip the latency ring entirely when no latency-sensitive queue exists, to
+avoid re-arming an unchanged preempt timer, or to coalesce the main and latency
+submissions into a single enter. Each is plausible and none has had its ceiling
+measured, which is the same position the arena was in. **Measure first:** force
+the latency-ring enter off in a probe build and re-run `probe_shard_ping.rs`.
+That number decides whether this is worth real work, and it costs an afternoon
+to get.
 
 Note also that the topology penalty is *larger* on the raw primitive (+178%,
 2236 → 6214 ns) than on glommio's channel (+69%), because glommio's fixed
@@ -372,7 +422,7 @@ finding, on the same hardware, by a different route.
 | 2 | cache-domain placement | −41% cross-shard round trip | low | independent of 1; safe code; helps every multi-CCX deployment |
 | 3 | biased reference counting | −51% task switch | high | the real prize; do it once 1 has proven the header-index pattern |
 | — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
-| ? | glommio's 5.8 µs above the kernel primitive | unattributed | ? | biggest cross-shard number on the board; attribute it before proposing anything (3b) |
+| 4 | latency-ring syscalls | 4 of 6-8 `io_uring_enter` per round trip | ? | **attributed** (3c); measure the ceiling before building |
 
 Candidate 3's ceiling is already known (14.10 ns), which is the difference
 between this list and the roadmap that produced the arena.
