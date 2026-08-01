@@ -43,8 +43,8 @@ use crate::{
         membarrier, DirectIo, EnqueuedSource, EnqueuedStatus, InnerSource, IoBuffer,
         PollableStatus, Source, SourceType, Statx, TimeSpec64,
     },
-    uring_sys::{self, IoRingOp},
-    GlommioError, IoRequirements, IoStats, ReactorErrorKind, RingIoStats, TaskQueueHandle,
+    uring_sys, GlommioError, IoRequirements, IoStats, ReactorErrorKind, RingIoStats,
+    TaskQueueHandle,
 };
 use ahash::AHashMap;
 use buddy_alloc::buddy_alloc::{BuddyAlloc, BuddyAllocParam};
@@ -203,62 +203,67 @@ impl Drop for UringBuffer {
     }
 }
 
-fn check_supported_operations(ops: &[uring_sys::IoRingOp]) -> bool {
-    unsafe {
-        let probe = uring_sys::io_uring_get_probe();
-        if probe.is_null() {
-            panic!(
-                "Failed to register a probe. The most likely reason is that your kernel witnessed \
-                 Romulus killing Remus (too old!! kernel should be at least 5.8)"
+/// The opcodes glommio cannot run without.
+///
+/// Named by their kernel opcode number via `io-uring`'s `opcode::*::CODE`
+/// constants rather than a hand-maintained enum.
+static GLOMMIO_URING_OPS: &[(&str, u8)] = &[
+    ("NOP", io_uring::opcode::Nop::CODE),
+    ("READV", io_uring::opcode::Readv::CODE),
+    ("WRITEV", io_uring::opcode::Writev::CODE),
+    ("FSYNC", io_uring::opcode::Fsync::CODE),
+    ("READ_FIXED", io_uring::opcode::ReadFixed::CODE),
+    ("WRITE_FIXED", io_uring::opcode::WriteFixed::CODE),
+    ("POLL_ADD", io_uring::opcode::PollAdd::CODE),
+    ("POLL_REMOVE", io_uring::opcode::PollRemove::CODE),
+    ("SENDMSG", io_uring::opcode::SendMsg::CODE),
+    ("RECVMSG", io_uring::opcode::RecvMsg::CODE),
+    ("TIMEOUT", io_uring::opcode::Timeout::CODE),
+    ("TIMEOUT_REMOVE", io_uring::opcode::TimeoutRemove::CODE),
+    ("ACCEPT", io_uring::opcode::Accept::CODE),
+    ("LINK_TIMEOUT", io_uring::opcode::LinkTimeout::CODE),
+    ("CONNECT", io_uring::opcode::Connect::CODE),
+    ("FALLOCATE", io_uring::opcode::Fallocate::CODE),
+    ("OPENAT", io_uring::opcode::OpenAt::CODE),
+    ("CLOSE", io_uring::opcode::Close::CODE),
+    ("STATX", io_uring::opcode::Statx::CODE),
+    ("READ", io_uring::opcode::Read::CODE),
+    ("WRITE", io_uring::opcode::Write::CODE),
+    ("SEND", io_uring::opcode::Send::CODE),
+    ("RECV", io_uring::opcode::Recv::CODE),
+];
+
+/// Verifies the running kernel implements everything glommio needs.
+///
+/// Uses `io-uring`'s probe rather than liburing's `io_uring_get_probe`, so no
+/// raw pointer handling and no manual free.
+fn check_supported_operations(ops: &[(&str, u8)]) -> bool {
+    let ring = io_uring::IoUring::new(1).expect(
+        "Failed to create an io_uring. The most likely reason is that your kernel witnessed \
+         Romulus killing Remus (too old!! kernel should be at least 5.8)",
+    );
+    let mut probe = io_uring::Probe::new();
+    ring.submitter()
+        .register_probe(&mut probe)
+        .expect("Failed to register a probe against io_uring");
+
+    let mut ret = true;
+    for (name, opcode) in ops {
+        let sup = probe.is_supported(*opcode);
+        ret &= sup;
+        if !sup {
+            println!(
+                "Yo kernel is so old it was with Hannibal when he crossed the Alps! Missing \
+                 IORING_OP_{name}"
             );
         }
-
-        let mut ret = true;
-        for op in ops {
-            let opint = *{ op as *const uring_sys::IoRingOp as *const libc::c_int };
-            let sup = uring_sys::io_uring_opcode_supported(probe, opint) > 0;
-            ret &= sup;
-            if !sup {
-                println!(
-                    "Yo kernel is so old it was with Hannibal when he crossed the Alps! Missing \
-                     {op:?}"
-                );
-            }
-        }
-        uring_sys::io_uring_free_probe(probe);
-        if !ret {
-            eprintln!("Your kernel is older than Caesar. Bye");
-            std::process::exit(1);
-        }
-        ret
     }
+    if !ret {
+        eprintln!("Your kernel is older than Caesar. Bye");
+        std::process::exit(1);
+    }
+    ret
 }
-
-static GLOMMIO_URING_OPS: &[IoRingOp] = &[
-    IoRingOp::IORING_OP_NOP,
-    IoRingOp::IORING_OP_READV,
-    IoRingOp::IORING_OP_WRITEV,
-    IoRingOp::IORING_OP_FSYNC,
-    IoRingOp::IORING_OP_READ_FIXED,
-    IoRingOp::IORING_OP_WRITE_FIXED,
-    IoRingOp::IORING_OP_POLL_ADD,
-    IoRingOp::IORING_OP_POLL_REMOVE,
-    IoRingOp::IORING_OP_SENDMSG,
-    IoRingOp::IORING_OP_RECVMSG,
-    IoRingOp::IORING_OP_TIMEOUT,
-    IoRingOp::IORING_OP_TIMEOUT_REMOVE,
-    IoRingOp::IORING_OP_ACCEPT,
-    IoRingOp::IORING_OP_LINK_TIMEOUT,
-    IoRingOp::IORING_OP_CONNECT,
-    IoRingOp::IORING_OP_FALLOCATE,
-    IoRingOp::IORING_OP_OPENAT,
-    IoRingOp::IORING_OP_CLOSE,
-    IoRingOp::IORING_OP_STATX,
-    IoRingOp::IORING_OP_READ,
-    IoRingOp::IORING_OP_WRITE,
-    IoRingOp::IORING_OP_SEND,
-    IoRingOp::IORING_OP_RECV,
-];
 
 lazy_static! {
     static ref IO_URING_RECENT_ENOUGH: bool = check_supported_operations(GLOMMIO_URING_OPS);

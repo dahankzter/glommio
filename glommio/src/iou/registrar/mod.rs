@@ -14,7 +14,7 @@ mod registered;
 
 use std::{fmt, io, marker::PhantomData, os::unix::io::RawFd, ptr::NonNull};
 
-use super::{resultify, IoUring, Probe};
+use super::{resultify, IoUring};
 use crate::uring_sys;
 
 pub use registered::*;
@@ -197,10 +197,6 @@ impl<'ring> Registrar<'ring> {
             uring_sys::io_uring_unregister_personality(self.ring.as_ptr(), personality.id as _)
         })?;
         Ok(())
-    }
-
-    pub fn probe(&self) -> io::Result<Probe> {
-        Probe::for_ring(self.ring.as_ptr())
     }
 }
 

@@ -53,8 +53,6 @@ pub mod sqe;
 mod completion_queue;
 mod submission_queue;
 
-mod probe;
-
 pub mod registrar;
 
 use std::{
@@ -73,7 +71,6 @@ pub use sqe::{SQEs, SQE};
 pub use completion_queue::CompletionQueue;
 pub use submission_queue::SubmissionQueue;
 
-pub use probe::Probe;
 #[doc(inline)]
 pub use registrar::{Personality, Registrar};
 
@@ -181,10 +178,6 @@ impl IoUring {
             CompletionQueue::new(&*self),
             Registrar::new(&*self),
         )
-    }
-
-    pub fn probe(&mut self) -> io::Result<Probe> {
-        Probe::for_ring(&mut self.ring)
     }
 
     /// Submit all prepared [`SQE`]s to the kernel.
