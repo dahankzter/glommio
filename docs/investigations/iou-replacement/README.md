@@ -179,6 +179,62 @@ Work in progress sits on branch `refactor/iou-core` (pushed, not merged). It
 does not compile: `fill_sqe` and `submit_event_chain` are converted, ~20
 mechanical errors remain, plus this one.
 
+## The actual blocker: `preempt_pointers`
+
+The `sleep` question resolved. This one does not, and it is external.
+
+```rust
+pub(crate) fn preempt_pointers(&self) -> (*const u32, *const u32) {
+    let mut lat_ring = self.latency_ring.borrow_mut();
+    let cq = unsafe { &lat_ring.ring.raw_mut().cq };
+    (cq.khead, cq.ktail)
+}
+```
+
+`Reactor::need_preempt` is then a two-pointer comparison:
+
+```rust
+unsafe { *self.preempt_ptr_head != (*self.preempt_ptr_tail).load(Ordering::Acquire) }
+```
+
+This is the hottest path in glommio — every `run_task_queues` iteration and
+every `yield_if_needed`. It detects that the kernel has posted a completion
+**without entering the kernel, without a borrow, and without a syscall**, by
+reading the latency ring's `khead`/`ktail` directly.
+
+`io-uring` cannot provide this:
+
+- `CompletionQueue` stores `head` and `tail` as private `*const AtomicU32` and
+  exposes no accessor for them. Its public surface is `sync`, `overflow`,
+  `eventfd_disabled`, `capacity`, `is_empty`, `is_full`, `fill` and iteration.
+- They cannot be reconstructed either: `IoUring::params()` returns a
+  `Parameters` whose public API is only `is_setup_sqpoll`, `is_setup_iopoll`,
+  `is_setup_single_issuer`, `is_feature_single_mmap`, `is_feature_nodrop` and
+  `is_feature_submit_stable`. **`cq_off` is not exposed**, so the offsets needed
+  to map the ring independently are unavailable.
+- `completion_shared()` hands back the same opaque `CompletionQueue`.
+
+So the migration **cannot complete against `io-uring` 0.7.13 as published**.
+That is a materially different situation from "several sessions of mechanical
+work", and it was worth finding before spending them.
+
+### What to do about it
+
+1. **Upstream a small accessor.** A method returning the two pointers, or making
+   `cq_off` visible, is a few lines. Other thread-per-core runtimes want exactly
+   this for preemption checks, so it is a reasonable ask rather than a
+   glommio-specific favour. This is the clean answer and the migration resumes
+   the moment it lands.
+2. **Do not** reach into `CompletionQueue`'s private fields by offset. It would
+   work today and break silently on any upstream layout change, which is a worse
+   bargain than the vendored copy we are trying to retire.
+3. **Do not** replace `need_preempt` with something that borrows the ring or
+   enters the kernel. It is called on the hottest path in the runtime; the whole
+   point of the current design is that it costs two loads.
+
+Until then the vendored wrapper stays. Everything else about the migration is
+resolved and the work is preserved on `refactor/iou-core`.
+
 ## Suggested sequencing
 
 Each step should leave the tree compiling and the suite green.
