@@ -4,7 +4,7 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2021 Datadog, Inc.
 //
 use crate::{
-    iou::sqe::SockAddrStorage,
+    sys::SockAddrStorage,
     sys::{
         DmaBuffer, IoBuffer, OsResult, PollableStatus, ReactorQueue, SourceId, Statx, TimeSpec64,
         Wakers,

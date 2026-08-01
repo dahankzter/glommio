@@ -28,7 +28,7 @@ use smallvec::SmallVec;
 
 use crate::{
     io::{FileScheduler, IoScheduler, ScheduledSource},
-    iou::sqe::SockAddrStorage,
+    sys::SockAddrStorage,
     sys::{
         self, blocking::BlockingThreadPool, common_flags, read_flags, DirectIo, DmaBuffer,
         DmaSource, IoBuffer, PollableStatus, SleepNotifier, Source, SourceType, StatsCollection,

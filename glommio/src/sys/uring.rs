@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use io_uring::{opcode, squeue, types, IoUring};
+use io_uring::{cqueue, opcode, squeue, types, IoUring};
 
 use crate::{
     free_list::{FreeList, Idx},
@@ -396,7 +396,7 @@ where
                                     fd,
                                     buf.as_mut_ptr(),
                                     len as u32,
-                                    idx,
+                                    idx as u16,
                                 )
                                 .offset(pos)
                                 .build(),
@@ -471,10 +471,16 @@ where
     entry.user_data(user_data).flags(op.flags)
 }
 
-fn transmute_error(res: io::Result<u32>) -> io::Result<usize> {
-    res.map(|x| x as usize) // iou standardized on u32, which is good for low level but for higher layers usize is
-        // better
-        .map_err(|x| {
+/// Turns a raw CQE result into an `io::Result`.
+///
+/// io_uring reports failure as a negative errno in the completion's result
+/// field rather than through errno itself.
+fn transmute_error(res: i32) -> io::Result<usize> {
+    if res >= 0 {
+        return Ok(res as usize);
+    }
+    Err(io::Error::from_raw_os_error(-res))
+        .map_err(|x: io::Error| {
             // Convert CANCELED to TimedOut. This will be the case for linked `sqe`s with a
             // timeout, and if we wanted to be really strict we'd check. But if
             // the operation is truly cancelled no one will check the result,
@@ -977,7 +983,7 @@ impl SleepableRing {
     }
 
     fn ring_fd(&self) -> RawFd {
-        self.ring.raw().ring_fd
+        std::os::unix::io::AsRawFd::as_raw_fd(&self.ring)
     }
 
     /// This function prepares a timer that fires unconditionally after a
@@ -1059,7 +1065,7 @@ impl SleepableRing {
     }
 
     fn install_eventfd(&mut self, eventfd_src: &Source) -> bool {
-        if let Some(mut sqe) = self.ring.sq().prepare_sqe() {
+        if !self.ring.submission().is_full() {
             // Now must wait on the `eventfd` in case someone wants to wake us up.
             // If we can't then we can't sleep and will just bail immediately
             let op = UringDescriptor {
@@ -1080,8 +1086,7 @@ impl SleepableRing {
                 }
             };
 
-            fill_sqe(
-                &mut sqe,
+            let entry = fill_sqe(
                 &op,
                 |size| {
                     Some(DmaBuffer::with_storage(
@@ -1091,6 +1096,15 @@ impl SleepableRing {
                 },
                 &mut self.source_map.borrow_mut(),
             );
+            // SAFETY: the read targets the eventfd source's own buffer, which
+            // the `SourceMap` keeps alive until the completion is reaped. The
+            // emptiness check above means the push cannot fail.
+            unsafe {
+                self.ring
+                    .submission()
+                    .push(&entry)
+                    .expect("submission queue was checked to have room");
+            }
 
             match &mut *eventfd_src.source_type_mut() {
                 SourceType::ForeignNotifier(_, installed) => {
@@ -1110,8 +1124,7 @@ impl SleepableRing {
             0,
             "sleeping with pending SQEs"
         );
-        if let Some(mut sqe) = self.ring.sq().prepare_sqe() {
-            let sqe_ptr = unsafe { sqe.raw_mut() as *mut _ };
+        if !self.ring.submission().is_full() {
             let op = UringDescriptor {
                 fd: link.raw(),
                 flags: squeue::Flags::empty(),
@@ -1122,12 +1135,17 @@ impl SleepableRing {
                 ),
                 args: UringOpDescriptor::PollAdd(common_flags() | read_flags()),
             };
-            fill_sqe(
-                &mut sqe,
-                &op,
-                DmaBuffer::new,
-                &mut self.source_map.borrow_mut(),
-            );
+            let entry = fill_sqe(&op, DmaBuffer::new, &mut self.source_map.borrow_mut());
+            // SAFETY: the poll targets the latency ring's fd, which outlives
+            // this reactor, and the source is held by the `SourceMap` until its
+            // completion is reaped. The emptiness check above means the push
+            // cannot fail.
+            unsafe {
+                self.ring
+                    .submission()
+                    .push(&entry)
+                    .expect("submission queue was checked to have room");
+            }
 
             // We have now prepared the SQE that links the two rings. We now need to submit
             // it successfully to be able to safely sleep.
@@ -1142,14 +1160,19 @@ impl SleepableRing {
                 // We failed to submit the `SQE` that links the rings. Just can't sleep.
                 // Waiting here is unsafe because we could end up waiting much longer than
                 // needed.
-                // We make the SQE a no-op and return
-                unsafe { crate::uring_sys::io_uring_prep_nop(sqe_ptr) };
+                //
+                // The entry stays queued rather than being repaired. io-uring
+                // cannot rewrite an entry once pushed, and does not need to:
+                // the poll goes out with the next submit, arms on the latency
+                // ring, and completes almost immediately, and that completion
+                // is what retires the source registration. A `LinkRings`
+                // completion wakes nobody, so the only cost is a spurious CQE.
+                // See docs/investigations/iou-replacement/sleep-failure-path.md.
                 Err(io::Error::from_raw_os_error(libc::EBUSY))
             } else {
                 // The rings are linked. Goodnight!
                 self.ring
-                    .cq()
-                    .wait(1)
+                    .submit_and_wait(1)
                     .map(|_| 1)
                     .or_else(Reactor::busy_ok)
                     .or_else(Reactor::again_ok)
@@ -1352,19 +1375,21 @@ impl Reactor {
         let mut latency_ring =
             SleepableRing::new(ring_depth, "latency", allocator.clone(), source_map.clone())?;
 
-        match main_ring.registrar().register_buffers_by_ref(&registry) {
+        // SAFETY: `registry` borrows the allocator's arena, which lives as long as
+        // the reactor and therefore outlives the registration.
+        match unsafe { main_ring.submitter().register_buffers(&registry) } {
             Err(x) => warn!("Error: registering buffers in the main ring. Skipping{x:#?}"),
-            Ok(_) => match poll_ring.registrar().register_buffers_by_ref(&registry) {
+            Ok(_) => match unsafe { poll_ring.submitter().register_buffers(&registry) } {
                 Err(x) => {
                     warn!("Error: registering buffers in the poll ring. Skipping{x:#?}");
-                    main_ring.registrar().unregister_buffers().unwrap();
+                    main_ring.submitter().unregister_buffers().unwrap();
                 }
                 Ok(_) => {
-                    match latency_ring.registrar().register_buffers_by_ref(&registry) {
+                    match unsafe { latency_ring.submitter().register_buffers(&registry) } {
                         Err(x) => {
                             warn!("Error: registering buffers in the poll ring. Skipping{x:#?}");
-                            poll_ring.registrar().unregister_buffers().unwrap();
-                            main_ring.registrar().unregister_buffers().unwrap();
+                            poll_ring.submitter().unregister_buffers().unwrap();
+                            main_ring.submitter().unregister_buffers().unwrap();
                         }
                         Ok(_) => {
                             allocator.activate_registered_buffers(0);
