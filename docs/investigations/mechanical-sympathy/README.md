@@ -342,38 +342,78 @@ Per round trip, both shards combined:
 | notifier registry lookups | 0.00 | 0.00 |
 
 **The raw primitive needs 2 `io_uring_enter` per round trip. Glommio issues 8.**
-At 7328 ns that is ~916 ns per enter, against ~1118 ns per enter for the raw
-probe — the per-syscall cost is the same order in both, so glommio is not doing
-something expensive in user space. It is doing the same thing four times over.
 
-Two things this rules out, both of which looked like plausible culprits:
+### 3d. Correction: the syscall count is not the answer
 
-- **The foreign-wake path is not involved at all.** Zero foreign wakes and zero
-  `get_sleep_notifier_for` calls. `shared_channel` notifies the peer's eventfd
-  directly and the peer picks the item off the SPSC ring after waking, so the
-  process-wide registry lock never appears on this path.
-- **The poll ring costs nothing here.** Zero enters.
+The obvious reading of 3c is that glommio is paying four times the syscalls and
+that is the gap. **That reading is wrong, and measuring it is what showed it.**
 
-**The latency ring is the standout.** Four enters per round trip — two per shard
-per loop iteration — in a workload where every task queue is
-`Latency::NotImportant` and nothing latency-sensitive is registered. It does not
-drop when the executor never parks, and lengthening `preempt_timer` to 10s does
-not change it either, so this is not the timer firing: it is the preempt timer
-being re-installed on the latency ring every loop iteration, which leaves
-`waiting_kernel_submission() > 0` and forces `needs_kernel_enter()`. See the
-comment at `sys/uring.rs:1765` — "we always install a preempt timer in the upper
-layers".
+A non-sleeping `io_uring_enter` on this box (`probe_msg_ring.rs`, `entercost`
+binary):
 
-In the spinning case, 4 of the 6 remaining syscalls are this.
+| | cost |
+|---|---:|
+| `submit()` with one SQE queued | 99 ns |
+| `submit_and_wait(1)`, completion already posted | 110 ns |
+| `submit()` with an empty SQ | 69 ns |
 
-**What follows from it — and what still needs measuring.** The obvious moves are
-to skip the latency ring entirely when no latency-sensitive queue exists, to
-avoid re-arming an unchanged preempt timer, or to coalesce the main and latency
-submissions into a single enter. Each is plausible and none has had its ceiling
-measured, which is the same position the arena was in. **Measure first:** force
-the latency-ring enter off in a probe build and re-run `probe_shard_ping.rs`.
-That number decides whether this is worth real work, and it costs an afternoon
-to get.
+**~100 ns.** Six extra enters is ~600 ns, not the ~5 µs gap. The enters that
+cost real time are the ones that *sleep*, and glommio issues the same number of
+those as the primitive does: two, one per shard.
+
+So 3c identified a true difference that is not the important one. Recorded
+rather than quietly fixed, because it is the same mistake the arena made in a
+smaller form — a plausible mechanism, a real measurement pointed at it, and the
+wrong conclusion drawn because the unit cost was never checked.
+
+### 3e. Where it actually goes
+
+Phase timers inside the run loop, per round trip, both shards combined
+(`Instant::now()` around each phase adds roughly 250 ns per iteration of
+measurement overhead, visible as the round trip inflating from 7204 to 7529 ns;
+treat these as apportionment, not absolutes):
+
+| phase | parked | spinning |
+|---|---:|---:|
+| round trip | 7529 ns | 4137 ns |
+| `parker.poll_io` | 3282 ns | 3189 ns |
+| — poll ring | 248 ns | 1236 ns |
+| — main ring | 121 ns | 625 ns |
+| — latency ring | 118 ns | 607 ns |
+| — syscall-thread flush | 53 ns | 275 ns |
+| — remainder (park/sleep, preempt timer) | ~2742 ns | ~446 ns |
+| `run_task_queues` | 1457 ns | 282 ns |
+| polling the main future | 38 ns | 36 ns |
+
+Read the parked column: **most of `poll_io` is the park and the wakeup**, which
+the raw primitive pays too (~2.2 µs of its 2236 ns). The three rings' per-
+iteration bookkeeping is ~540 ns. `run_task_queues` is ~1.5 µs.
+
+The spinning column looks like the rings got dramatically more expensive; they
+did not. `spin_before_park` spins *inside* `poll_io`, so those figures
+accumulate many calls per loop iteration. That is the cost of buying latency
+with CPU, working as intended.
+
+**The honest conclusion is that there is no single dominant target.** The gap
+decomposes roughly into ~2.2 µs of irreducible park-and-wake that any design
+pays, ~1.5 µs of `run_task_queues`, ~0.5 µs of ring bookkeeping across three
+rings, ~0.6 µs of extra syscalls, and loop overhead. Attacking any one of them
+returns a fraction of a fraction.
+
+That is a much less exciting answer than 3c looked like, and it is the answer.
+
+### 3f. One thing that is now ruled out
+
+"Stop installing the preempt timer" is not available. `uring.rs:1769` says the
+preempt timer is optional from io_uring's point of view, and it is — but the
+eventfd a sleeping shard is woken through is installed on the **latency ring**
+(`uring.rs:1346`), and the latency ring only enters the kernel when it has
+something to submit. Remove the preempt timer and the eventfd read SQE never
+reaches the kernel, so a parked shard is never woken.
+
+Verified the direct way: patching `poll_io(|| Some(...))` to `poll_io(|| None)`
+deadlocks the shard ping-pong immediately, in both the parked and the spinning
+configuration. The preempt timer is load-bearing for the wake path.
 
 Note also that the topology penalty is *larger* on the raw primitive (+178%,
 2236 → 6214 ns) than on glommio's channel (+69%), because glommio's fixed
@@ -422,7 +462,7 @@ finding, on the same hardware, by a different route.
 | 2 | cache-domain placement | −41% cross-shard round trip | low | independent of 1; safe code; helps every multi-CCX deployment |
 | 3 | biased reference counting | −51% task switch | high | the real prize; do it once 1 has proven the header-index pattern |
 | — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
-| 4 | latency-ring syscalls | 4 of 6-8 `io_uring_enter` per round trip | ? | **attributed** (3c); measure the ceiling before building |
+| — | ~~latency-ring syscalls~~ | ~600 ns of a ~5 µs gap | — | **dropped**: an enter costs ~100 ns, and removing the preempt timer deadlocks the wake path (3d, 3f) |
 
 Candidate 3's ceiling is already known (14.10 ns), which is the difference
 between this list and the roadmap that produced the arena.
