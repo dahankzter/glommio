@@ -5,6 +5,7 @@
 Cargo.lock
 .claude/
 test_spsc_corruption.rs
+HANDOFF.md
 
 # Coverage reports
 lcov.info
