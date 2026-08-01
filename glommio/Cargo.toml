@@ -56,6 +56,18 @@ typenum = "1.19"
 [build-dependencies]
 cc = "1.2"
 
+[dev-dependencies]
+criterion = "0.5"
+fastrand = "2.3"
+futures = "0.3"
+hdrhistogram = "7.5"
+mimalloc = { version = "0.1", default-features = false }
+pretty_env_logger = "0.5"
+rand = "0.9"
+tikv-jemallocator = "0.6"
+tokio = { version = "1.49", default-features = false, features = ["rt", "macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [lints.rust]
 # The alloc_compare example selects its global allocator with these.
 unexpected_cfgs = { level = "warn", check-cfg = [
@@ -63,18 +75,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(alloc_mimalloc)',
     'cfg(alloc_jemalloc)',
 ] }
-
-[dev-dependencies]
-mimalloc = { version = "0.1", default-features = false }
-tikv-jemallocator = "0.6"
-criterion = "0.5"
-fastrand = "2.3"
-futures = "0.3"
-hdrhistogram = "7.5"
-pretty_env_logger = "0.5"
-rand = "0.9"
-tokio = { version = "1.49", default-features = false, features = ["rt", "macros", "rt-multi-thread", "net", "io-util", "time", "sync"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[bench]]
 name = "executor"
