@@ -184,7 +184,11 @@ produced by forcing the guard condition to `false`.
 
 ## Candidate 2 — stop paying for atomics on thread-local wakers
 
-**Measured win: 28.72 → 14.10 ns/switch, −51%. With candidate 1: 11.97 ns, −58%.**
+**Status: attempted and scrapped.** Re-measured properly, the win is
+**1.1-2.5 ns (7-15%)**, not the 51% below, and Miri cannot validate the change.
+See "why this was scrapped" at the end of this section.
+
+**~~Measured win: 28.72 → 14.10 ns/switch, −51%. With candidate 1: 11.97 ns, −58%.~~**
 **Risk: high. This is the hard one, and it is the real prize.**
 
 The refcount is atomic because Rust's `Waker` is
@@ -220,6 +224,59 @@ and ships the larger part of its value immediately.
 literal measurement of the ceiling, produced by replacing `fetch_add`/
 `fetch_sub` with `load`+`store`. That patch is unsound as a shipping change;
 it is sound as a measurement of what is available.
+
+### Why this was scrapped
+
+**The ceiling was measured wrong the first time.** The 2x2 in section 3 compared
+cells across a single session but *different builds at different times*; the
+baseline drifts by 15% between sessions on this box (28.72, then 19.46, then
+16.50 for the same code path), which is enough to swamp the effect being
+measured. Redone as an interleaved A/B — alternating the two builds back to back
+within one session, five rounds:
+
+| | atomic (today) | non-atomic | delta |
+|---|---:|---:|---:|
+| single task, yield loop | 16.50 ns | 15.48 ns | **−1.02 ns, −6.2%** |
+| two tasks alternating | 16.14 ns | 13.66 ns | **−2.48 ns, −15.4%** |
+
+Variance within each arm was under 0.1 ns, so this is the trustworthy number:
+**removing every reference-count atomic from the task path is worth 1.1-2.5 ns.**
+
+**Primitive cost is not path cost.** An atomic read-modify-write measures 4.4 ns
+in isolation (section 1), and there are two left on the path, so this "should"
+have been ~8.8 ns. It is not, because the isolated benchmark times a dependent
+chain while the real path has other work to overlap with — out-of-order
+execution hides most of the latency. Section 3's "58% of a task switch is
+reference counting" is therefore **wrong**, and the error is instructive:
+candidate 1's 9.3 ns came mostly from the work it deleted *around* the atomics
+(a `Waker` construction, an `Option`, and a drop), not from the two atomics
+themselves.
+
+**And Miri cannot check the result.** Any task-lifecycle test aborts under Miri:
+
+```
+error: unsupported operation: syscall: unsupported syscall number 324
+  sys::membarrier::syscall::sys_membarrier
+```
+
+`make miri-core` covers `channels::spsc_queue` and `free_list` — not the task
+refcount. So this change would rewrite the reference counting in the task
+lifecycle, with a signed shared counter that may go negative, an
+only-the-owner-destroys protocol and hand-reasoned memory ordering, **with no
+undefined-behaviour checker able to run over it**. That is the code path the
+original maintainer described as "refcount hell in the task structures", and
+where the arena's use-after-free lived.
+
+`Header` also has no padding left — candidate 1 consumed it — so a second
+counter means shrinking `executor_id` to a `u32` as well.
+
+**1.1-2.5 ns is not worth that.** In a fork whose stated purpose is fixing
+memory-safety bugs, taking unverifiable risk in the task lifecycle for 7-15% of
+a task switch is the wrong trade. Scrapped.
+
+If it is ever revisited, the prerequisite is making Miri able to run task tests
+at all — probably by stubbing `sys_membarrier`. That is worth doing on its own
+merits regardless of this candidate.
 
 ---
 
@@ -512,7 +569,7 @@ finding, on the same hardware, by a different route.
 |---|---|---:|---|---|
 | 1 | ZST schedule closure | −32% task switch | low | **done** — delivered 19.46 ns |
 | 2 | cache-domain placement | avoids a +58% cross-domain penalty | low | **done** — `MaxPack` now touches one domain at every size |
-| 3 | biased reference counting | −51% task switch | high | the real prize; do it once 1 has proven the header-index pattern |
+| — | ~~biased reference counting~~ | 1.1-2.5 ns (7-15%) | — | **scrapped**: re-measured far smaller than thought, and Miri cannot cover the task lifecycle |
 | — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
 | — | ~~latency-ring syscalls~~ | ~600 ns of a ~5 µs gap | — | **dropped**: an enter costs ~100 ns, and removing the preempt timer deadlocks the wake path (3d, 3f) |
 
