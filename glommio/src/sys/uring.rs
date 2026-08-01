@@ -674,12 +674,16 @@ impl UringQueueState {
 pub(crate) trait UringCommon {
     fn submission_queue(&mut self) -> ReactorQueue;
     fn submit_sqes(&mut self) -> io::Result<usize>;
-    fn waiting_kernel_submission(&self) -> usize;
+    /// These take `&mut self` because they read the ring's submission and
+    /// completion queues, and a ring's queue accessors require exclusive
+    /// access. Keeping them exclusive here means the queues never have to be
+    /// reached through a shared-reference escape hatch.
+    fn waiting_kernel_submission(&mut self) -> usize;
     #[allow(unused)]
     fn in_kernel(&self) -> usize;
-    fn waiting_kernel_collection(&self) -> usize;
-    fn needs_kernel_enter(&self) -> bool;
-    fn can_sleep(&self) -> bool;
+    fn waiting_kernel_collection(&mut self) -> usize;
+    fn needs_kernel_enter(&mut self) -> bool;
+    fn can_sleep(&mut self) -> bool;
     /// None if it wasn't possible to acquire an `sqe`. `Some(true)` if it was
     /// possible and there was something to dispatch. `Some(false)` if there
     /// was nothing to dispatch
@@ -690,7 +694,7 @@ pub(crate) trait UringCommon {
     fn name(&self) -> &'static str;
     fn io_stats_mut(&mut self) -> &mut RingIoStats;
     fn io_stats_for_task_queue_mut(&mut self, handle: TaskQueueHandle) -> &mut RingIoStats;
-    fn registrar(&self) -> iou::Registrar<'_>;
+    fn registrar(&mut self) -> iou::Registrar<'_>;
     fn may_rush(&self) -> bool {
         true
     }
@@ -838,22 +842,22 @@ impl UringCommon for PollRing {
         self.task_queue_stats.entry(handle).or_default()
     }
 
-    fn registrar(&self) -> iou::Registrar<'_> {
+    fn registrar(&mut self) -> iou::Registrar<'_> {
         self.ring.registrar()
     }
 
-    fn needs_kernel_enter(&self) -> bool {
+    fn needs_kernel_enter(&mut self) -> bool {
         // We need to enter the kernel to submit and collect CQEs so if the number of
         // submitted requests doesn't match the number of request we collected, we need
         // to poll.
         self.in_kernel > 0 || self.waiting_kernel_submission() > 0
     }
 
-    fn can_sleep(&self) -> bool {
+    fn can_sleep(&mut self) -> bool {
         self.submission_queue.borrow().is_empty() && !self.needs_kernel_enter()
     }
 
-    fn waiting_kernel_submission(&self) -> usize {
+    fn waiting_kernel_submission(&mut self) -> usize {
         self.ring.sq().ready() as usize
     }
 
@@ -861,7 +865,7 @@ impl UringCommon for PollRing {
         self.in_kernel
     }
 
-    fn waiting_kernel_collection(&self) -> usize {
+    fn waiting_kernel_collection(&mut self) -> usize {
         self.ring.cq().ready() as usize
     }
 
@@ -1139,7 +1143,7 @@ impl UringCommon for SleepableRing {
         self.task_queue_stats.entry(handle).or_default()
     }
 
-    fn registrar(&self) -> iou::Registrar<'_> {
+    fn registrar(&mut self) -> iou::Registrar<'_> {
         self.ring.registrar()
     }
 
@@ -1147,19 +1151,19 @@ impl UringCommon for SleepableRing {
         false
     }
 
-    fn needs_kernel_enter(&self) -> bool {
+    fn needs_kernel_enter(&mut self) -> bool {
         // We only need to enter the kernel to submit SQEs, not to collect CQEs (the
         // kernel posts the CQEs asynchronously for us)
         self.waiting_kernel_submission() > 0
     }
 
-    fn can_sleep(&self) -> bool {
+    fn can_sleep(&mut self) -> bool {
         self.submission_queue.borrow().is_empty()
             && self.waiting_kernel_submission() == 0
             && self.waiting_kernel_collection() == 0
     }
 
-    fn waiting_kernel_submission(&self) -> usize {
+    fn waiting_kernel_submission(&mut self) -> usize {
         self.ring.sq().ready() as usize
     }
 
@@ -1167,7 +1171,7 @@ impl UringCommon for SleepableRing {
         self.in_kernel
     }
 
-    fn waiting_kernel_collection(&self) -> usize {
+    fn waiting_kernel_collection(&mut self) -> usize {
         self.ring.cq().ready() as usize
     }
 
@@ -1305,9 +1309,9 @@ impl Reactor {
         let allocator = Rc::new(UringBufferAllocator::new(io_memory));
         let registry = vec![allocator.as_bytes()];
 
-        let main_ring =
+        let mut main_ring =
             SleepableRing::new(ring_depth, "main", allocator.clone(), source_map.clone())?;
-        let poll_ring = PollRing::new(ring_depth, allocator.clone(), source_map.clone())?;
+        let mut poll_ring = PollRing::new(ring_depth, allocator.clone(), source_map.clone())?;
         let mut latency_ring =
             SleepableRing::new(ring_depth, "latency", allocator.clone(), source_map.clone())?;
 
