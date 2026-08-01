@@ -130,9 +130,16 @@ Not in the opcode translation, which is mechanical. In these:
    recorded in [mechanical-sympathy](../mechanical-sympathy/). Validation is the
    test suite and nothing else.
 
-## The one thing that does not translate: `SleepableRing::sleep`
+## The one thing that looked untranslatable: `SleepableRing::sleep`
 
-Found while converting, and it is the reason the core step is not finished.
+**Resolved — see [sleep-failure-path.md](sleep-failure-path.md).** The nop's
+real job is retiring the source registration, not neutralising the poll, and a
+`LinkRings` completion wakes nobody. So a failed submit can simply leave the
+entry queued: it goes out with the next submit, completes on the latency ring
+almost immediately, and its completion retires the source. No repair needed.
+The remaining migration work is mechanical.
+
+The original problem, for the record:
 
 ```rust
 if let Some(mut sqe) = self.ring.sq().prepare_sqe() {
