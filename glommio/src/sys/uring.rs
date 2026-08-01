@@ -6,7 +6,6 @@
 use alloc::alloc::Layout;
 use log::warn;
 use nix::{
-    fcntl::{FallocateFlags, OFlag},
     poll::PollFlags,
     sys::socket::{SockaddrLike, SockaddrStorage},
 };
@@ -15,7 +14,6 @@ use std::{
     cell::{Cell, Ref, RefCell, RefMut},
     collections::VecDeque,
     convert::TryFrom,
-    ffi::CStr,
     fmt,
     future::Future,
     io,
@@ -40,15 +38,11 @@ use crate::{
         membarrier, DirectIo, EnqueuedSource, EnqueuedStatus, InnerSource, IoBuffer,
         PollableStatus, SockAddrStorage, Source, SourceType, Statx, TimeSpec64,
     },
-    uring_sys, GlommioError, IoRequirements, IoStats, ReactorErrorKind, RingIoStats,
-    TaskQueueHandle,
+    GlommioError, IoRequirements, IoStats, ReactorErrorKind, RingIoStats, TaskQueueHandle,
 };
 use ahash::AHashMap;
 use buddy_alloc::buddy_alloc::{BuddyAlloc, BuddyAllocParam};
-use nix::sys::{
-    socket::{MsgFlags, SockFlag},
-    stat::Mode as OpenMode,
-};
+use nix::sys::socket::{MsgFlags, SockFlag};
 use smallvec::SmallVec;
 
 const MSG_ZEROCOPY: i32 = 0x4000000;
@@ -67,11 +61,11 @@ enum UringOpDescriptor {
     Close,
     FDataSync,
     Connect(*const SockaddrStorage),
-    LinkTimeout(*const uring_sys::__kernel_timespec),
+    LinkTimeout(*const crate::sys::KernelTimespec),
     Accept(*mut SockAddrStorage),
     Fallocate(u64, u64, libc::c_int),
     StatxFd(RawFd, *mut Statx),
-    Timeout(*const uring_sys::__kernel_timespec, u32),
+    Timeout(*const crate::sys::KernelTimespec, u32),
     TimeoutRemove(u64),
     SockSend(*const u8, usize, i32),
     SockSendMsg(*mut libc::msghdr, i32),
@@ -288,8 +282,9 @@ where
     // fill-in-place implementation relied on.
     let entry = unsafe {
         match op.args {
-            UringOpDescriptor::PollAdd(events) => opcode::PollAdd::new(fd, events.bits() as _)
-                .build(),
+            UringOpDescriptor::PollAdd(events) => {
+                opcode::PollAdd::new(fd, events.bits() as _).build()
+            }
             UringOpDescriptor::PollRemove(to_remove) => {
                 user_data = 0;
                 opcode::PollRemove::new(to_remove as u64).build()
@@ -301,8 +296,8 @@ where
             UringOpDescriptor::Write(ptr, len, pos) => {
                 opcode::Write::new(fd, ptr, len as u32).offset(pos).build()
             }
-            UringOpDescriptor::Read(pos, len) => source_map
-                .peek_source_mut(from_user_data(op.user_data), |mut x| {
+            UringOpDescriptor::Read(pos, len) => {
+                source_map.peek_source_mut(from_user_data(op.user_data), |mut x| {
                     match &mut x.source_type {
                         SourceType::ForeignNotifier(result, _) => {
                             opcode::Read::new(fd, result as *mut u64 as *mut u8, 8)
@@ -323,7 +318,8 @@ where
                         }
                         _ => unreachable!("Expected Read source type"),
                     }
-                }),
+                })
+            }
             UringOpDescriptor::Open(path, flags, mode) => {
                 opcode::OpenAt::new(fd, path as *const libc::c_char)
                     .flags(flags)
@@ -350,14 +346,14 @@ where
                     .flags(SockFlag::SOCK_CLOEXEC.bits())
                     .build()
             }
-            UringOpDescriptor::Fallocate(offset, size, flags) => {
-                opcode::Fallocate::new(fd, size).offset(offset).mode(flags).build()
-            }
+            UringOpDescriptor::Fallocate(offset, size, flags) => opcode::Fallocate::new(fd, size)
+                .offset(offset)
+                .mode(flags)
+                .build(),
             UringOpDescriptor::StatxFd(statx_fd, statx_buf) => {
                 const EMPTY_PATH: &[u8] = b"\0";
-                let flags = libc::AT_STATX_SYNC_AS_STAT
-                    | libc::AT_NO_AUTOMOUNT
-                    | libc::AT_EMPTY_PATH;
+                let flags =
+                    libc::AT_STATX_SYNC_AS_STAT | libc::AT_NO_AUTOMOUNT | libc::AT_EMPTY_PATH;
                 opcode::Statx::new(
                     types::Fd(statx_fd),
                     EMPTY_PATH.as_ptr() as *const libc::c_char,
@@ -372,9 +368,7 @@ where
                     .count(events)
                     .build()
             }
-            UringOpDescriptor::TimeoutRemove(timer) => {
-                opcode::TimeoutRemove::new(timer).build()
-            }
+            UringOpDescriptor::TimeoutRemove(timer) => opcode::TimeoutRemove::new(timer).build(),
             UringOpDescriptor::Close => opcode::Close::new(fd).build(),
             UringOpDescriptor::ReadFixed(pos, len) => {
                 let mut buf = buffer_allocation(len).expect("Buffer allocation failed");
@@ -413,11 +407,9 @@ where
                     .offset(pos)
                     .build()
             }
-            UringOpDescriptor::SockSend(ptr, len, flags) => {
-                opcode::Send::new(fd, ptr, len as u32)
-                    .flags(flags | MSG_ZEROCOPY)
-                    .build()
-            }
+            UringOpDescriptor::SockSend(ptr, len, flags) => opcode::Send::new(fd, ptr, len as u32)
+                .flags(flags | MSG_ZEROCOPY)
+                .build(),
             UringOpDescriptor::SockSendMsg(hdr, flags) => {
                 opcode::SendMsg::new(fd, hdr as *const libc::msghdr)
                     .flags((flags | MSG_ZEROCOPY) as u32)
@@ -479,18 +471,17 @@ fn transmute_error(res: i32) -> io::Result<usize> {
     if res >= 0 {
         return Ok(res as usize);
     }
-    Err(io::Error::from_raw_os_error(-res))
-        .map_err(|x: io::Error| {
-            // Convert CANCELED to TimedOut. This will be the case for linked `sqe`s with a
-            // timeout, and if we wanted to be really strict we'd check. But if
-            // the operation is truly cancelled no one will check the result,
-            // and we have no other use case for cancel at the moment so keep it simple
-            if let Some(libc::ECANCELED) = x.raw_os_error() {
-                io::Error::from_raw_os_error(libc::ETIMEDOUT)
-            } else {
-                x
-            }
-        })
+    Err(io::Error::from_raw_os_error(-res)).map_err(|x: io::Error| {
+        // Convert CANCELED to TimedOut. This will be the case for linked `sqe`s with a
+        // timeout, and if we wanted to be really strict we'd check. But if
+        // the operation is truly cancelled no one will check the result,
+        // and we have no other use case for cancel at the moment so keep it simple
+        if let Some(libc::ECANCELED) = x.raw_os_error() {
+            io::Error::from_raw_os_error(libc::ETIMEDOUT)
+        } else {
+            x
+        }
+    })
 }
 
 fn record_stats<Ring: UringCommon>(
@@ -924,8 +915,11 @@ impl UringCommon for PollRing {
 
     fn consume_one_event(&mut self) -> Option<bool> {
         let source_map = self.source_map.clone();
+        // Reap the completion before the closure below borrows `self`, since
+        // the completion queue borrows the ring exclusively.
+        let cqe = self.ring.completion().next();
         process_one_event(
-            self.ring.completion().next(),
+            cqe,
             |_| None,
             |mut src, res| {
                 record_stats(self, &mut src, &res);
@@ -1247,8 +1241,10 @@ impl UringCommon for SleepableRing {
 
     fn consume_one_event(&mut self) -> Option<bool> {
         let source_map = self.source_map.clone();
+        // As above: reap first, then borrow `self` in the post-process closure.
+        let cqe = self.ring.completion().next();
         process_one_event(
-            self.ring.completion().next(),
+            cqe,
             |source| match source.source_type {
                 SourceType::LinkRings => Some(()),
                 _ => None,
@@ -1367,7 +1363,13 @@ impl Reactor {
         io_memory = std::cmp::max(align_up(io_memory, 4096), 65536);
 
         let allocator = Rc::new(UringBufferAllocator::new(io_memory));
-        let registry = vec![allocator.as_bytes()];
+        let registry = {
+            let bytes = allocator.as_bytes();
+            vec![libc::iovec {
+                iov_base: bytes.as_ptr() as *mut libc::c_void,
+                iov_len: bytes.len(),
+            }]
+        };
 
         let mut main_ring =
             SleepableRing::new(ring_depth, "main", allocator.clone(), source_map.clone())?;
@@ -1965,8 +1967,12 @@ impl Reactor {
 
     pub(crate) fn preempt_pointers(&self) -> (*const u32, *const u32) {
         let mut lat_ring = self.latency_ring.borrow_mut();
-        let cq = unsafe { &lat_ring.ring.raw_mut().cq };
-        (cq.khead, cq.ktail)
+        // SAFETY: the pointers are read-only and remain valid for the life of
+        // the ring, which the `Reactor` owns. `need_preempt` compares them
+        // without entering the kernel, which is why it has to be raw pointers
+        // rather than a borrow of the queue.
+        let (head, tail) = unsafe { lat_ring.ring.completion().head_tail_ptrs() };
+        (head as *const u32, tail as *const u32)
     }
 
     /// RAII-truncate asynchronously files that required it, e.g. because of

@@ -286,7 +286,6 @@ mod free_list;
 #[allow(clippy::redundant_slicing)]
 #[allow(dead_code)]
 #[allow(clippy::upper_case_acronyms)]
-mod iou;
 mod parking;
 mod reactor;
 mod sys;
@@ -294,8 +293,6 @@ pub mod task;
 
 #[allow(dead_code)]
 #[allow(clippy::upper_case_acronyms)]
-mod uring_sys;
-
 #[cfg(feature = "bench")]
 #[doc(hidden)]
 pub mod nop;

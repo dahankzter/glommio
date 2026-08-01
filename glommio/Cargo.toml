@@ -38,7 +38,7 @@ enclose = "1.2"
 flume = { version = "0.12", features = ["async"] }
 futures-lite = "2.6"
 intrusive-collections = "0.10"
-io-uring = "0.7"
+io-uring = { git = "https://github.com/dahankzter/io-uring", branch = "feat/cq-head-tail-ptrs" }
 lazy_static = "1.5"
 libc = "0.2"
 log = "0.4"
