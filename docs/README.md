@@ -52,6 +52,25 @@ not in malloc — a process-wide `RwLock` taken on every spawn. Fixing that took
 spawn at 64 executors from 4350.9 ns to ~28-37 ns, in safe code, and fixed
 #448 at the root as a side effect.
 
+### [Where the Cycles Actually Go](./investigations/mechanical-sympathy/)
+**Status:** Three candidates, each premise measured before proposal
+**Approach:** measure the machine, then the runtime, then propose
+
+Measures what a glommio task switch actually spends its 28.7 ns on, and what
+this hardware charges for the primitives involved. Reference counting is 58% of
+a task switch, and two of the four atomics per switch exist only because the
+schedule closure captures 8 bytes.
+
+**Candidates, with ceilings established by patching and re-benchmarking:**
+- Zero-sized schedule closure — **-32%** task switch, low risk, safe code
+- Cache-domain-aware placement — **-41%** cross-shard round trip; `CpuLocation`
+  has no L3 level, and cross-L3 line transfer costs 11.4x here
+- Biased reference counting — **-51%** task switch, high risk, the real prize
+
+**Also records what not to do:** the planned `RefCell` → `UnsafeCell` work
+(P2b, "10-15%", Critical unsoundness risk) has an unmeasured premise — a
+`RefCell` borrow costs 0.449 ns.
+
 ### [Unsafe Code Centralization Analysis](./investigations/unsafe-centralization/)
 **Status:** Analysis complete
 **Complexity:** High (7-12 weeks refactoring)
@@ -83,6 +102,9 @@ docs/
     │   └── reproduce.rs      # Test demonstrating the leak
     ├── issue_695/
     │   └── README.md         # API design investigation
+    ├── mechanical-sympathy/
+    │   ├── README.md         # Where the cycles go + three measured candidates
+    │   └── probe_*.rs        # Reproducible probes (primitives, topology, shard, switch)
     ├── task-arena/
     │   └── README.md         # Arena allocator post-mortem (built, measured, reverted)
     └── unsafe-centralization/
