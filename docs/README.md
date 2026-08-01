@@ -71,6 +71,21 @@ schedule closure captures 8 bytes.
 (P2b, "10-15%", Critical unsoundness risk) has an unmeasured premise — a
 `RefCell` borrow costs 0.449 ns.
 
+### [Replacing the Vendored `iou` / `uring_sys`](./investigations/iou-replacement/)
+**Status:** Surveyed and scoped, not attempted
+**Prize:** 35% of the fork's unsafe surface, and an unfreezing of io_uring
+
+`glommio/src/iou` and `glommio/src/uring_sys` are 3,042 hand-maintained lines
+holding **108 of glommio's 309 `unsafe` occurrences**. They are a copy of two
+abandoned crates — there is nothing to upgrade to. The vendored `liburing`
+submodule is current, which is why the C header knows `IORING_SETUP_*` flags to
+bit 18 while the Rust wrapper stops at bit 5.
+
+Replacing them with the maintained `io-uring` crate would delete more unsafe
+than everything the centralization analysis proposes. Contains the full API
+mapping, the structural reasons this is not a dependency swap, where the risk
+concentrates, and a step-by-step sequencing that keeps the suite green.
+
 ### [Unsafe Code Centralization Analysis](./investigations/unsafe-centralization/)
 **Status:** Analysis complete
 **Complexity:** High (7-12 weeks refactoring)
@@ -102,6 +117,8 @@ docs/
     │   └── reproduce.rs      # Test demonstrating the leak
     ├── issue_695/
     │   └── README.md         # API design investigation
+    ├── iou-replacement/
+    │   └── README.md         # Retiring the vendored io_uring wrappers
     ├── mechanical-sympathy/
     │   ├── README.md         # Where the cycles go + three measured candidates
     │   └── probe_*.rs        # Reproducible probes (primitives, topology, shard, switch)
