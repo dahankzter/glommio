@@ -446,23 +446,16 @@ pub use crate::{
         ResourceType, Result,
     },
     executor::{
-        allocate_dma_buffer, allocate_dma_buffer_global, early_init, executor,
+        allocate_dma_buffer, allocate_dma_buffer_global, early_init, executor, spawn_local,
+        spawn_local_into, spawn_scoped_local, spawn_scoped_local_into,
         stall::{DefaultStallDetectionHandler, StallDetection, StallDetectionHandler},
         yield_if_needed, CpuSet, ExecutorJoinHandle, ExecutorProxy, ExecutorStats, LocalExecutor,
         LocalExecutorBuilder, LocalExecutorPoolBuilder, Placement, PoolPlacement,
-        PoolThreadHandles, Task, TaskQueueHandle, TaskQueueStats,
+        PoolThreadHandles, ScopedTask, Task, TaskQueueHandle, TaskQueueStats,
     },
     shares::{Shares, SharesManager},
     sys::hardware_topology::CpuLocation,
 };
-
-// When feature is disabled: internal only (pub(crate))
-// When feature is enabled: public (pub, which is also accessible internally)
-#[cfg(not(feature = "unsafe_detached"))]
-pub(crate) use crate::executor::{spawn_local, spawn_local_into};
-
-#[cfg(feature = "unsafe_detached")]
-pub use crate::executor::{spawn_local, spawn_local_into};
 
 pub use enclose::enclose;
 pub use scopeguard::defer;
@@ -477,16 +470,11 @@ use std::{
 pub mod prelude {
     #[doc(no_inline)]
     pub use crate::{
-        error::GlommioError, executor, yield_if_needed, ByteSliceExt, ByteSliceMutExt,
-        ExecutorProxy, IoStats, Latency, LocalExecutor, LocalExecutorBuilder,
-        LocalExecutorPoolBuilder, Placement, PoolPlacement, PoolThreadHandles, RingIoStats, Shares,
-        TaskQueueHandle,
+        error::GlommioError, executor, spawn_local, spawn_local_into, yield_if_needed,
+        ByteSliceExt, ByteSliceMutExt, ExecutorProxy, IoStats, Latency, LocalExecutor,
+        LocalExecutorBuilder, LocalExecutorPoolBuilder, Placement, PoolPlacement,
+        PoolThreadHandles, RingIoStats, Shares, TaskQueueHandle,
     };
-
-    // spawn_local is unsafe and requires explicit opt-in via feature flag
-    #[cfg(feature = "unsafe_detached")]
-    #[doc(no_inline)]
-    pub use crate::{spawn_local, spawn_local_into};
 }
 
 /// An attribute of a [`TaskQueue`], passed during its creation.

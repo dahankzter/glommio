@@ -38,7 +38,7 @@ allocator instead.
 Reproduce with:
 ```bash
 RUSTFLAGS='--cfg alloc_mimalloc' cargo run --release \
-  --features unsafe_detached --example alloc_compare
+  --example alloc_compare
 ```
 
 ### Platform Support

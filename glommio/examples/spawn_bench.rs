@@ -4,7 +4,7 @@
 //! costs microseconds and swamps the nanosecond-scale allocation path being
 //! measured here.
 //!
-//! Run with: cargo run --release --features unsafe_detached --example spawn_bench
+//! Run with: cargo run --release --example spawn_bench
 
 use glommio::{spawn_local, LocalExecutor};
 use std::time::Instant;

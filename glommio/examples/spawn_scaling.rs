@@ -5,7 +5,7 @@
 //! growth here is the runtime itself serialising cores against each other, and
 //! it is the regression this benchmark exists to catch.
 //!
-//! Run with: cargo run --release --features unsafe_detached --example spawn_scaling
+//! Run with: cargo run --release --example spawn_scaling
 
 use glommio::{spawn_local, LocalExecutor};
 use std::sync::{Arc, Barrier};

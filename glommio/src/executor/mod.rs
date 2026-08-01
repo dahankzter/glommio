@@ -52,6 +52,7 @@ use std::{
     fmt,
     future::Future,
     io,
+    marker::PhantomData,
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
     pin::Pin,
@@ -1155,90 +1156,6 @@ pub struct LocalExecutor {
     stall_detector: RefCell<Option<StallDetector>>,
 }
 
-/// A scope for spawning tasks with compile-time lifetime guarantees.
-///
-/// Tasks spawned within a scope cannot outlive the scope itself. The scope
-/// waits for all spawned tasks to complete before the future completes,
-/// ensuring memory safety without runtime overhead on the hot path.
-///
-/// This is the **safe default API** for task spawning in glommio. Tasks
-/// are guaranteed to not outlive their executor, preventing use-after-free
-/// bugs at compile time.
-///
-/// # Example
-/// ```no_run
-/// use glommio::LocalExecutor;
-///
-/// LocalExecutor::default().run(async {
-///     executor().scope(|scope| async move {
-///         let h1 = scope.spawn(async { work1().await });
-///         let h2 = scope.spawn(async { work2().await });
-///
-///         let (r1, r2) = futures::join!(h1, h2);
-///         (r1, r2)
-///     }).await
-/// });
-/// ```
-pub struct TaskScope {
-    // Store the executor pointer instead of a reference to avoid lifetime issues
-    // SAFETY: This pointer remains valid because:
-    // 1. LOCAL_EX is thread-local and won't be dropped during spawn execution
-    // 2. spawn is async and holds the reference until completion
-    // 3. TaskScope cannot escape the spawn async context
-    executor: *const LocalExecutor,
-}
-
-impl std::fmt::Debug for TaskScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TaskScope")
-            .field("executor", &self.executor)
-            .finish()
-    }
-}
-
-impl TaskScope {
-    fn new(executor: &LocalExecutor) -> Self {
-        Self {
-            executor: executor as *const LocalExecutor,
-        }
-    }
-
-    /// Spawn a task within this scope.
-    ///
-    /// The task's lifetime is bounded by the scope, preventing it from
-    /// outliving the executor. This is enforced at compile-time.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use glommio::LocalExecutor;
-    /// # LocalExecutor::default().run(async {
-    /// # executor().scope(|scope| async move {
-    /// let handle = scope.spawn(async {
-    ///     // Task work here
-    ///     42
-    /// });
-    ///
-    /// let result = handle.await;
-    /// # result
-    /// # }).await
-    /// # });
-    /// ```
-    pub fn spawn<T>(&self, future: impl Future<Output = T>) -> Task<T>
-    where
-        T: 'static,
-    {
-        // Note: We're using 'static bound here for now. A more sophisticated
-        // lifetime system could enforce that tasks complete before scope ends,
-        // but that requires complex HRTB that causes type inference issues.
-        //
-        // The mprotect safety layer catches any violations at runtime.
-        //
-        // SAFETY: The executor pointer is valid for the duration of spawn,
-        // which is guaranteed by the async function holding the reference.
-        Task(unsafe { (*self.executor).spawn_internal(future) })
-    }
-}
-
 impl LocalExecutor {
     fn get_reactor(&self) -> Rc<Reactor> {
         self.reactor.clone()
@@ -1415,14 +1332,7 @@ impl LocalExecutor {
         ex.spawn_and_run(id, tq, future)
     }
 
-    /// Spawns a detached task directly on this executor instance.
-    ///
-    /// # Safety Warning
-    ///
-    /// This method allows tasks to outlive the executor, violating the
-    /// Shared-Nothing contract. Use only when you understand the risks.
-    ///
-    /// **Prefer [`spawn`] instead** - it provides compile-time safety.
+    /// Spawns a task directly on this executor instance.
     ///
     /// Unlike [`spawn_local`], this method uses the executor instance directly
     /// and never panics. It can be called from any context where you have a
@@ -1433,77 +1343,22 @@ impl LocalExecutor {
     ///
     /// # Examples
     ///
-    /// ```ignore
+    /// ```
     /// use glommio::LocalExecutor;
     ///
     /// let executor = LocalExecutor::default();
     ///
     /// // Can spawn before run() - useful for setup
-    /// let task = executor.spawn_detached(async { 1 + 2 });
+    /// let task = executor.spawn(async { 1 + 2 });
     ///
     /// let result = executor.run(async move { task.await });
     /// assert_eq!(result, 3);
     /// ```
     ///
-    /// [`spawn`]: LocalExecutor::spawn
     /// [`spawn_local`]: crate::spawn_local
     /// [`run`]: LocalExecutor::run
-    #[cfg(feature = "unsafe_detached")]
-    pub fn spawn_detached<T>(&self, future: impl Future<Output = T>) -> Task<T> {
+    pub fn spawn<T>(&self, future: impl Future<Output = T>) -> Task<T> {
         Task(self.spawn_internal(future))
-    }
-
-    /// Create a scope for spawning tasks with compile-time lifetime guarantees.
-    ///
-    /// This is the **safe default API** for spawning tasks. Tasks spawned within
-    /// the scope cannot outlive the scope, ensuring memory safety by construction.
-    ///
-    /// The scope takes a closure that receives a `TaskScope` and returns a future.
-    /// All tasks spawned within the scope must complete before the future completes.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use glommio::LocalExecutor;
-    ///
-    /// LocalExecutor::default().run(async {
-    ///     // Spawn multiple tasks in a scope
-    ///     let results = executor().spawn(|scope| async move {
-    ///         let h1 = scope.spawn(async { compute1().await });
-    ///         let h2 = scope.spawn(async { compute2().await });
-    ///         let h3 = scope.spawn(async { compute3().await });
-    ///
-    ///         // All tasks must be awaited before scope completes
-    ///         let r1 = h1.await;
-    ///         let r2 = h2.await;
-    ///         let r3 = h3.await;
-    ///
-    ///         (r1, r2, r3)
-    ///     }).await;
-    ///
-    ///     // All tasks are guaranteed complete here
-    /// });
-    /// ```
-    ///
-    /// # Safety
-    ///
-    /// The lifetime system ensures tasks cannot escape the scope. The compiler
-    /// enforces that:
-    /// - Task futures cannot be stored outside the scope
-    /// - Join handles cannot be returned from the scope
-    /// - All spawned tasks must complete before scope ends
-    ///
-    /// This prevents the entire class of use-after-free bugs that would occur
-    /// if tasks outlive their executor.
-    ///
-    /// Note: Currently tasks must be 'static due to type system limitations.
-    /// The mprotect safety layer provides runtime protection against violations.
-    pub async fn spawn<F, Fut, T>(&self, f: F) -> T
-    where
-        F: FnOnce(TaskScope) -> Fut,
-        Fut: Future<Output = T>,
-    {
-        let scope = TaskScope::new(self);
-        f(scope).await
     }
 
     fn spawn_into<T, F>(&self, future: F, handle: TaskQueueHandle) -> Result<multitask::Task<T>>
@@ -1905,6 +1760,195 @@ impl<T> Future for Task<T> {
     }
 }
 
+/// A spawned future that cannot be detached, and has a predictable lifetime.
+///
+/// Because their lifetimes are bounded, you don't need to make sure that data
+/// you pass to the `ScopedTask` is `'static`, which can be cheaper (no need to
+/// reference count). If you, however, would like to `.detach` this task and
+/// have it run in the background, consider using [`Task`] instead.
+///
+/// Tasks are also futures themselves and yield the output of the spawned
+/// future.
+///
+/// When a task is dropped, its gets canceled and won't be polled again. To
+/// cancel a task a bit more gracefully and wait until it stops running, use the
+/// [`cancel()`][`ScopedTask::cancel()`] method.
+///
+/// Tasks that panic get immediately canceled. Awaiting a canceled task also
+/// causes a panic.
+///
+/// # Safety
+///
+/// `ScopedTask` is safe to use so long as it is guaranteed to be either awaited
+/// or dropped. Rust does not guarantee that destructors will be called, and if
+/// they are not, `ScopedTask`s can be kept alive after the scope is terminated.
+///
+/// Typically, the only situations in which `drop` is not executed are:
+///
+/// * If you manually choose not to, with [`std::mem::forget`] or
+///   [`ManuallyDrop`].
+/// * If cyclic reference counts prevents the task from being destroyed.
+///
+/// If you believe any of the above situations are present (the first one is,
+/// of course, considerably easier to spot), avoid using the `ScopedTask`.
+///
+/// # Examples
+///
+/// ```
+/// use glommio::LocalExecutor;
+///
+/// let ex = LocalExecutor::default();
+///
+/// ex.run(async {
+///     let a = 2;
+///     let task = unsafe {
+///         glommio::spawn_scoped_local(async {
+///             println!("Hello from a task!");
+///             1 + a // this is a reference, and it works just fine
+///         })
+///     };
+///
+///     assert_eq!(task.await, 3);
+/// });
+/// ```
+/// The usual borrow checker rules apply. A [`ScopedTask`] can acquire a mutable
+/// reference to a variable just fine:
+///
+/// ```
+/// # use glommio::{LocalExecutor};
+/// #
+/// # let ex = LocalExecutor::default();
+/// # ex.run(async {
+/// let mut a = 2;
+/// let task = unsafe {
+///     glommio::spawn_scoped_local(async {
+///         a = 3;
+///     })
+/// };
+/// task.await;
+/// assert_eq!(a, 3);
+/// # });
+/// ```
+///
+/// But until the task completes, the reference is mutably held, so we can no
+/// longer immutably reference it:
+///
+/// ```compile_fail
+/// # use glommio::LocalExecutor;
+/// #
+/// # let ex = LocalExecutor::default();
+/// # ex.run(async {
+/// let mut a = 2;
+/// let task = unsafe {
+///     glommio::scoped_local(async {
+///         a = 3;
+///     })
+/// };
+/// assert_eq!(a, 3); // task hasn't completed yet!
+/// task.await;
+/// # });
+/// ```
+///
+/// You can still use [`Cell`] and [`RefCell`] normally to work around this.
+/// Just keep in mind that there is no guarantee of ordering for execution of
+/// tasks, and if the task has not yet finished the value may or may not have
+/// changed (as with any interior mutability)
+///
+/// ```
+/// # use glommio::{LocalExecutor};
+/// # use std::cell::Cell;
+/// #
+/// # let ex = LocalExecutor::default();
+/// # ex.run(async {
+/// let a = Cell::new(2);
+/// let task = unsafe {
+///     glommio::spawn_scoped_local(async {
+///         a.set(3);
+///     })
+/// };
+///
+/// assert!(a.get() == 3 || a.get() == 2); // impossible to know if it will be 2 or 3
+/// task.await;
+/// assert_eq!(a.get(), 3); // The task finished now.
+/// //
+/// # });
+/// ```
+///
+/// The following code, however, will access invalid memory as drop is never
+/// executed
+///
+/// ```no_run
+/// # use glommio::{LocalExecutor};
+/// # use std::cell::Cell;
+/// #
+/// # let ex = LocalExecutor::default();
+/// # ex.run(async {
+/// {
+///     let a = &mut "mayhem";
+///     let task = unsafe {
+///         glommio::spawn_scoped_local(async {
+///             *a = "doom";
+///         })
+///     };
+///     std::mem::forget(task);
+/// }
+/// # });
+/// ```
+///
+/// [`Task`]: crate::Task
+/// [`Cell`]: std::cell::Cell
+/// [`RefCell`]: std::cell::RefCell
+/// [`std::mem::forget`]: std::mem::forget
+/// [`ManuallyDrop`]: std::mem::ManuallyDrop
+#[must_use = "scoped tasks get canceled when dropped, use a standard Task and `.detach()` to run \
+              them in the background"]
+#[derive(Debug)]
+pub struct ScopedTask<'a, T>(multitask::Task<T>, PhantomData<&'a T>);
+
+impl<T> ScopedTask<'_, T> {
+    /// Cancels the task and waits for it to stop running.
+    ///
+    /// Returns the task's output if it was completed just before it got
+    /// canceled, or [`None`] if it didn't complete.
+    ///
+    /// While it's possible to simply drop the [`ScopedTask`] to cancel it, this
+    /// is a cleaner way of canceling because it also waits for the task to
+    /// stop running.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use futures_lite::future;
+    /// use glommio::LocalExecutor;
+    ///
+    /// let ex = LocalExecutor::default();
+    ///
+    /// ex.run(async {
+    ///     let task = unsafe {
+    ///         glommio::spawn_scoped_local(async {
+    ///             loop {
+    ///                 println!("Even though I'm in an infinite loop, you can still cancel me!");
+    ///                 future::yield_now().await;
+    ///             }
+    ///         })
+    ///     };
+    ///
+    ///     task.cancel().await;
+    /// });
+    /// ```
+    pub async fn cancel(self) -> Option<T> {
+        self.0.cancel().await
+    }
+}
+
+impl<T> Future for ScopedTask<'_, T> {
+    type Output = T;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(cx)
+    }
+}
+
 /// Conditionally yields the current task queue. The scheduler may then
 /// process other task queues according to their latency requirements.
 /// If a call to this function results in the current queue to yield,
@@ -1949,17 +1993,7 @@ pub async fn yield_if_needed() {
 ///     assert_eq!(task.await, 3);
 /// });
 /// ```
-#[cfg_attr(not(feature = "unsafe_detached"), allow(dead_code))]
-#[cfg(feature = "unsafe_detached")]
 pub fn spawn_local<T>(future: impl Future<Output = T> + 'static) -> Task<T>
-where
-    T: 'static,
-{
-    executor().spawn_local(future)
-}
-
-#[cfg(not(feature = "unsafe_detached"))]
-pub(crate) fn spawn_local<T>(future: impl Future<Output = T> + 'static) -> Task<T>
 where
     T: 'static,
 {
@@ -2027,7 +2061,6 @@ pub fn allocate_dma_buffer_global(size: usize) -> DmaBuffer {
 /// assert_eq!(task.await, 3);
 /// # });
 /// ```
-#[cfg(feature = "unsafe_detached")]
 pub fn spawn_local_into<T>(
     future: impl Future<Output = T> + 'static,
     handle: TaskQueueHandle,
@@ -2038,15 +2071,75 @@ where
     executor().spawn_local_into(future, handle)
 }
 
-#[cfg(not(feature = "unsafe_detached"))]
-pub(crate) fn spawn_local_into<T>(
-    future: impl Future<Output = T> + 'static,
+/// Spawns a task onto the current single-threaded executor.
+///
+/// If called from a [`LocalExecutor`], the task is spawned on it.
+///
+/// Otherwise, this method panics.
+///
+/// Proxy to [`ExecutorProxy::spawn_scoped_local`]
+///
+/// # Safety
+///
+/// `ScopedTask` depends on `drop` running or `.await` being called for
+/// safety. See the struct [`ScopedTask`] for details.
+///
+/// # Examples
+///
+/// ```
+/// use glommio::LocalExecutor;
+///
+/// let local_ex = LocalExecutor::default();
+///
+/// local_ex.run(async {
+///     let non_static = 2;
+///     let task = unsafe { glommio::spawn_scoped_local(async { 1 + non_static }) };
+///     assert_eq!(task.await, 3);
+/// });
+/// ```
+pub unsafe fn spawn_scoped_local<'a, T>(future: impl Future<Output = T> + 'a) -> ScopedTask<'a, T> {
+    executor().spawn_scoped_local(future)
+}
+
+/// Spawns a task onto the current single-threaded executor, in a particular
+/// task queue
+///
+/// If called from a [`LocalExecutor`], the task is spawned on it.
+///
+/// Otherwise, this method panics.
+///
+/// Proxy to [`ExecutorProxy::spawn_scoped_local_into`]
+///
+/// # Safety
+///
+/// `ScopedTask` depends on `drop` running or `.await` being called for
+/// safety. See the struct [`ScopedTask`] for details.
+///
+/// # Examples
+///
+/// ```
+/// use glommio::{LocalExecutor, Shares};
+///
+/// let local_ex = LocalExecutor::default();
+/// local_ex.run(async {
+///     let handle = glommio::executor().create_task_queue(
+///         Shares::default(),
+///         glommio::Latency::NotImportant,
+///         "test_queue",
+///     );
+///     let non_static = 2;
+///     let task = unsafe {
+///         glommio::spawn_scoped_local_into(async { 1 + non_static }, handle)
+///             .expect("failed to spawn task")
+///     };
+///     assert_eq!(task.await, 3);
+/// })
+/// ```
+pub unsafe fn spawn_scoped_local_into<'a, T>(
+    future: impl Future<Output = T> + 'a,
     handle: TaskQueueHandle,
-) -> Result<Task<T>>
-where
-    T: 'static,
-{
-    executor().spawn_local_into(future, handle)
+) -> Result<ScopedTask<'a, T>> {
+    executor().spawn_scoped_local_into(future, handle)
 }
 
 /// A proxy struct to the underlying [`LocalExecutor`]. It is accessible from
@@ -2230,7 +2323,7 @@ impl ExecutorProxy {
     /// system, and tasks within a queue will be scheduled in serial.
     ///
     /// Returns an opaque handle that can later be used to launch tasks into
-    /// that queue with `spawn_local_into()`.
+    /// that queue with [`local_into`].
     ///
     /// # Examples
     ///
@@ -2255,6 +2348,7 @@ impl ExecutorProxy {
     /// });
     /// ```
     ///
+    /// [`local_into`]: crate::spawn_local_into
     /// [`Shares`]: enum.Shares.html
     /// [`Latency`]: enum.Latency.html
     pub fn create_task_queue(
@@ -2276,9 +2370,9 @@ impl ExecutorProxy {
     }
 
     /// Returns the [`TaskQueueHandle`] that represents the TaskQueue currently
-    /// running. This can be passed directly into `spawn_local_into()`.
+    /// running. This can be passed directly into [`crate::spawn_local_into`].
     /// This must be run from a task that was generated through
-    /// `spawn_local()` or `spawn_local_into()`
+    /// [`crate::spawn_local`] or [`crate::spawn_local_into`]
     ///
     /// # Examples
     /// ```
@@ -2573,7 +2667,6 @@ impl ExecutorProxy {
     ///     assert_eq!(task.await, 3);
     /// });
     /// ```
-    #[cfg(feature = "unsafe_detached")]
     pub fn spawn_local<T>(&self, future: impl Future<Output = T> + 'static) -> Task<T>
     where
         T: 'static,
@@ -2588,81 +2681,6 @@ impl ExecutorProxy {
                 .expect("this thread doesn't have a LocalExecutor running")
                 .spawn_internal(future)
         });
-    }
-
-    #[cfg(not(feature = "unsafe_detached"))]
-    pub(crate) fn spawn_local<T>(&self, future: impl Future<Output = T> + 'static) -> Task<T>
-    where
-        T: 'static,
-    {
-        #[cfg(not(feature = "native-tls"))]
-        return LOCAL_EX.with(|local_ex| Task::<T>(local_ex.spawn_internal(future)));
-
-        #[cfg(feature = "native-tls")]
-        return Task::<T>(unsafe {
-            LOCAL_EX
-                .as_ref()
-                .expect("this thread doesn't have a LocalExecutor running")
-                .spawn_internal(future)
-        });
-    }
-
-    /// Creates a scope for spawning tasks with lifetime guarantees.
-    ///
-    /// Tasks spawned within the scope cannot outlive the scope itself.
-    /// The scope waits for all spawned tasks to complete before returning.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use glommio::LocalExecutor;
-    ///
-    /// LocalExecutor::default().run(async {
-    ///     let result = glommio::executor()
-    ///         .spawn(|scope| async move {
-    ///             let h1 = scope.spawn(async { 1 + 1 });
-    ///             let h2 = scope.spawn(async { 2 + 2 });
-    ///             let r1 = h1.await;
-    ///             let r2 = h2.await;
-    ///             (r1, r2)
-    ///         })
-    ///         .await;
-    ///     assert_eq!(result, (2, 4));
-    /// });
-    /// ```
-    ///
-    /// Note: Currently tasks must be 'static due to type system limitations.
-    /// The mprotect safety layer provides runtime protection against violations.
-    ///
-    /// # Safety
-    ///
-    /// This method uses unsafe internally to extend the lifetime of the executor
-    /// reference. This is safe because LOCAL_EX is thread-local and won't be
-    /// dropped while this async function is executing.
-    pub async fn spawn<F, Fut, T>(&self, f: F) -> T
-    where
-        F: FnOnce(TaskScope) -> Fut,
-        Fut: Future<Output = T>,
-    {
-        // SAFETY: LOCAL_EX is thread-local and will remain valid for the
-        // duration of this async function. We extend the lifetime to allow
-        // the async block to capture the TaskScope reference.
-        #[cfg(not(feature = "native-tls"))]
-        {
-            let local_ex_ptr = LOCAL_EX.with(|local_ex| local_ex as *const LocalExecutor);
-            let local_ex = unsafe { &*local_ex_ptr };
-            let scope = TaskScope::new(local_ex);
-            f(scope).await
-        }
-
-        #[cfg(feature = "native-tls")]
-        unsafe {
-            let local_ex = LOCAL_EX
-                .as_ref()
-                .expect("this thread doesn't have a LocalExecutor running");
-            let scope = TaskScope::new(local_ex);
-            f(scope).await
-        }
     }
 
     /// Spawns a task onto the current single-threaded executor, in a particular
@@ -2694,7 +2712,6 @@ impl ExecutorProxy {
     /// assert_eq!(task.await, 3);
     /// # });
     /// ```
-    #[cfg(feature = "unsafe_detached")]
     pub fn spawn_local_into<T>(
         &self,
         future: impl Future<Output = T> + 'static,
@@ -2716,26 +2733,99 @@ impl ExecutorProxy {
         .map(Task::<T>);
     }
 
-    #[cfg(not(feature = "unsafe_detached"))]
-    pub(crate) fn spawn_local_into<T>(
+    /// Spawns a task onto the current single-threaded executor.
+    ///
+    /// If called from a [`LocalExecutor`], the task is spawned on it.
+    ///
+    /// Otherwise, this method panics.
+    ///
+    /// # Safety
+    ///
+    /// `ScopedTask` depends on `drop` running or `.await` being called for
+    /// safety. See the struct [`ScopedTask`] for details.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::LocalExecutor;
+    ///
+    /// let local_ex = LocalExecutor::default();
+    ///
+    /// local_ex.run(async {
+    ///     let non_static = 2;
+    ///     let task = unsafe { glommio::executor().spawn_scoped_local(async { 1 + non_static }) };
+    ///     assert_eq!(task.await, 3);
+    /// });
+    /// ```
+    pub unsafe fn spawn_scoped_local<'a, T>(
         &self,
-        future: impl Future<Output = T> + 'static,
-        handle: TaskQueueHandle,
-    ) -> Result<Task<T>>
-    where
-        T: 'static,
-    {
+        future: impl Future<Output = T> + 'a,
+    ) -> ScopedTask<'a, T> {
         #[cfg(not(feature = "native-tls"))]
-        return LOCAL_EX.with(|local_ex| local_ex.spawn_into(future, handle).map(Task::<T>));
+        return LOCAL_EX
+            .with(|local_ex| ScopedTask::<'a, T>(local_ex.spawn_internal(future), PhantomData));
 
         #[cfg(feature = "native-tls")]
-        return unsafe {
+        return ScopedTask::<'a, T>(
             LOCAL_EX
                 .as_ref()
                 .expect("this thread doesn't have a LocalExecutor running")
+                .spawn_internal(future),
+            PhantomData,
+        );
+    }
+
+    /// Spawns a task onto the current single-threaded executor, in a particular
+    /// task queue
+    ///
+    /// If called from a [`LocalExecutor`], the task is spawned on it.
+    ///
+    /// Otherwise, this method panics.
+    ///
+    /// # Safety
+    ///
+    /// `ScopedTask` depends on `drop` running or `.await` being called for
+    /// safety. See the struct [`ScopedTask`] for details.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::{LocalExecutor, Shares};
+    ///
+    /// let local_ex = LocalExecutor::default();
+    /// local_ex.run(async {
+    ///     let handle = glommio::executor().create_task_queue(
+    ///         Shares::default(),
+    ///         glommio::Latency::NotImportant,
+    ///         "test_queue",
+    ///     );
+    ///     let non_static = 2;
+    ///     let task = unsafe {
+    ///         glommio::executor()
+    ///             .spawn_scoped_local_into(async { 1 + non_static }, handle)
+    ///             .expect("failed to spawn task")
+    ///     };
+    ///     assert_eq!(task.await, 3);
+    /// })
+    /// ```
+    pub unsafe fn spawn_scoped_local_into<'a, T>(
+        &self,
+        future: impl Future<Output = T> + 'a,
+        handle: TaskQueueHandle,
+    ) -> Result<ScopedTask<'a, T>> {
+        #[cfg(not(feature = "native-tls"))]
+        return LOCAL_EX.with(|local_ex| {
+            local_ex
                 .spawn_into(future, handle)
-        }
-        .map(Task::<T>);
+                .map(|x| ScopedTask::<'a, T>(x, PhantomData))
+        });
+
+        #[cfg(feature = "native-tls")]
+        return LOCAL_EX
+            .as_ref()
+            .expect("this thread doesn't have a LocalExecutor running")
+            .spawn_into(future, handle)
+            .map(|x| ScopedTask::<'a, T>(x, PhantomData));
     }
 
     /// Spawns a blocking task into a background thread where blocking is
@@ -3814,6 +3904,32 @@ mod test {
     }
 
     #[test]
+    fn scoped_task() {
+        LocalExecutor::default().run(async {
+            let mut a = 1;
+            unsafe {
+                crate::spawn_scoped_local(async {
+                    a = 2;
+                })
+                .await;
+            }
+            crate::executor().yield_task_queue_now().await;
+            assert_eq!(a, 2);
+
+            let mut a = 1;
+            let do_later = unsafe {
+                crate::spawn_scoped_local(async {
+                    a = 2;
+                })
+            };
+
+            crate::executor().yield_task_queue_now().await;
+            do_later.await;
+            assert_eq!(a, 2);
+        });
+    }
+
+    #[test]
     fn executor_pool_builder_thread_panic() {
         let nr_execs = 8;
         let res = LocalExecutorPoolBuilder::new(PoolPlacement::Unbound(nr_execs))
@@ -4189,71 +4305,5 @@ mod test {
 
         #[cfg(feature = "native-tls")]
         assert!(unsafe { LOCAL_EX.is_null() });
-    }
-
-    #[test]
-    fn test_scoped_spawning() {
-        LocalExecutor::default().run(async {
-            let result = executor()
-                .spawn(|scope| async move {
-                    let h1 = scope.spawn(async { 1 + 1 });
-                    let h2 = scope.spawn(async { 2 + 2 });
-                    let h3 = scope.spawn(async { 3 + 3 });
-
-                    let r1 = h1.await;
-                    let r2 = h2.await;
-                    let r3 = h3.await;
-
-                    (r1, r2, r3)
-                })
-                .await;
-
-            assert_eq!(result, (2, 4, 6));
-        });
-    }
-
-    #[test]
-    fn test_scoped_nested() {
-        LocalExecutor::default().run(async {
-            let result = executor()
-                .spawn(|scope| async move {
-                    let h1 = scope.spawn(async {
-                        // Nested scope
-                        executor()
-                            .spawn(|inner_scope| async move {
-                                let inner = inner_scope.spawn(async { 10 });
-                                inner.await
-                            })
-                            .await
-                    });
-
-                    h1.await
-                })
-                .await;
-
-            assert_eq!(result, 10);
-        });
-    }
-
-    #[test]
-    fn test_scoped_with_many_tasks() {
-        LocalExecutor::default().run(async {
-            let sum = executor()
-                .spawn(|scope| async move {
-                    let mut handles = Vec::new();
-                    for i in 0..100 {
-                        handles.push(scope.spawn(async move { i }));
-                    }
-
-                    let mut sum = 0;
-                    for h in handles {
-                        sum += h.await;
-                    }
-                    sum
-                })
-                .await;
-
-            assert_eq!(sum, 4950); // Sum of 0..100
-        });
     }
 }

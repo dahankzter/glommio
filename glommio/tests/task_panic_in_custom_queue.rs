@@ -4,18 +4,13 @@
 
 // The tests below all exercise spawn_local_into, so everything they import is
 // only in scope under the same feature gate.
-#[cfg(feature = "unsafe_detached")]
 use futures::join;
-#[cfg(feature = "unsafe_detached")]
 use glommio::{Latency, LocalExecutorBuilder, Placement, Shares};
-#[cfg(feature = "unsafe_detached")]
 use std::panic;
-#[cfg(feature = "unsafe_detached")]
 use std::time::Duration;
 
 // These tests require spawn_local_into (unsafe detached spawn)
 #[test]
-#[cfg(feature = "unsafe_detached")]
 fn test_panic_in_default_queue() {
     // This should work - panic in default queue is handled correctly
     let ex = LocalExecutorBuilder::new(Placement::Fixed(0))
@@ -50,7 +45,6 @@ fn test_panic_in_default_queue() {
 }
 
 #[test]
-#[cfg(feature = "unsafe_detached")]
 fn test_panic_in_custom_queue() {
     // This is the critical test - panic in custom queue should NOT abort process
     // Before fix: This would abort the entire process
@@ -97,7 +91,6 @@ fn test_panic_in_custom_queue() {
 }
 
 #[test]
-#[cfg(feature = "unsafe_detached")]
 fn test_multiple_panics_in_custom_queues() {
     // Test multiple custom queues with panics
     let ex = LocalExecutorBuilder::new(Placement::Fixed(0))

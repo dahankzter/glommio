@@ -9,7 +9,7 @@
 //!   RUSTFLAGS='--cfg alloc_mimalloc'
 //!   RUSTFLAGS='--cfg alloc_jemalloc'
 //!
-//! then: cargo run --release --features unsafe_detached --example alloc_compare
+//! then: cargo run --release --example alloc_compare
 
 #[cfg(alloc_mimalloc)]
 #[global_allocator]

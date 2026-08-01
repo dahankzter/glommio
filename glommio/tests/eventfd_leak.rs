@@ -136,7 +136,6 @@ fn test_rapid_executor_creation() {
 
 // This test requires spawn_local (unsafe detached spawn)
 #[test]
-#[cfg(feature = "unsafe_detached")]
 fn test_executor_with_tasks() {
     let initial_fds = count_open_fds();
 
