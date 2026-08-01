@@ -112,6 +112,7 @@ where
         future: F,
         schedule: S,
         executor_id: usize,
+        task_queue_index: u32,
         latency_matters: bool,
     ) -> NonNull<()> {
         // Compute the layout of the task for allocation. Abort if the computation
@@ -130,6 +131,7 @@ where
             // Write the header as the first field of the task.
             (raw.header as *mut Header).write(Header {
                 executor_id,
+                task_queue_index,
                 state: SCHEDULED | HANDLE,
                 latency_matters,
                 references: AtomicI16::new(0),

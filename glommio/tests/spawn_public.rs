@@ -82,3 +82,21 @@ fn test_cannot_send_executor_between_threads() {
     });
 }
 */
+
+#[test]
+fn test_spawn_before_run_with_pending_future() {
+    // A task spawned before run() that does not complete on its first poll has
+    // to be rescheduled. Its schedule function therefore runs while no executor
+    // is installed on this thread, which is the one case where resolving the
+    // task queue from thread-local state could lose the task.
+    let executor = LocalExecutor::default();
+
+    let task = executor.spawn(async {
+        futures_lite::future::yield_now().await;
+        42
+    });
+
+    let result = executor.run(task);
+
+    assert_eq!(result, 42);
+}

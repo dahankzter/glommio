@@ -127,6 +127,10 @@ cost two atomic RMWs on every single task switch.
 
 ## Candidate 1 — make the schedule closure zero-sized
 
+**Status: implemented.** Delivered 28.72 → 19.46 ns/switch, matching the
+predicted ceiling of 19.45 ns. Spawn cost unchanged at ~23 ns; `Header` still
+40 bytes; 431 lib tests, 14 integration tests, 191 doctests and Miri all green.
+
 **Measured win: 28.72 → 19.45 ns/switch, −32%.**
 **Risk: low. Safe code. Directly precedented.**
 
@@ -157,6 +161,21 @@ behaviour is identical.
 task queue has been destroyed. The index form must reproduce that (absent
 index → drop the runnable), and `upgrade()` returning `None` is the current
 signal. This needs care, not cleverness.
+
+**What the implementation turned up.** The worry above was that a schedule
+running while no executor is installed on the thread — `LocalExecutor::spawn()`
+before `run()` — would fail to resolve the queue and silently drop the task.
+It cannot happen: `RawTask::thread_id()` returns `None` in that situation, so
+`None != Some(my_id)` sends the wake down the *foreign* path and the notifier
+delivers it once `run()` starts. All three schedule call sites (`do_wake`,
+`drop_waker`, `run`) sit behind that same check, so **a schedule function only
+ever executes on the thread that owns the task, with its executor installed**.
+`tests/spawn_public.rs::test_spawn_before_run_with_pending_future` pins this
+down.
+
+The optimization is also silently reversible — adding any capture to that
+closure gives back a third of a task switch with no test failing — so
+`assert_zero_sized` makes it a compile error, verified by injecting a capture.
 
 **Validate before building:** already done — that is the 19.45 ns row above,
 produced by forcing the guard condition to `false`.
@@ -312,7 +331,7 @@ finding, on the same hardware, by a different route.
 
 | | candidate | measured win | risk | why this order |
 |---|---|---:|---|---|
-| 1 | ZST schedule closure | −32% task switch | low | small, safe, precedented by `f28a619` |
+| 1 | ZST schedule closure | −32% task switch | low | **done** — delivered 19.46 ns |
 | 2 | cache-domain placement | −41% cross-shard round trip | low | independent of 1; safe code; helps every multi-CCX deployment |
 | 3 | biased reference counting | −51% task switch | high | the real prize; do it once 1 has proven the header-index pattern |
 

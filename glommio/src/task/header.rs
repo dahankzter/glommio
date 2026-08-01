@@ -25,6 +25,20 @@ pub(crate) struct Header {
     /// is rare. See `RawTask::notifier`.
     pub(crate) executor_id: usize,
 
+    /// Index of the task queue this task belongs to.
+    ///
+    /// As with `executor_id`, this is an index rather than an
+    /// `Rc<RefCell<TaskQueue>>` or a `Weak` to one. Capturing the queue in the
+    /// schedule closure made that closure non-zero-sized, which in turn forced
+    /// `RawTask::schedule` to clone and drop a waker as a lifetime guard on
+    /// every single wake -- two atomic read-modify-writes per task switch, for
+    /// eight bytes of capture. Resolving the queue from this index on the
+    /// owning thread keeps the closure zero-sized and skips the guard entirely.
+    ///
+    /// A `u32` rather than a `usize` deliberately: it occupies padding the
+    /// header was already paying for, so `Header` stays 40 bytes.
+    pub(crate) task_queue_index: u32,
+
     /// Current state of the task.
     pub(crate) state: u8,
 
