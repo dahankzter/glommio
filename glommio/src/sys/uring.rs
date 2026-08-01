@@ -1971,8 +1971,10 @@ impl Reactor {
         // the ring, which the `Reactor` owns. `need_preempt` compares them
         // without entering the kernel, which is why it has to be raw pointers
         // rather than a borrow of the queue.
+        // Bind before returning: the `CompletionQueue` is a temporary borrowing
+        // `lat_ring`, and only the raw pointers outlive it.
         let (head, tail) = unsafe { lat_ring.ring.completion().head_tail_ptrs() };
-        (head as *const u32, tail as *const u32)
+        (head, tail)
     }
 
     /// RAII-truncate asynchronously files that required it, e.g. because of

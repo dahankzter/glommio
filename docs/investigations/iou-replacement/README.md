@@ -22,7 +22,17 @@ Miri clean; spawn, task switch and shard round trip all unchanged or better.
 pointers to the latency ring's CQ head and tail, which `io-uring` keeps private
 (see below). `dahankzter/io-uring`, branch `feat/cq-head-tail-ptrs`, adds a
 `CompletionQueue::head_tail_ptrs` accessor — about twenty lines, mostly the
-safety documentation. Until that is upstreamed and released, `cargo publish`
+safety documentation.
+
+It returns `(*const u32, *const u32)`, the primitives, **not** the `AtomicU32`s
+the queue stores them in. Handing out `*const AtomicU32` would be no protection
+at all: atomic stores take `&self`, so a caller can write through such a pointer
+without a cast and corrupt the ring. A `*const u32` needs an explicit
+`as *mut u32` first. It is also what the rest of the crate does — nothing else
+in io-uring's public API returns an atomic, and `BufRingEntry::tail`, the one
+comparable accessor, returns `*const u16`. glommio's own original signature was
+`(*const u32, *const u32)` too, with only the tail cast to an atomic at the
+point of use, which is where the cast belongs. Until that is upstreamed and released, `cargo publish`
 will not accept this, so a release needs either the PR landed or the accessor
 temporarily inlined.
 
