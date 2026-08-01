@@ -200,9 +200,11 @@ Work in progress sits on branch `refactor/iou-core` (pushed, not merged). It
 does not compile: `fill_sqe` and `submit_event_chain` are converted, ~20
 mechanical errors remain, plus this one.
 
-## The actual blocker: `preempt_pointers`
+## The external gap: `preempt_pointers`
 
-The `sleep` question resolved. This one does not, and it is external.
+**Resolved by a twenty-line accessor on a fork; see Outcome above.** The
+analysis below stands as the reason the fork exists and as the case to make if
+it is ever upstreamed.
 
 ```rust
 pub(crate) fn preempt_pointers(&self) -> (*const u32, *const u32) {
@@ -253,8 +255,10 @@ work", and it was worth finding before spending them.
    enters the kernel. It is called on the hottest path in the runtime; the whole
    point of the current design is that it costs two loads.
 
-Until then the vendored wrapper stays. Everything else about the migration is
-resolved and the work is preserved on `refactor/iou-core`.
+Option 1 is what was done: `dahankzter/io-uring`, branch
+`feat/cq-head-tail-ptrs`, adds `CompletionQueue::head_tail_ptrs` returning the
+two pointers the queue already holds, kept `unsafe` and documented read-only.
+Options 2 and 3 were rejected for the reasons given and should stay rejected.
 
 ## Suggested sequencing
 
@@ -281,7 +285,16 @@ Each step should leave the tree compiling and the suite green.
 7. Only then add the setup flags
    ([candidate 4](../mechanical-sympathy/)), which is what prompted this.
 
-## Honest estimate
+## Honest estimate, and how it held up
+
+The estimate below was written before starting. It was roughly right about the
+size and wrong about where the difficulty would be: the 22-opcode translation
+really was mechanical, `sleep` looked fatal and was not, and the one thing that
+genuinely could not be done from inside glommio — `preempt_pointers` — was not
+on the risk list at all. The fixed-buffer path that *was* top of that list
+converted without incident and passed the DMA tests first time.
+
+### The original estimate
 
 This is a rewrite of glommio's io_uring interaction layer: on the order of
 700-900 lines of `sys/uring.rs` reworked, against ~3,000 lines deleted. It is
