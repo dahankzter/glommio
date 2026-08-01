@@ -78,9 +78,12 @@ pub fn spawn<T>(&self, future: impl Future<Output = T>) -> Task<T>
 ```
 
 **Optimization Opportunities:**
-- Task object pooling
-- Arena allocation for tasks
+- ~~Task object pooling~~ — tried, reverted (worth 0% under mimalloc)
+- ~~Arena allocation for tasks~~ — tried, reverted (see
+  [post-mortem](investigations/task-arena/))
 - Reduce boxing/dynamic dispatch
+- Recommend mimalloc to deployments: ~45 ns spawn under glibc, ~24 ns under
+  mimalloc, no glommio-side allocator required
 
 #### C. Context Switching
 **Current:** Thread-per-core with cooperative scheduling
@@ -139,14 +142,26 @@ pub fn spawn<T>(&self, future: impl Future<Output = T>) -> Task<T>
 
 **Specific Optimizations:**
 
+> **A and B below were implemented and reverted.** Both the task pool
+> (thread-local free lists) and the arena were measured: the pool is worth
+> 30-36% under glibc malloc and **0% under mimalloc**, and the arena cost
+> 98 MB resident per executor while segfaulting on detached tasks. The
+> allocator is the deployment's choice to make; recommend mimalloc and keep
+> the free list out of glommio. Full account:
+> [task-arena post-mortem](investigations/task-arena/).
+>
+> The real find in this area was not an allocator change at all —
+> `get_sleep_notifier_for` took a process-wide `RwLock` read on every spawn
+> (`f28a619`, 4350.9 ns → ~28-37 ns at 64 executors).
+
 ```rust
-// A. Task Object Pooling
+// A. Task Object Pooling  [REVERTED - no gain over mimalloc]
 struct TaskPool {
     free_list: Vec<Box<TaskInner>>,
     // Reuse task objects instead of allocating
 }
 
-// B. Arena Allocation for Short-Lived Tasks
+// B. Arena Allocation for Short-Lived Tasks  [REVERTED - see post-mortem]
 struct TaskArena {
     arena: bumpalo::Bump,
     // Allocate tasks from arena, reset periodically
@@ -323,23 +338,21 @@ struct BufferRing {
 
 **Current:** Heavy use of Rc/RefCell
 
-**Proposed:**
-```rust
-// Arena allocation for executor-local objects
-struct ExecutorArena {
-    arena: typed_arena::Arena<Task>,
-    // Allocate tasks from arena
-    // Bulk deallocation on executor drop
-}
-```
+~~**Proposed:** arena allocation for executor-local objects.~~ **Rejected on
+measurement** — see the [task-arena post-mortem](investigations/task-arena/).
+Bulk deallocation on executor drop is exactly what broke: tasks legally outlive
+`run()`, and the arena faulted when they did.
 
-**Benefits:**
-- Faster allocation
-- Better cache locality
-- Reduced fragmentation
+**Still open in this area, and more promising:** `references: AtomicI16` and
+`Arc<SleepNotifier>` on paths that never leave their thread. Measured
+uncontended and cache-hot, an atomic refcount inc+dec is **8.84 ns** against
+~0 for `Cell`, and `Arc` clone+drop is **8.69 ns** against 0.43 for `Rc`. On a
+24 ns spawn that is substantial. The blocker is that Rust's `Waker` is
+`unsafe impl Send + Sync` unconditionally, so any third-party future may clone
+a waker and send it elsewhere. Two routes: `LocalWaker` (unstable, tracking
+issue #118959) or biased reference counting, which works on stable today.
 
 **Difficulty:** ⭐⭐⭐⭐ Hard
-**Timeline:** 3 weeks
 
 ### C. NUMA-Aware Task Scheduling
 
@@ -415,21 +428,28 @@ fn bench_vs_monoio(b: &mut Bencher) {
 ### Phase 1: Foundation (Weeks 1-4) - **IN PROGRESS**
 1. ✅ **DONE:** Fix eventfd leak (#448) - Implemented Mutex<Option<File>> wrapper for explicit cleanup
 2. ✅ **DONE:** Fix task queue panics (#689) - Made maybe_activate() panic-safe with LOCAL_EX.is_set() check
-3. **NEXT:** Set up benchmark suite - Week 4
-4. **NEXT:** Begin Phase 2 optimizations per [Optimization Plan](OPTIMIZATION_PLAN.md)
+3. ✅ **DONE:** Benchmark suite - `examples/alloc_compare.rs`,
+   `examples/spawn_scaling.rs`, `benches/timer_benchmark.rs`
+4. ✅ **DONE:** Phase 2 begun — timing wheel landed, see below
 
-**Status Update (2026-02-14):**
-- Critical bug fixes complete! Both #448 and #689 resolved and merged to master
-- Comprehensive regression tests added for both issues
-- Ready to begin performance optimization work
+**Status Update (2026-08-01):**
+- #448 additionally fixed at the root by `f28a619`: the task header stores
+  `executor_id` instead of an `Arc<SleepNotifier>`, so tasks no longer pin the
+  executor's eventfd at all
+- Timing wheel complete and measured
+- Task arena and thread-local free lists tried, measured and reverted —
+  [post-mortem](investigations/task-arena/)
+- Beware of benchmarks that construct a `LocalExecutor` per iteration; they
+  time io_uring ring setup, not the thing under test
 
 ### Phase 2: Performance (Weeks 5-10) - **SEE OPTIMIZATION_PLAN.md**
 
 **Priority-ordered optimizations based on architecture analysis:**
 
-1. **🔴 P1: Hierarchical Timing Wheel** (Weeks 5-8)
-   - Replace BTreeMap with O(1) timing wheel
-   - **Expected:** 10-20% improvement in timer-heavy workloads
+1. ✅ **DONE — 🔴 P1: Hierarchical Timing Wheel**
+   - BTreeMap replaced with O(1) timing wheel (`glommio/src/timer/timing_wheel.rs`)
+   - **Measured:** 17.7 ns → 10.3 ns at 100K timers (35-42% at scale)
+   - Zero unsafe
    - [See detailed plan](OPTIMIZATION_PLAN.md#priority-1-hierarchical-timing-wheel)
 
 2. **🟡 P2: RefCell Optimization** (Weeks 9-10)
@@ -467,8 +487,9 @@ fn bench_vs_monoio(b: &mut Bencher) {
 **Quantitative (Updated 2026-02-14):**
 - [x] ✅ Zero eventfd leaks (Issue #448 FIXED)
 - [x] ✅ Zero panics in task queue operations (Issue #689 FIXED)
-- [ ] Timer operations: <100ns P99 @ 100K timers (Timing Wheel)
-- [ ] Task spawn rate: +15% improvement (RefCell optimization)
+- [x] ✅ Timer operations: <100ns P99 @ 100K timers (Timing Wheel — 10.3 ns)
+- [x] ✅ Task spawn rate: +15% improvement — 37.5 ns → ~24 ns single executor,
+      4350.9 ns → ~28-37 ns at 64 executors (`f28a619`, executor id in header)
 - [ ] I/O P99 latency: +20% improvement (Adaptive submission)
 - [ ] Overall performance: 30-40% improvement vs baseline
 - [ ] Random read throughput within 10% of Monoio

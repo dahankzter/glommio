@@ -2,6 +2,29 @@
 
 Analysis of Glommio's current task allocation patterns to evaluate the potential impact of implementing a task arena allocator.
 
+> ## ⚠️ Superseded — the arena was built and reverted
+>
+> This audit motivated the task arena allocator. The arena was implemented,
+> benchmarked and then **removed**; see the
+> [post-mortem](investigations/task-arena/).
+>
+> Two claims below did not survive measurement and are corrected inline:
+>
+> - **"Global allocator (jemalloc on most systems)"** — false. Glommio declares
+>   no `#[global_allocator]`, so it gets whatever the binary uses, normally
+>   glibc malloc.
+> - **"Worst case: 500ns+ (allocator lock contention)"** — not observed.
+>   Allocation cost was flat from 1 to 8 concurrent executors and 1.33x at 64.
+>   Task blocks are freed on the thread that allocated them, which every modern
+>   allocator has a per-thread fast path for.
+>
+> The contention that did exist was in glommio's own sleep-notifier registry,
+> not in malloc. Fixing it took spawn at 64 executors from 4350.9 ns to
+> ~28-37 ns (`f28a619`).
+>
+> The structural sections — allocation lifecycle, task layout, deallocation
+> path — remain accurate and are why this file is kept.
+
 ## Executive Summary
 
 **Current State:**
@@ -174,16 +197,25 @@ use std::alloc::{alloc, dealloc, Layout};
 ```
 
 Glommio uses:
-- **Global allocator** (jemalloc on most systems)
+- **Whatever global allocator the binary provides** — glommio declares no
+  `#[global_allocator]`, so this is glibc malloc unless the application says
+  otherwise
 - **No thread-local cache** specific to tasks
 - **No arena pattern** for task structures
 
-**Comparison:**
+**Comparison (measured, 512 tasks live, `examples/alloc_compare.rs`):**
 
-| Allocator | Allocation Time | Deallocation Time | Overhead |
-|-----------|----------------|-------------------|----------|
-| jemalloc (current) | 10-50ns | 10-30ns | Lock contention possible |
-| Arena (proposed) | 2-5ns | 0ns (bulk reset) | Fixed memory usage |
+| Allocator | Spawn |
+|-----------|------:|
+| glibc malloc (default) | ~45 ns |
+| jemalloc | ~30 ns |
+| mimalloc | ~24 ns |
+
+> **Corrected.** This table originally read "jemalloc (current) 10-50ns …
+> lock contention possible" against a projected arena at "2-5ns". Glommio was
+> never on jemalloc, and the arena's advantage over a good allocator did not
+> materialize. Choosing mimalloc is the whole win, without any glommio-side
+> allocator. See the [post-mortem](investigations/task-arena/).
 
 ## Memory Usage Patterns
 
@@ -241,6 +273,13 @@ Trade-off: Fixed memory for predictable performance
 - **Variance:** **Near-zero** (predictable)
 
 **For Latency-Sensitive Workloads:** This is the real win! ⚡
+
+> **Retracted — none of the above was measured.** The projected contention was
+> the arena's entire justification and it does not occur: spawn cost is flat
+> from 1 to 8 concurrent executors and 1.33x at 64. The "80ns P99 baseline"
+> came from a benchmark that constructed a `LocalExecutor` per iteration and so
+> timed io_uring ring setup; real spawn+await was 38 ns. See the
+> [post-mortem](investigations/task-arena/).
 
 ## Recommendations
 
@@ -425,15 +464,29 @@ Measure improvement on spawn benchmark.
 
 **Should we implement a task arena?**
 
-**Answer:** **Measure first, then decide.**
+**Answer: no. This was settled by building one.**
 
-The theoretical benefits are clear (2-10x faster allocation, zero jitter), but the **actual impact depends on your workload**. For RMQ-style message handling with 50K spawns/sec, the **0.175% CPU savings might not justify the complexity**. However, the **P99 latency improvement** (predictable allocation) could be significant for real-time systems.
+The advice this audit closed with — measure first, let data guide the decision —
+was right, and was not followed. The arena was written before anyone checked
+whether allocator contention existed. It did not. What the arena bought in
+allocation speed, mimalloc buys for a one-line `#[global_allocator]`, without
+98 MB resident per executor, without a 1 KB ceiling on task closures, and
+without segfaulting on detached tasks.
 
-**Recommendation:**
-1. ✅ Add spawn benchmark (measure current)
-2. ✅ Profile with `perf` (identify bottleneck)
-3. ⏳ If allocation is hot, prototype typed-arena
-4. ⏳ Measure again, compare P50/P99/P999
-5. ⏳ Ship if improvement > 20%
+**What measurement actually showed:**
 
-**Don't optimize blindly - let data guide the decision!** 📊
+| claim in this audit | measured |
+|---|---|
+| allocator lock contention on the spawn path | flat 1→8 executors, 1.33x at 64 |
+| 80 ns P99 spawn baseline | 38 ns — the old benchmark timed ring setup |
+| arena at 2-5 ns is the win | mimalloc at 24 ns; arena's edge over it was noise |
+| glommio runs on jemalloc | glommio sets no global allocator at all |
+
+**What to do instead:**
+
+1. Recommend mimalloc to deployments — biggest single lever on this path
+2. Look for contention in glommio's own structures, where it turned out to be
+   (`f28a619`: process-wide `RwLock` taken on every spawn)
+3. Keep the allocator choice with the application
+
+Full account: [task-arena post-mortem](investigations/task-arena/).

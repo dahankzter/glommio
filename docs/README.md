@@ -27,23 +27,40 @@ Comprehensive investigation of eventfd file descriptor leak when executors are r
 - Thread-local executor pattern for tests
 
 ### [Issue #695 - Non-Panicking spawn_local()](./investigations/issue_695/)
-**Status:** Documented, ready for implementation
+**Status:** ✅ Implemented
 **Severity:** Medium (API design issue)
 
 Investigation of confusing `spawn_local()` API that panics even when called on a `LocalExecutor` instance. The current design ignores `self` and uses thread-local storage instead.
 
 **Key Finding:** The private `spawn()` method actually uses `self` but is not public. Making it public solves the issue without breaking changes.
 
-**Recommended Fix:**
-- Make `LocalExecutor::spawn()` public (trivial change)
-- Maintains thread-safety via `!Send` trait
-- No breaking changes to existing API
+**Fix:** `LocalExecutor::spawn()` is now public. Additive — thread safety still
+comes from `!Send`, and no existing API changed.
+
+### [Task Arena Allocator - Post-Mortem](./investigations/task-arena/)
+**Status:** Tried, measured, reverted
+**Outcome:** No arena — recommend mimalloc instead
+
+A slot allocator for task blocks was built and benchmarked, then removed. Its
+premise (global allocator lock contention on the spawn path) did not survive
+measurement: allocation cost is flat from 1 to 8 concurrent executors. The
+arena also cost ~98 MB resident per executor, panicked on task closures over
+1 KB, and segfaulted on detached tasks.
+
+**Key Finding:** The contention was in glommio's own sleep-notifier registry,
+not in malloc — a process-wide `RwLock` taken on every spawn. Fixing that took
+spawn at 64 executors from 4350.9 ns to ~28-37 ns, in safe code, and fixed
+#448 at the root as a side effect.
 
 ### [Unsafe Code Centralization Analysis](./investigations/unsafe-centralization/)
 **Status:** Analysis complete
 **Complexity:** High (7-12 weeks refactoring)
 
 Comprehensive analysis of eliminating or centralizing unsafe code in glommio without performance degradation. Identifies 320 unsafe blocks scattered across 43+ files and proposes centralization into 4 core modules.
+
+**⚠️ Partly superseded:** the analysis counts the task arena's 19 unsafe blocks
+in its baseline and plans to relocate them. The arena has since been deleted.
+See the note at the top of that document.
 
 **Key Findings:**
 - Unsafe code cannot be eliminated without 10-100x performance loss
@@ -66,9 +83,21 @@ docs/
     │   └── reproduce.rs      # Test demonstrating the leak
     ├── issue_695/
     │   └── README.md         # API design investigation
+    ├── task-arena/
+    │   └── README.md         # Arena allocator post-mortem (built, measured, reverted)
     └── unsafe-centralization/
         └── README.md         # Unsafe code analysis & centralization strategy
 ```
+
+Top-level documents:
+
+| | |
+|---|---|
+| `PERFORMANCE_ROADMAP.md` | high-level phases and prioritization |
+| `OPTIMIZATION_PLAN.md` | detailed implementation plans |
+| `TASK_ALLOCATION_AUDIT.md` | allocation lifecycle — arena conclusions retracted inline |
+| `BENCHMARKING.md`, `COVERAGE.md`, `LIMA_TESTING.md` | tooling |
+| `CACHE_OPTIMIZATION_ANALYSIS.md` | cache-line layout analysis |
 
 ## Contributing
 

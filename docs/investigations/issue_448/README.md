@@ -1,5 +1,18 @@
 # Investigation: Issue #448 - Eventfd Leak on Executor Drop
 
+> **Status: fixed (`f28a619`).** The task header now stores `executor_id: usize`
+> instead of an `Arc<SleepNotifier>`, and the notifier is looked up only on the
+> foreign-wake path. Tasks therefore no longer hold a reference to the eventfd,
+> so the leak described below cannot occur even when a task's destructor never
+> runs. The same change removed a process-wide `RwLock` read from every spawn.
+>
+> The analysis is kept because the root cause — tasks that are destroyed
+> without their destructors running — is still true of glommio and still
+> constrains anything that puts an owning reference in a task header.
+>
+> Regression test: `glommio/tests/eventfd_leak.rs` (counts FDs process-wide,
+> so run it single-threaded).
+
 ## Problem Summary
 
 When `LocalExecutor` instances are created and destroyed repeatedly, eventfd file descriptors leak. With 2 executors per test iteration, 12 eventfds remain open after the executors finish.

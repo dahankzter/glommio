@@ -5,6 +5,35 @@
 **Complexity**: High (5-9 weeks refactoring)
 **Performance Impact**: None (if done correctly)
 
+> ## ⚠️ One premise has been removed (2026-08-01)
+>
+> This analysis treats the **task arena as a fixed part of glommio's
+> performance model** — it counts `task/arena.rs`'s 19 unsafe blocks in the
+> baseline, plans to move the file into `core/memory.rs`, and reproduces its
+> allocator in the proposed `ArenaAllocator` API.
+>
+> **`task/arena.rs` no longer exists.** It was reverted; see the
+> [post-mortem](../task-arena/). Ignore every arena reference below: the
+> centralization target is 19 unsafe blocks smaller than stated, and
+> `core::memory` has only DMA buffers to centralize.
+>
+> **This matters beyond a stale file reference.** The goal was to *reduce*
+> unsafe. Taking the arena as given inverted that into "centralize it", which
+> made 19 new unsafe blocks look like an organizational problem rather than
+> code that should not have been written. Deleting the arena did more for the
+> unsafe count than any refactor proposed here, and cost nothing:
+>
+> ```
+> upstream/master     315 occurrences of `unsafe` in glommio/src
+> this fork           307
+> ```
+>
+> (`grep -rc unsafe --include='*.rs' glommio/src` summed across files.)
+>
+> Before centralizing any block below, ask whether it needs to exist. The
+> timing wheel — the largest performance win in this fork, 35-42% at scale —
+> is 1,534 lines of **zero** unsafe.
+
 ## Executive Summary
 
 After analyzing the glommio codebase, I've identified **~320 unsafe blocks/functions** across 80 Rust files. While **complete elimination is not feasible** without severe performance degradation, there is a **significant opportunity to centralize unsafe code** into well-defined core modules with clear safety contracts.

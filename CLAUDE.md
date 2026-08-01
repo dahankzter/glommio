@@ -153,9 +153,11 @@ glommio/
 ├── docs/
 │   ├── README.md               # Documentation index
 │   └── investigations/
-│       └── issue_448/          # Eventfd leak investigation
-│           ├── README.md       # Detailed root cause analysis
-│           └── reproduce.rs    # Reproduction test
+│       ├── issue_448/          # Eventfd leak investigation
+│       │   ├── README.md       # Detailed root cause analysis
+│       │   └── reproduce.rs    # Reproduction test
+│       └── task-arena/         # Arena allocator: built, measured, reverted
+│           └── README.md       # Post-mortem — read before proposing an arena
 ├── glommio/
 │   ├── src/
 │   │   ├── channels/
@@ -180,16 +182,26 @@ glommio/
 - **Status:** Fixed in PR #703 on upstream
 - **Branch:** `fix/issue-700-remove-spsc-clone`
 
-### 📋 Documented Issues
-
 **Issue #448 - Eventfd Leak on Executor Drop**
 - **Severity:** High (resource exhaustion in long-running apps)
-- **Root Cause:** Non-runnable tasks don't have destructors called, Arc<SleepNotifier> leaks
-- **Status:** Comprehensively documented with workarounds
+- **Root Cause:** Non-runnable tasks don't have destructors called, so the
+  `Arc<SleepNotifier>` each task held was never dropped and the eventfd leaked
+- **Fix:** The task header stores `executor_id: usize` instead of the notifier
+  (`f28a619`); the notifier is resolved only on the foreign-wake path, so tasks
+  no longer pin the eventfd at all. This also removed a process-wide `RwLock`
+  read from every spawn.
 - **Documentation:** `docs/investigations/issue_448/README.md`
 - **Quote from Original Maintainer:** "Really hard because tasks often get destroyed under our nose. This brought me back to the refcount hell in the task structures."
 
-**Recommended Workarounds:**
+**Reverted Work**
+
+**Task Arena Allocator** — built, benchmarked, removed. Read
+`docs/investigations/task-arena/README.md` before proposing any glommio-side
+allocator: the premise (malloc lock contention on the spawn path) was measured
+and does not hold, and the arena cost ~98 MB resident per executor while
+segfaulting on detached tasks. Recommend mimalloc to deployments instead.
+
+### 📋 Historical Workarounds (#448, superseded by the fix above)
 1. Use long-lived executors (don't create/destroy repeatedly)
 2. Thread-local executor pattern for tests
 3. Increase file descriptor limits: `ulimit -n 65536`
