@@ -46,7 +46,8 @@ jobs:
           echo "🔍 Testing unsafe data structures for undefined behavior..."
           # Miri cannot execute io_uring syscalls, so this covers the unsafe
           # data structures that do not need a running reactor.
-          cargo miri test --package glommio --lib channels::spsc_queue free_list
+          cargo miri test --package glommio --lib channels::spsc_queue
+          cargo miri test --package glommio --lib free_list
           echo "✅ No undefined behavior detected!"
 
       - name: Comment on PR (if Miri passes)
