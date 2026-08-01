@@ -130,6 +130,48 @@ Not in the opcode translation, which is mechanical. In these:
    recorded in [mechanical-sympathy](../mechanical-sympathy/). Validation is the
    test suite and nothing else.
 
+## The one thing that does not translate: `SleepableRing::sleep`
+
+Found while converting, and it is the reason the core step is not finished.
+
+```rust
+if let Some(mut sqe) = self.ring.sq().prepare_sqe() {
+    let sqe_ptr = unsafe { sqe.raw_mut() as *mut _ };
+    ...
+    if self.submit_sqes()... != 1 {
+        // We make the SQE a no-op and return
+        unsafe { crate::uring_sys::io_uring_prep_nop(sqe_ptr) };
+        Err(io::Error::from_raw_os_error(libc::EBUSY))
+    }
+```
+
+`sleep` reserves an SQE, fills it with a poll that links the rings, and submits
+it. If that submit fails it **rewrites the SQE it already prepared into a nop**,
+so the ring is not left holding a poll the reactor never meant to arm, and then
+declines to sleep.
+
+`io-uring` cannot express this. `SubmissionQueue` offers `push`,
+`push_multiple`, `sync`, `len`, `capacity` and `is_full` — **no rewind, no pop,
+and no access to an entry once pushed**. Building an entry and pushing it are
+separate steps, and after the push the entry is the queue's.
+
+So this needs redesigning, not translating, and the options each need thought:
+
+- Don't push until the submit is known to succeed — but submission failure
+  (`EBUSY`, `EAGAIN`, `EINTR`) is only observable by attempting it.
+- Push and let a failed submit leave the entry queued for the next submit. It is
+  the same poll on the same fd, just later; whether that is safe depends on
+  whether the reactor can reach a state where it is no longer wanted.
+- Push a compensating `AsyncCancel` for the same `user_data` on the failure path.
+
+**Get this wrong and the executor either sleeps when it should not — a hang — or
+arms a poll on the link fd that nobody is expecting.** It deserves a careful
+session with the sleep/wake path in front of you, not the tail end of one.
+
+Work in progress sits on branch `refactor/iou-core` (pushed, not merged). It
+does not compile: `fill_sqe` and `submit_event_chain` are converted, ~20
+mechanical errors remain, plus this one.
+
 ## Suggested sequencing
 
 Each step should leave the tree compiling and the suite green.
@@ -138,11 +180,16 @@ Each step should leave the tree compiling and the suite green.
    into a local `repr(C)` struct or `io_uring::types::Timespec`. *(Attempted:
    this works, but it ripples into the `iou` `prep_*` boundary and only pays off
    as part of the whole, so it was reverted rather than landed as churn.)*
-2. Change `UringCommon`'s queue accessors to `&mut self`, still on `iou`. Pure
-   refactor, no behaviour change, independently reviewable.
-3. Convert `PollRing` first — it is the smaller ring and has no eventfd or
-   preempt-timer entanglement.
-4. Convert `SleepableRing`, including the eventfd install path.
+2. ✅ **Done** (`aab0278`): `UringCommon`'s queue accessors take `&mut self`.
+   Pure refactor; compiled first try, suite green.
+3. ✅ **Done** (`94aaeb7`): opcode probing moved to `io-uring`'s `Probe`,
+   deleting `iou/probe.rs`. Independent of the submission path, so it landed on
+   its own.
+4. ~~Convert `PollRing` first~~ — **this does not decompose.** `submit_event_chain`
+   reserves a contiguous run of SQEs via `prepare_sqes(n)` for linked chains, and
+   both rings share it, so the submission path has to move as one piece.
+   Resolve the `sleep` question above first, then convert `fill_sqe`,
+   `submit_event_chain` and both rings together.
 5. Convert the registrar and the fixed-buffer path. Slowest and most dangerous;
    do it last with the DMA tests in front of you.
 6. Delete `glommio/src/iou` and `glommio/src/uring_sys`. Verify the `unsafe`
