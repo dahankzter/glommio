@@ -29,19 +29,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use io_uring::{opcode, squeue, types, IoUring};
+
 use crate::{
     free_list::{FreeList, Idx},
-    iou,
-    iou::{
-        sqe::{FsyncFlags, SockAddrStorage, StatxFlags, StatxMode, SubmissionFlags, TimeoutFlags},
-        IoUring,
-    },
     sys::{
         self,
         blocking::{BlockingThreadOp, BlockingThreadPool},
         dma_buffer::{BufferStorage, DmaBuffer},
         membarrier, DirectIo, EnqueuedSource, EnqueuedStatus, InnerSource, IoBuffer,
-        PollableStatus, Source, SourceType, Statx, TimeSpec64,
+        PollableStatus, SockAddrStorage, Source, SourceType, Statx, TimeSpec64,
     },
     uring_sys, GlommioError, IoRequirements, IoStats, ReactorErrorKind, RingIoStats,
     TaskQueueHandle,
@@ -86,7 +83,7 @@ enum UringOpDescriptor {
 #[derive(Debug)]
 pub(crate) struct UringDescriptor {
     fd: RawFd,
-    flags: SubmissionFlags,
+    flags: squeue::Flags,
     user_data: u64,
     args: UringOpDescriptor,
 }
@@ -269,137 +266,168 @@ lazy_static! {
     static ref IO_URING_RECENT_ENOUGH: bool = check_supported_operations(GLOMMIO_URING_OPS);
 }
 
+/// Builds the submission queue entry for one descriptor.
+///
+/// Returns an owned entry rather than filling a borrowed slot: `io-uring`
+/// separates building from pushing, which also means a chain can be built in
+/// full before any of it is committed to the ring.
 fn fill_sqe<F>(
-    sqe: &mut iou::SQE<'_>,
     op: &UringDescriptor,
     buffer_allocation: F,
     source_map: &mut SourceMap,
-) where
+) -> squeue::Entry
+where
     F: FnOnce(usize) -> Option<DmaBuffer>,
 {
     let mut user_data = op.user_data;
-    unsafe {
+    let fd = types::Fd(op.fd);
+
+    // SAFETY: every raw pointer below comes out of a `UringDescriptor` whose
+    // owning `Source` is kept alive by the `SourceMap` until the corresponding
+    // completion is reaped, which is the same contract the previous
+    // fill-in-place implementation relied on.
+    let entry = unsafe {
         match op.args {
-            UringOpDescriptor::PollAdd(events) => {
-                sqe.prep_poll_add(op.fd, events);
-            }
+            UringOpDescriptor::PollAdd(events) => opcode::PollAdd::new(fd, events.bits() as _)
+                .build(),
             UringOpDescriptor::PollRemove(to_remove) => {
                 user_data = 0;
-                sqe.prep_poll_remove(to_remove as u64);
+                opcode::PollRemove::new(to_remove as u64).build()
             }
             UringOpDescriptor::Cancel(to_remove) => {
                 user_data = 0;
-                sqe.prep_cancel(to_remove, 0);
+                opcode::AsyncCancel::new(to_remove).build()
             }
             UringOpDescriptor::Write(ptr, len, pos) => {
-                let buf = std::slice::from_raw_parts(ptr, len);
-                sqe.prep_write(op.fd, buf, pos);
+                opcode::Write::new(fd, ptr, len as u32).offset(pos).build()
             }
-            UringOpDescriptor::Read(pos, len) => {
-                source_map.peek_source_mut(from_user_data(op.user_data), |mut x| {
+            UringOpDescriptor::Read(pos, len) => source_map
+                .peek_source_mut(from_user_data(op.user_data), |mut x| {
                     match &mut x.source_type {
                         SourceType::ForeignNotifier(result, _) => {
-                            sqe.prep_read(op.fd, result, pos);
+                            opcode::Read::new(fd, result as *mut u64 as *mut u8, 8)
+                                .offset(pos)
+                                .build()
                         }
                         SourceType::Read(PollableStatus::NonPollable(DirectIo::Disabled), slot) => {
                             let mut buf = buffer_allocation(len).expect("Buffer allocation failed");
-                            sqe.prep_read(op.fd, buf.as_bytes_mut(), pos);
+                            let entry = opcode::Read::new(fd, buf.as_mut_ptr(), len as u32)
+                                .offset(pos)
+                                .build();
                             // If you have a buffer here, that very likely means you are reusing the
                             // source. The kernel knows about that buffer already, and will write to
                             // it. So this can only be called if there is no buffer attached to it.
                             assert!(slot.is_none());
                             *slot = Some(IoBuffer::DmaSink(buf));
+                            entry
                         }
                         _ => unreachable!("Expected Read source type"),
                     }
-                });
-            }
+                }),
             UringOpDescriptor::Open(path, flags, mode) => {
-                let path = CStr::from_ptr(path as _);
-                sqe.prep_openat(
-                    op.fd,
-                    path,
-                    OFlag::from_bits_truncate(flags),
-                    OpenMode::from_bits_truncate(mode),
-                );
+                opcode::OpenAt::new(fd, path as *const libc::c_char)
+                    .flags(flags)
+                    .mode(mode)
+                    .build()
             }
-            UringOpDescriptor::FDataSync => {
-                sqe.prep_fsync(op.fd, FsyncFlags::FSYNC_DATASYNC);
-            }
+            UringOpDescriptor::FDataSync => opcode::Fsync::new(fd)
+                .flags(types::FsyncFlags::DATASYNC)
+                .build(),
             UringOpDescriptor::Connect(addr) => {
-                sqe.prep_connect(op.fd, &*addr);
+                opcode::Connect::new(fd, (*addr).as_ptr() as *const libc::sockaddr, (*addr).len())
+                    .build()
             }
-
             UringOpDescriptor::LinkTimeout(timespec) => {
-                sqe.prep_link_timeout(&*timespec);
+                // `types::Timespec` and `__kernel_timespec` are the same two
+                // fixed-width fields in the same order, and the timespec has to
+                // outlive the SQE, so borrow the caller's rather than copying a
+                // temporary that would be dropped before submission.
+                opcode::LinkTimeout::new(timespec as *const types::Timespec).build()
             }
-
             UringOpDescriptor::Accept(addr) => {
-                sqe.prep_accept(op.fd, Some(&mut *addr), SockFlag::SOCK_CLOEXEC);
+                let (storage, len) = (*addr).as_raw_parts();
+                opcode::Accept::new(fd, storage, len)
+                    .flags(SockFlag::SOCK_CLOEXEC.bits())
+                    .build()
             }
-
             UringOpDescriptor::Fallocate(offset, size, flags) => {
-                let flags = FallocateFlags::from_bits_truncate(flags);
-                sqe.prep_fallocate(op.fd, offset, size, flags);
+                opcode::Fallocate::new(fd, size).offset(offset).mode(flags).build()
             }
-            UringOpDescriptor::StatxFd(fd, statx_buf) => {
-                let flags = StatxFlags::AT_STATX_SYNC_AS_STAT
-                    | StatxFlags::AT_NO_AUTOMOUNT
-                    | StatxFlags::AT_EMPTY_PATH;
-                let mode = StatxMode::from_bits_truncate(0x7ff);
-                sqe.prep_statx(fd, Default::default(), flags, mode, &mut *statx_buf);
+            UringOpDescriptor::StatxFd(statx_fd, statx_buf) => {
+                const EMPTY_PATH: &[u8] = b"\0";
+                let flags = libc::AT_STATX_SYNC_AS_STAT
+                    | libc::AT_NO_AUTOMOUNT
+                    | libc::AT_EMPTY_PATH;
+                opcode::Statx::new(
+                    types::Fd(statx_fd),
+                    EMPTY_PATH.as_ptr() as *const libc::c_char,
+                    statx_buf as *mut types::statx,
+                )
+                .flags(flags)
+                .mask(0x7ff)
+                .build()
             }
             UringOpDescriptor::Timeout(timespec, events) => {
-                sqe.prep_timeout(&*timespec, events, TimeoutFlags::empty());
+                opcode::Timeout::new(timespec as *const types::Timespec)
+                    .count(events)
+                    .build()
             }
             UringOpDescriptor::TimeoutRemove(timer) => {
-                sqe.prep_timeout_remove(timer as _);
+                opcode::TimeoutRemove::new(timer).build()
             }
-            UringOpDescriptor::Close => {
-                sqe.prep_close(op.fd);
-            }
+            UringOpDescriptor::Close => opcode::Close::new(fd).build(),
             UringOpDescriptor::ReadFixed(pos, len) => {
                 let mut buf = buffer_allocation(len).expect("Buffer allocation failed");
                 source_map.peek_source_mut(from_user_data(op.user_data), |mut src| {
                     match &mut src.source_type {
                         SourceType::Read(PollableStatus::NonPollable(DirectIo::Disabled), slot) => {
-                            sqe.prep_read(op.fd, buf.as_bytes_mut(), pos);
+                            let entry = opcode::Read::new(fd, buf.as_mut_ptr(), len as u32)
+                                .offset(pos)
+                                .build();
                             *slot = Some(IoBuffer::DmaSink(buf));
+                            entry
                         }
                         SourceType::Read(_, slot) => {
-                            match buf.uring_buffer_id() {
-                                None => {
-                                    sqe.prep_read(op.fd, buf.as_bytes_mut(), pos);
-                                }
-                                Some(idx) => {
-                                    sqe.prep_read_fixed(op.fd, buf.as_bytes_mut(), pos, idx);
-                                }
+                            let entry = match buf.uring_buffer_id() {
+                                None => opcode::Read::new(fd, buf.as_mut_ptr(), len as u32)
+                                    .offset(pos)
+                                    .build(),
+                                Some(idx) => opcode::ReadFixed::new(
+                                    fd,
+                                    buf.as_mut_ptr(),
+                                    len as u32,
+                                    idx,
+                                )
+                                .offset(pos)
+                                .build(),
                             };
                             *slot = Some(IoBuffer::DmaSink(buf));
+                            entry
                         }
                         _ => unreachable!(),
-                    };
-                });
+                    }
+                })
             }
-
             UringOpDescriptor::WriteFixed(ptr, len, pos, buf_index) => {
-                let buf = std::slice::from_raw_parts(ptr, len);
-                sqe.prep_write_fixed(op.fd, buf, pos, buf_index as _);
+                opcode::WriteFixed::new(fd, ptr, len as u32, buf_index as u16)
+                    .offset(pos)
+                    .build()
             }
-
             UringOpDescriptor::SockSend(ptr, len, flags) => {
-                let buf = std::slice::from_raw_parts(ptr, len);
-                sqe.prep_send(op.fd, buf, MsgFlags::from_bits_retain(flags | MSG_ZEROCOPY));
+                opcode::Send::new(fd, ptr, len as u32)
+                    .flags(flags | MSG_ZEROCOPY)
+                    .build()
             }
-
             UringOpDescriptor::SockSendMsg(hdr, flags) => {
-                sqe.prep_sendmsg(op.fd, hdr, MsgFlags::from_bits_retain(flags | MSG_ZEROCOPY));
+                opcode::SendMsg::new(fd, hdr as *const libc::msghdr)
+                    .flags((flags | MSG_ZEROCOPY) as u32)
+                    .build()
             }
-
             UringOpDescriptor::SockRecv(len, flags) => {
                 let mut buf = DmaBuffer::new(len).expect("failed to allocate buffer");
-                sqe.prep_recv(op.fd, buf.as_bytes_mut(), MsgFlags::from_bits_retain(flags));
-
+                let entry = opcode::Recv::new(fd, buf.as_mut_ptr(), len as u32)
+                    .flags(flags)
+                    .build();
                 source_map.peek_source_mut(from_user_data(op.user_data), |mut src| {
                     match &mut src.source_type {
                         SourceType::SockRecv(slot) => {
@@ -408,8 +436,8 @@ fn fill_sqe<F>(
                         _ => unreachable!(),
                     };
                 });
+                entry
             }
-
             UringOpDescriptor::SockRecvMsg(len, flags) => {
                 let mut buf = DmaBuffer::new(len).expect("failed to allocate buffer");
                 source_map.peek_source_mut(from_user_data(op.user_data), |mut src| {
@@ -426,22 +454,21 @@ fn fill_sqe<F>(
                             hdr.msg_iov = iov as *mut libc::iovec;
                             hdr.msg_iovlen = 1;
 
-                            sqe.prep_recvmsg(
-                                op.fd,
-                                hdr as *mut libc::msghdr,
-                                MsgFlags::from_bits_retain(flags),
-                            );
+                            let entry = opcode::RecvMsg::new(fd, hdr as *mut libc::msghdr)
+                                .flags(flags as u32)
+                                .build();
                             *slot = Some(buf);
+                            entry
                         }
                         _ => unreachable!(),
-                    };
-                });
+                    }
+                })
             }
-            UringOpDescriptor::Nop => sqe.prep_nop(),
+            UringOpDescriptor::Nop => opcode::Nop::new().build(),
         }
-        sqe.set_user_data(user_data);
-        sqe.set_flags(op.flags);
-    }
+    };
+
+    entry.user_data(user_data).flags(op.flags)
 }
 
 fn transmute_error(res: io::Result<u32>) -> io::Result<usize> {
@@ -499,7 +526,7 @@ fn peek_one_chain(queue: &VecDeque<UringDescriptor>, ring_size: usize) -> Option
         .take(ring_size)
         .position(|sqe| {
             !sqe.flags
-                .intersects(SubmissionFlags::IO_LINK | SubmissionFlags::IO_HARDLINK)
+                .intersects(squeue::Flags::IO_LINK | squeue::Flags::IO_HARDLINK)
         })
         .expect("Unterminated SQE link chain or submission queue overflow");
     Some(0..chain + 1)
@@ -551,32 +578,41 @@ fn submit_event_chain(
     let now = Instant::now();
 
     while let Some(chain) = peek_one_chain(queue, ring_size) {
-        return if let Some(sqes) = ring.sq().prepare_sqes(chain.len() as u32) {
-            let ops = extract_one_chain(source_map, queue, chain, now);
-            if ops.is_empty() {
-                // all the sources in the ring were cancelled
-                continue;
-            }
+        // A chain is linked with IOSQE_IO_LINK, so it is only meaningful whole:
+        // committing part of one would submit a link timeout without the
+        // operation it guards, or the reverse. Check the whole chain fits
+        // before pushing any of it, and bail if it does not so the caller
+        // flushes and retries.
+        let mut sq = ring.submission();
+        if sq.capacity() - sq.len() < chain.len() {
+            return None;
+        }
 
-            for (op, mut sqe) in ops.into_iter().zip(sqes) {
-                let allocator = allocator.clone();
-                fill_sqe(
-                    &mut sqe,
-                    &op,
-                    move |size| allocator.new_buffer(size),
-                    source_map,
-                );
+        let ops = extract_one_chain(source_map, queue, chain, now);
+        if ops.is_empty() {
+            // all the sources in the ring were cancelled
+            continue;
+        }
+
+        for op in ops {
+            let allocator = allocator.clone();
+            let entry = fill_sqe(&op, move |size| allocator.new_buffer(size), source_map);
+            // SAFETY: the entry was just built from `op`, whose buffers and
+            // pointers are owned by sources the `SourceMap` keeps alive until
+            // the completion is reaped. The capacity check above guarantees
+            // the push cannot fail.
+            unsafe {
+                sq.push(&entry)
+                    .expect("chain was checked to fit in the submission queue");
             }
-            Some(true)
-        } else {
-            None
-        };
+        }
+        return Some(true);
     }
     Some(false)
 }
 
 fn process_one_event<F, R>(
-    cqe: Option<iou::CQE>,
+    cqe: Option<cqueue::Entry>,
     try_process: F,
     post_process: R,
     source_map: Rc<RefCell<SourceMap>>,
@@ -670,7 +706,7 @@ impl UringQueueState {
         self.cancellations.push_back(UringDescriptor {
             args: UringOpDescriptor::Cancel(to_user_data(id)),
             fd: -1,
-            flags: SubmissionFlags::empty(),
+            flags: squeue::Flags::empty(),
             user_data: 0,
         });
     }
@@ -699,7 +735,7 @@ pub(crate) trait UringCommon {
     fn name(&self) -> &'static str;
     fn io_stats_mut(&mut self) -> &mut RingIoStats;
     fn io_stats_for_task_queue_mut(&mut self, handle: TaskQueueHandle) -> &mut RingIoStats;
-    fn registrar(&mut self) -> iou::Registrar<'_>;
+    fn submitter(&mut self) -> io_uring::Submitter<'_>;
     fn may_rush(&self) -> bool {
         true
     }
@@ -796,7 +832,7 @@ pub(crate) trait UringCommon {
 }
 
 struct PollRing {
-    ring: iou::IoUring,
+    ring: IoUring,
     size: usize,
     submission_queue: ReactorQueue,
     allocator: Rc<UringBufferAllocator>,
@@ -812,11 +848,7 @@ impl PollRing {
         allocator: Rc<UringBufferAllocator>,
         source_map: Rc<RefCell<SourceMap>>,
     ) -> io::Result<Self> {
-        let ring = iou::IoUring::new_with_flags(
-            size as _,
-            iou::SetupFlags::IOPOLL,
-            iou::SetupFeatures::empty(),
-        )?;
+        let ring = IoUring::builder().setup_iopoll().build(size as _)?;
         Ok(PollRing {
             size,
             ring,
@@ -847,8 +879,8 @@ impl UringCommon for PollRing {
         self.task_queue_stats.entry(handle).or_default()
     }
 
-    fn registrar(&mut self) -> iou::Registrar<'_> {
-        self.ring.registrar()
+    fn submitter(&mut self) -> io_uring::Submitter<'_> {
+        self.ring.submitter()
     }
 
     fn needs_kernel_enter(&mut self) -> bool {
@@ -863,7 +895,7 @@ impl UringCommon for PollRing {
     }
 
     fn waiting_kernel_submission(&mut self) -> usize {
-        self.ring.sq().ready() as usize
+        self.ring.submission().len()
     }
 
     fn in_kernel(&self) -> usize {
@@ -871,7 +903,7 @@ impl UringCommon for PollRing {
     }
 
     fn waiting_kernel_collection(&mut self) -> usize {
-        self.ring.cq().ready() as usize
+        self.ring.completion().len()
     }
 
     fn submission_queue(&mut self) -> ReactorQueue {
@@ -879,7 +911,7 @@ impl UringCommon for PollRing {
     }
 
     fn submit_sqes(&mut self) -> io::Result<usize> {
-        let x = self.ring.submit_sqes()? as usize;
+        let x = self.ring.submit()?;
         self.in_kernel += x;
         Ok(x)
     }
@@ -887,7 +919,7 @@ impl UringCommon for PollRing {
     fn consume_one_event(&mut self) -> Option<bool> {
         let source_map = self.source_map.clone();
         process_one_event(
-            self.ring.peek_for_cqe(),
+            self.ring.completion().next(),
             |_| None,
             |mut src, res| {
                 record_stats(self, &mut src, &res);
@@ -912,7 +944,7 @@ impl UringCommon for PollRing {
 }
 
 struct SleepableRing {
-    ring: iou::IoUring,
+    ring: IoUring,
     size: usize,
     submission_queue: ReactorQueue,
     name: &'static str,
@@ -932,7 +964,7 @@ impl SleepableRing {
     ) -> io::Result<Self> {
         assert!(*IO_URING_RECENT_ENOUGH);
         Ok(SleepableRing {
-            ring: iou::IoUring::new(size as _)?,
+            ring: IoUring::new(size as _)?,
             size,
             submission_queue: UringQueueState::with_capacity(size * 4),
             name,
@@ -973,7 +1005,7 @@ impl SleepableRing {
             .push_front(UringDescriptor {
                 args: op,
                 fd: -1,
-                flags: SubmissionFlags::empty(),
+                flags: squeue::Flags::empty(),
                 user_data: to_user_data(
                     self.source_map
                         .borrow_mut()
@@ -1000,7 +1032,7 @@ impl SleepableRing {
         const EVENTFD_WAKEUP: &[u64; 1] = &[1u64; 1];
         let write_op = UringDescriptor {
             fd: event_fd,
-            flags: SubmissionFlags::empty(),
+            flags: squeue::Flags::empty(),
             user_data: 0,
             args: UringOpDescriptor::Write(EVENTFD_WAKEUP as *const u64 as _, 8, 0),
         };
@@ -1016,7 +1048,7 @@ impl SleepableRing {
         queue.borrow_mut().submissions.push_front(UringDescriptor {
             args: op,
             fd: -1,
-            flags: SubmissionFlags::IO_LINK,
+            flags: squeue::Flags::IO_LINK,
             user_data: to_user_data(
                 self.source_map
                     .borrow_mut()
@@ -1032,7 +1064,7 @@ impl SleepableRing {
             // If we can't then we can't sleep and will just bail immediately
             let op = UringDescriptor {
                 fd: eventfd_src.raw(),
-                flags: SubmissionFlags::empty(),
+                flags: squeue::Flags::empty(),
                 user_data: to_user_data(
                     self.source_map
                         .borrow_mut()
@@ -1082,7 +1114,7 @@ impl SleepableRing {
             let sqe_ptr = unsafe { sqe.raw_mut() as *mut _ };
             let op = UringDescriptor {
                 fd: link.raw(),
-                flags: SubmissionFlags::empty(),
+                flags: squeue::Flags::empty(),
                 user_data: to_user_data(
                     self.source_map
                         .borrow_mut()
@@ -1148,8 +1180,8 @@ impl UringCommon for SleepableRing {
         self.task_queue_stats.entry(handle).or_default()
     }
 
-    fn registrar(&mut self) -> iou::Registrar<'_> {
-        self.ring.registrar()
+    fn submitter(&mut self) -> io_uring::Submitter<'_> {
+        self.ring.submitter()
     }
 
     fn may_rush(&self) -> bool {
@@ -1169,7 +1201,7 @@ impl UringCommon for SleepableRing {
     }
 
     fn waiting_kernel_submission(&mut self) -> usize {
-        self.ring.sq().ready() as usize
+        self.ring.submission().len()
     }
 
     fn in_kernel(&self) -> usize {
@@ -1177,7 +1209,7 @@ impl UringCommon for SleepableRing {
     }
 
     fn waiting_kernel_collection(&mut self) -> usize {
-        self.ring.cq().ready() as usize
+        self.ring.completion().len()
     }
 
     fn submission_queue(&mut self) -> ReactorQueue {
@@ -1185,7 +1217,7 @@ impl UringCommon for SleepableRing {
     }
 
     fn submit_sqes(&mut self) -> io::Result<usize> {
-        let x = self.ring.submit_sqes()? as usize;
+        let x = self.ring.submit()?;
         self.in_kernel += x;
         Ok(x)
     }
@@ -1193,7 +1225,7 @@ impl UringCommon for SleepableRing {
     fn consume_one_event(&mut self) -> Option<bool> {
         let source_map = self.source_map.clone();
         process_one_event(
-            self.ring.peek_for_cqe(),
+            self.ring.completion().next(),
             |source| match source.source_type {
                 SourceType::LinkRings => Some(()),
                 _ => None,
@@ -1928,7 +1960,7 @@ impl Reactor {
         queue.submissions.push_back(UringDescriptor {
             args: UringOpDescriptor::Close,
             fd,
-            flags: SubmissionFlags::empty(),
+            flags: squeue::Flags::empty(),
             user_data: 0,
         });
     }
@@ -2009,8 +2041,8 @@ fn queue_request_into_ring(
     let id = source_map.add_source(source, Rc::clone(&q));
 
     let flags = match &*source.timeout_ref() {
-        Some(_) => SubmissionFlags::IO_LINK,
-        _ => SubmissionFlags::empty(),
+        Some(_) => squeue::Flags::IO_LINK,
+        _ => squeue::Flags::empty(),
     };
 
     let mut queue = q.borrow_mut();
@@ -2024,7 +2056,7 @@ fn queue_request_into_ring(
     if let Some(ref ts) = &*source.timeout_ref() {
         queue.submissions.push_back(UringDescriptor {
             args: UringOpDescriptor::LinkTimeout(&ts.raw as *const _),
-            flags: SubmissionFlags::empty(),
+            flags: squeue::Flags::empty(),
             fd: -1,
             user_data: 0,
         });
@@ -2178,9 +2210,9 @@ mod tests {
                 args: UringOpDescriptor::Nop,
                 fd: -1,
                 flags: if i == 1 {
-                    SubmissionFlags::IO_LINK
+                    squeue::Flags::IO_LINK
                 } else {
-                    SubmissionFlags::empty()
+                    squeue::Flags::empty()
                 },
                 user_data: 0,
             });
@@ -2209,7 +2241,7 @@ mod tests {
         queue.submissions.push_back(UringDescriptor {
             args: UringOpDescriptor::Close,
             fd: -1,
-            flags: SubmissionFlags::IO_LINK,
+            flags: squeue::Flags::IO_LINK,
             user_data: 0,
         });
 
@@ -2230,7 +2262,7 @@ mod tests {
             queue.submissions.push_back(UringDescriptor {
                 args: UringOpDescriptor::Close,
                 fd: -1,
-                flags: SubmissionFlags::IO_LINK,
+                flags: squeue::Flags::IO_LINK,
                 user_data: 0,
             });
         }
@@ -2238,7 +2270,7 @@ mod tests {
         queue.submissions.push_back(UringDescriptor {
             args: UringOpDescriptor::Close,
             fd: -1,
-            flags: SubmissionFlags::empty(),
+            flags: squeue::Flags::empty(),
             user_data: 0,
         });
 
