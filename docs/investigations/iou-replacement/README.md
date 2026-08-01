@@ -1,11 +1,32 @@
 # Investigation: Replacing the Vendored `iou` / `uring_sys`
 
 **Date:** 2026-08-01
-**Status:** surveyed and scoped, not attempted
+**Status:** ✅ **done** — merged, 3,042 lines and 100 `unsafe` deleted
 **Motivation:** delete a third of the fork's unsafe surface, and stop being
 frozen at a 2020 view of io_uring
 
-## Why this is on the table
+## Outcome
+
+Landed. `glommio/src/iou` and `glommio/src/uring_sys` are gone and the
+submission path is built on the maintained `io-uring` crate.
+
+| | before | after |
+|---|---:|---:|
+| vendored lines | 3,042 | **0** |
+| `unsafe` in `glommio/src` | 304 | **204** |
+| tests | 434 lib | 424 lib (the 10 lost were `iou`'s own) |
+
+Miri clean; spawn, task switch and shard round trip all unchanged or better.
+
+**One caveat: the dependency points at a fork.** `need_preempt` needs raw
+pointers to the latency ring's CQ head and tail, which `io-uring` keeps private
+(see below). `dahankzter/io-uring`, branch `feat/cq-head-tail-ptrs`, adds a
+`CompletionQueue::head_tail_ptrs` accessor — about twenty lines, mostly the
+safety documentation. Until that is upstreamed and released, `cargo publish`
+will not accept this, so a release needs either the PR landed or the accessor
+temporarily inlined.
+
+## Why this was on the table
 
 `glommio/src/iou` and `glommio/src/uring_sys` are not dependencies. They are a
 copy of the `iou` and `uring-sys` crates taken into the tree in commit
