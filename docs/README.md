@@ -85,11 +85,14 @@ question: per-operation path cost cannot explain a large gap, because there is
 almost none to give back.
 
 **The network path is the opposite** ([network.md](./investigations/io-path/network.md)):
-loopback TCP ping-pong runs **+120% over a raw io_uring floor** and streaming
-sends are **10x** a blocking socket. glommio's TCP reads are readiness-based, a
-`recv` syscall bypassing io_uring with a `PollAdd` fallback, costing about five
-SQEs and five kernel enters per side per round trip where two suffice. First
-large non-hardware gap found.
+loopback TCP ping-pong runs **+120% over a raw io_uring floor**. glommio's TCP
+reads are readiness-based — a `recv` syscall bypassing io_uring with a `PollAdd`
+fallback — costing about five SQEs and five kernel enters per side per round
+trip where two suffice. First large non-hardware gap found.
+
+An accompanying claim that streaming sends were 10x slower is **retracted**: the
+raw side had Nagle on while glommio had `TCP_NODELAY`. Measured fairly, the
+write path adds 127 ns over the bare syscall and the executor adds nothing.
 
 ### [Replacing the Vendored `iou` / `uring_sys`](./investigations/iou-replacement/)
 **Status:** Surveyed and scoped, not attempted

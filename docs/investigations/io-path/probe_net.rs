@@ -186,16 +186,12 @@ fn glommio_tcp(spin: Option<std::time::Duration>) -> f64 {
                 c.write_all(&buf).await.unwrap();
                 c.read_exact(&mut buf).await.unwrap();
             }
-            glommio::probe_counters::reset();
             let start = Instant::now();
             for _ in 0..ROUNDS {
                 c.write_all(&buf).await.unwrap();
                 c.read_exact(&mut buf).await.unwrap();
             }
             let el = start.elapsed();
-            for (n, v) in glommio::probe_counters::snapshot() {
-                println!("    client {n:<14} {:>6.2} per round trip", v as f64 / ROUNDS as f64);
-            }
             drop(c);
             el.as_nanos() as f64 / ROUNDS as f64
         })

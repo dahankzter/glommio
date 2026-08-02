@@ -1,12 +1,13 @@
 # The Network Path — Where the Fat Is
 
 **Date:** 2026-08-02
-**Status:** measured — **first genuinely large gap found**
+**Status:** latency gap confirmed; an accompanying streaming claim retracted
 **Method:** raw io_uring floor, glommio over the identical workload, attribute
 
 The task path, the DMA read path and the reactor loop all came back thin: single
 digit percentages, device-dominated, nothing worth optimising. The network path
-does not.
+is the first that is not — on latency. A second claim in this document, about
+streaming throughput, turned out to be a benchmark bug and is retracted below.
 
 ## Latency: loopback TCP ping-pong
 
@@ -68,27 +69,48 @@ design wearing io_uring underneath.
 there: a wasted `recv` returning `EAGAIN`, then a poll registration, then a wake,
 then a second `recv`. A ping-pong is that case every single time.
 
-## But the streaming regime is worse, not better
+## The streaming claim was wrong — retracted
 
-If the trade were sound, the throughput case should favour glommio. Sender never
-waits, so the receiver almost always finds data buffered — `yolo_recv`'s best
-case. Per message sent:
+An earlier version of this document reported streaming sends at 100 ns for
+blocking sockets against 1,057 ns for glommio and called it a 10x gap in the
+regime the design exists for. **That was a benchmark bug, twice over.**
 
-| stack | per message |
+**First, Nagle.** The raw comparisons left `TCP_NODELAY` off while glommio set
+it. With Nagle on, small sends coalesce into the existing segment and return
+almost immediately; with it off, each 64-byte send pushes a packet and loopback
+delivery happens inline. Setting `NODELAY` on all three collapses the difference:
+
+| per send, `TCP_NODELAY` on all three | |
 |---|---:|
-| `std::net` blocking | **100 ns** |
-| glommio | **1,057 ns** |
+| bare `send(MSG_DONTWAIT)` | 1,153 ns |
+| + glommio executor and `await` | 1,153 ns (**+0**) |
+| + glommio net layer (`write_all`) | 1,280 ns (**+127**) |
 
-**10x**, in the regime the design is built for. Whatever is costing ~950 ns per
-64-byte send is not the readiness trade — a successful `yolo_send` should be one
-syscall.
+**glommio's write path costs 127 ns over the bare syscall, not 950**, and the
+executor costs nothing measurable.
+
+Timers inside `poll_write` confirm the shape: 1.00 `poll_write` and 1.00
+successful `yolo_send` per message, zero `EAGAIN`, 18 ns in everything after the
+syscall. The fast path is one syscall and a few cheap operations, exactly as it
+reads.
+
+**Second, backpressure.** The two streaming servers are not comparable either:
+the blocking one drains with a cheap `read` syscall while glommio's drains
+through its async read path, so the client backs up against a slower reader.
+That test measures receive throughput indirectly, not send cost.
+
+The write path is fine. A 10x result should have been suspicious rather than
+exciting, and the ladder that disproved it took twenty minutes.
 
 ## What this means
 
-This is the first thing found in this fork's performance work that is large,
-reproducible and not explained by hardware. Unlike the read path, where the
-device was 91% of the time and there was nothing to give back, here there is a
-factor of two on latency and a factor of ten on streaming sends.
+The latency result stands: a factor of two, reproducible, not explained by
+hardware. That comparison was fair — all three stacks set `TCP_NODELAY`, run the
+same workload, and use the same stack on both ends. Unlike the read path, where
+the device was 91% of the time and there was nothing to give back, here there is
+something to give back.
+
+The streaming result does not stand; see the retraction above.
 
 It also **relocates the monoio comparison**, which is where this started.
 monoio benchmarks are TCP echo servers, not file reads. If glommio loses to
@@ -101,13 +123,16 @@ The obvious move — switch reads and writes to io_uring `Recv`/`Send` — is a
 design change to the core of the network stack, and the current design was
 presumably chosen for a reason. Measure first, in this order:
 
-1. **Attribute the streaming 950 ns.** That is the clearest signal and the least
-   ambiguous case: one successful send should be one syscall. Find out what else
-   is happening. It may not be the readiness design at all.
-2. **Then** prototype a completion-based read on a branch and measure both
-   regimes. A design that wins on latency and loses on throughput is not
-   obviously an improvement.
-3. Check `rush_dispatch`. `stream.rs` has two commented-out calls with a note
+1. ~~Attribute the streaming 950 ns.~~ **Done, and it evaporated** — see the
+   retraction. The write path adds 127 ns; the executor adds nothing.
+2. **Attribute the latency gap the same way.** Five SQEs and five enters per side
+   per round trip is a count, not an attribution. The write ladder worked; the
+   read side has had no equivalent. Find out what each op is and what it costs
+   before assuming the readiness design is responsible.
+3. **Only then** prototype a completion-based read. Note it would *add* an SQE
+   and a kernel enter to the streaming path, which today costs one syscall — so
+   it could make throughput worse to make latency better.
+4. Check `rush_dispatch`. `stream.rs` has two commented-out calls with a note
    referring to issue #458 — someone has already been here.
 
 ## What this does not cover

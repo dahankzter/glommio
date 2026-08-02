@@ -73,8 +73,7 @@ floor pays too. Glommio's own bookkeeping is 400-500 ns.
 ## The network path is a different story
 
 [network.md](network.md). Loopback TCP ping-pong is **+120% over a raw io_uring
-floor**, and streaming sends are **10x** a blocking socket. glommio's TCP reads
-are readiness-based — a direct `recv` syscall bypassing io_uring, falling back to
+floor**. glommio's TCP reads are readiness-based — a direct `recv` syscall bypassing io_uring, falling back to
 `PollAdd` on `EAGAIN` — so it issues about five SQEs and five kernel enters per
 side per round trip where two suffice.
 
