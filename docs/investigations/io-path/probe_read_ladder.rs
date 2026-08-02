@@ -155,9 +155,41 @@ fn glommio_case() -> f64 {
             c.set_nodelay(true).unwrap();
             let mut buf = [0u8; MSG];
             for _ in 0..2_000 { c.write_all(&buf).await.unwrap(); c.read_exact(&mut buf).await.unwrap(); }
+            glommio::probe_counters::reset();
             let start = Instant::now();
             for _ in 0..ROUNDS { c.write_all(&buf).await.unwrap(); c.read_exact(&mut buf).await.unwrap(); }
             let el = start.elapsed();
+            let snap = glommio::probe_counters::snapshot();
+            let get = |n: &str| snap.iter().find(|(k,_)| *k==n).unwrap().1 as f64;
+            let r = ROUNDS as f64;
+            println!("\n  per round trip, glommio internals:");
+            for (label, key) in [
+                ("reactor loop (awake)", "NS_LOOP"),
+                ("  poll_io", "NS_POLL_IO"),
+                ("    io_uring_enter", "NS_ENTER"),
+                ("    process_one_event", "NS_PROCESS_EVENT"),
+                ("      wake_waiters", "NS_WAKE_WAITERS"),
+                ("      consume_source", "NS_CONSUME_SOURCE"),
+                ("  run_task_queues", "NS_RUN_TQ"),
+                ("  Source::new", "NS_NEW_SOURCE"),
+                ("  add_source", "NS_ADD_SOURCE"),
+            ] {
+                println!("    {label:<26} {:>7.0} ns", get(key)/r);
+            }
+            println!("\n  counts per round trip:");
+            for (label, key) in [
+                ("io_uring_enter", "N_ENTER"),
+                ("completions processed", "N_PROCESS_EVENT"),
+                ("Sources created", "N_NEW_SOURCE"),
+                ("  of which LinkRings", "C_LINKRINGS"),
+                ("  of which PollAdd", "C_POLLADD"),
+                ("  of which Timeout", "C_TIMEOUT"),
+                ("  of which ForeignNotifier", "C_FOREIGN"),
+                ("  of which other", "C_OTHER"),
+                ("  user_data 0 (cancel etc)", "C_NODATA"),
+            ] {
+                println!("    {label:<26} {:>7.2}", get(key)/r);
+            }
             drop(c);
             el.as_nanos() as f64 / ROUNDS as f64
         }).unwrap();

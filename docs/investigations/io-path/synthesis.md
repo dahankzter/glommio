@@ -74,10 +74,12 @@ That is why the same runtime looks 6% slower on files and 53% slower on loopback
 TCP.
 
 **If it is worth attacking, attack the per-I/O executor round trip**, which is
-runtime-wide and would help every path at once. `run_task_queues` was measured at
-~290 ns per iteration and the ring bookkeeping at ~540 ns, which leaves most of
-the 1,800 ns still unattributed — the completion-to-task-wake sequence is the
-obvious place to look next.
+runtime-wide and would help every path at once. **Now attributed** in
+[per-io-cost.md](per-io-cost.md): a TCP echo round trip processes **nine
+completions to perform one read**, of which one is the actual poll and eight are
+preempt-timer installs and cancellations. The user-space handling is cheap —
+`wake_waiters` 93 ns, `consume_source` 70 ns, `Source::new` 30 ns — so the cost
+is the kernel round trips those eight extra completions imply.
 
 **And measure against a realistic denominator.** Loopback has no wire time to
 hide behind. On a real NIC, a round trip is tens of microseconds and 2 µs is back

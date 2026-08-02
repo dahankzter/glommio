@@ -75,7 +75,10 @@ schedule closure captures 8 bytes.
 **Status:** Measured and resolved to a single number
 **Result:** glommio costs **~2 µs per blocking I/O** — 6% of an NVMe read, 53% of a loopback TCP round trip
 
-[synthesis.md](./investigations/io-path/synthesis.md) is the short version. The
+[synthesis.md](./investigations/io-path/synthesis.md) is the short version, and
+[per-io-cost.md](./investigations/io-path/per-io-cost.md) attributes it: a TCP
+echo round trip processes **nine io_uring completions to perform one read** —
+one real poll, three preempt timers, five cancellations. The
 file path, the network path and the reactor loop turned out to be the same
 measurement: the executor round trip forced by any operation that blocks. A
 ladder implementing glommio's readiness design *by hand* costs −34 ns against
