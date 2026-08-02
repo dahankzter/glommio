@@ -226,6 +226,7 @@ miri-core:
 	@echo "  (Testing unsafe code for undefined behavior)"
 	@$(call run_cargo,+nightly miri test --package glommio --lib channels::spsc_queue)
 	@$(call run_cargo,+nightly miri test --package glommio --lib free_list)
+	@$(call run_cargo,+nightly miri test --package glommio --lib task::lifecycle_tests)
 	@echo ""
 	@echo "✓ Miri found no undefined behavior!"
 

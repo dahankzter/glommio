@@ -27,6 +27,41 @@ use crate::{
     },
 };
 
+/// Test-only override for the owning-executor identity.
+///
+/// `do_wake`, `drop_waker` and `run` all branch on whether the current thread
+/// owns the task, and with no executor installed that check always says "not
+/// mine" and sends everything down the foreign path. That makes the local
+/// teardown path — the reference counting and deallocation, the most
+/// `unsafe`-dense code here — untestable without a reactor. See
+/// `task::lifecycle_tests`.
+#[cfg(test)]
+pub(crate) mod test_executor_id {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ID: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn get() -> Option<usize> {
+        ID.with(Cell::get)
+    }
+
+    /// Sets the override for the current thread, restoring it on drop.
+    pub(crate) fn scoped(id: usize) -> Guard {
+        let previous = ID.with(|c| c.replace(Some(id)));
+        Guard(previous)
+    }
+
+    pub(crate) struct Guard(Option<usize>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ID.with(|c| c.set(self.0));
+        }
+    }
+}
+
 /// The vtable for a task.
 pub(crate) struct TaskVTable {
     /// Schedules the task.
@@ -177,6 +212,13 @@ where
     }
 
     fn thread_id() -> Option<usize> {
+        // The lifecycle tests need to take the owning-thread path without a
+        // `LocalExecutor`, which would pull in io_uring and so cannot run under
+        // Miri. Unset outside those tests, so behaviour is unchanged.
+        #[cfg(test)]
+        if let Some(id) = test_executor_id::get() {
+            return Some(id);
+        }
         crate::executor::executor_id()
     }
 
