@@ -2,6 +2,12 @@
 
 This fork contains fixes and investigations for critical Glommio issues while the upstream repository awaits maintainer response.
 
+## Start here for performance work
+
+**[What Is Left, and What It Is Worth](./PERFORMANCE_NEXT.md)** — the current
+ranked list, what each is worth, and the measurement traps that cost time.
+Supersedes the performance sections of `PERFORMANCE_ROADMAP.md`.
+
 ## Fixes Implemented
 
 ### ✅ [Issue #700](https://github.com/DataDog/glommio/issues/700) - Memory Corruption in spsc_queue
