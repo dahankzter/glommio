@@ -71,6 +71,19 @@ schedule closure captures 8 bytes.
 (P2b, "10-15%", Critical unsoundness risk) has an unmeasured premise — a
 `RefCell` borrow costs 0.449 ns.
 
+### [The DMA Read Path](./investigations/io-path/)
+**Status:** Measured — no fat found
+**Result:** glommio adds ~2.2 µs at queue depth 1, ~0.4 µs at 16, nothing at 64
+
+4 KiB `O_DIRECT` random reads against a raw io_uring floor. The device dominates
+at every depth, and glommio's absolute overhead *falls* as concurrency rises —
+the shape of one reactor-loop iteration, which overlaps with device time once
+several reads are in flight.
+
+**Nothing here is worth optimising**, and it relocates the roadmap's monoio
+question: per-operation path cost cannot explain a large gap, because there is
+almost none to give back.
+
 ### [Replacing the Vendored `iou` / `uring_sys`](./investigations/iou-replacement/)
 **Status:** Surveyed and scoped, not attempted
 **Prize:** 35% of the fork's unsafe surface, and an unfreezing of io_uring
@@ -117,6 +130,9 @@ docs/
     │   └── reproduce.rs      # Test demonstrating the leak
     ├── issue_695/
     │   └── README.md         # API design investigation
+    ├── io-path/
+    │   ├── README.md         # DMA read path vs the raw io_uring floor
+    │   └── probe_dma_read.rs
     ├── iou-replacement/
     │   └── README.md         # Retiring the vendored io_uring wrappers
     ├── mechanical-sympathy/

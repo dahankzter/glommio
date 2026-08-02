@@ -1,0 +1,81 @@
+# Investigation: The DMA Read Path
+
+**Date:** 2026-08-02
+**Status:** measured — **no fat found**
+**Method:** raw io_uring floor, then glommio doing the same workload, then attribute
+
+Every previous performance investigation in this fork looked at task switching
+and the cross-shard wake. Nobody had measured the I/O path, which is what
+glommio is *for*, and where the roadmap's original complaint lived ("monoio
+outperforms glommio on random reads").
+
+## Setup
+
+4 KiB `O_DIRECT` random reads over a 1 GiB file. Both sides read the identical
+offset sequence from the same deterministic generator, so neither gets a luckier
+access pattern. 20,000 operations per cell. `probe_dma_read.rs`.
+
+```
+Samsung SSD 990 PRO 2TB, XFS, noatime
+```
+
+`O_DIRECT` on both sides, so the page cache is out of the picture for both.
+
+## Result
+
+Four runs. Spread within ±0.5% on every cell except raw at depth 64.
+
+| queue depth | raw io_uring | glommio DMA | overhead |
+|---|---:|---:|---:|
+| 1 | 35.2–35.5 µs | 37.4–37.7 µs | **~2.2 µs (6%)** |
+| 4 | 10.5–10.7 µs | 11.2–11.4 µs | ~0.6 µs (6%) |
+| 16 | 4.27–4.34 µs | 4.68 µs | ~0.4 µs (9%) |
+| 64 | 3.6–4.4 µs | 3.58–3.80 µs | **~0 (within noise)** |
+
+**The device dominates.** Per-operation software cost is single-digit
+microseconds against a device that takes tens, and the *absolute* overhead falls
+as concurrency rises — 2.2 µs at depth 1, 0.4 µs at depth 16, indistinguishable
+at depth 64.
+
+That last row deserves a caveat rather than a victory lap: the raw harness
+submits a batch and drains it fully before submitting the next, a barrier
+glommio does not have, so at depth 64 the floor is measuring my loop rather than
+the kernel. Read it as "no measurable difference", not "glommio is faster".
+
+## What the shape says
+
+~2.2 µs of added latency at depth 1, shrinking to nothing under concurrency, is
+what one reactor-loop iteration looks like. That matches the
+[mechanical-sympathy](../mechanical-sympathy/) phase timers, where `poll_io`
+costs ~1.6 µs per iteration. At depth 1 every read pays a full loop; with
+several in flight that cost overlaps with device time and disappears.
+
+## Consequences
+
+**There is nothing here worth optimising.** Shaving glommio's per-operation cost
+in half would move a depth-16 read from 4.68 µs to 4.48 µs — 4%, against a
+device floor that is 91% of the total.
+
+**And it relocates the monoio question.** If monoio really does beat glommio on
+random reads, per-operation path cost does not explain it, because there is
+almost none to give back. Look instead at submission batching policy, at how
+many operations the runtime keeps in flight, at buffer management and
+registration, or at the benchmark itself. Do not look here.
+
+## What this does not cover
+
+One device, one filesystem, one block size, one access pattern, reads only.
+Untested: sequential reads, large blocks, writes, buffered (non-DMA) I/O,
+`read_many`, registered buffers, and the network path. A finding about 4 KiB
+random reads is a finding about 4 KiB random reads.
+
+## Reproducing
+
+```bash
+mkdir -p target/ioprobe
+dd if=/dev/urandom of=target/ioprobe/data.bin bs=1M count=1024
+cargo run --release -- target/ioprobe/data.bin
+```
+
+The file must live on a filesystem supporting `O_DIRECT` — not tmpfs, which is
+why it goes under `target/` rather than `/tmp`.
