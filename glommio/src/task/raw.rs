@@ -146,7 +146,7 @@ where
     pub(crate) fn allocate(
         future: F,
         schedule: S,
-        executor_id: usize,
+        executor_id: u32,
         task_queue_index: u32,
         latency_matters: bool,
     ) -> NonNull<()> {
@@ -199,7 +199,7 @@ where
     }
 
     unsafe fn my_id(&self) -> usize {
-        (*self.header).executor_id
+        (*self.header).executor_id as usize
     }
 
     /// Resolves the owning executor's notifier from the global registry.

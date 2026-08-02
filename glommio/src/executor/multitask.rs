@@ -152,7 +152,7 @@ impl LocalExecutor {
     /// Spawns a thread-local future onto this executor.
     fn spawn<T>(
         &self,
-        executor_id: usize,
+        executor_id: u32,
         tq: Rc<RefCell<TaskQueue>>,
         future: impl Future<Output = T>,
     ) -> (Runnable, JoinHandle<T>) {
@@ -189,7 +189,7 @@ impl LocalExecutor {
 
     pub(crate) fn spawn_and_run<T>(
         &self,
-        executor_id: usize,
+        executor_id: u32,
         tq: Rc<RefCell<TaskQueue>>,
         future: impl Future<Output = T>,
     ) -> Task<T> {
@@ -200,7 +200,7 @@ impl LocalExecutor {
 
     pub(crate) fn spawn_and_schedule<T>(
         &self,
-        executor_id: usize,
+        executor_id: u32,
         tq: Rc<RefCell<TaskQueue>>,
         future: impl Future<Output = T>,
     ) -> Task<T> {

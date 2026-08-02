@@ -30,7 +30,7 @@ use std::sync::atomic::Ordering;
 /// [`Task`]: struct.Task.html
 /// [`JoinHandle`]: struct.JoinHandle.html
 pub(crate) fn spawn_local<F, R, S>(
-    executor_id: usize,
+    executor_id: u32,
     task_queue_index: u32,
     future: F,
     schedule: S,

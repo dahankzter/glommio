@@ -1383,7 +1383,7 @@ impl LocalExecutor {
 
         let id = self.id;
         let ex = tq.borrow().ex.clone();
-        ex.spawn_and_run(id, tq, future)
+        ex.spawn_and_run(id as u32, tq, future)
     }
 
     /// Spawns a task directly on this executor instance.
@@ -1426,7 +1426,7 @@ impl LocalExecutor {
         let id = self.id;
 
         // can't run right away, because we need to cross into a different task queue
-        Ok(ex.spawn_and_schedule(id, tq, future))
+        Ok(ex.spawn_and_schedule(id as u32, tq, future))
     }
 
     fn preempt_timer_duration(&self) -> Duration {
