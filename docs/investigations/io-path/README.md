@@ -70,6 +70,17 @@ produced zero iterations — and on an I/O-bound shard it runs once per batch,
 where most of its 1.8 µs is an `io_uring_enter` issuing the read, which the raw
 floor pays too. Glommio's own bookkeeping is 400-500 ns.
 
+## It is all one number
+
+[synthesis.md](synthesis.md). glommio costs **~2 µs per blocking I/O** — the
+executor round trip of parking a task, running the reactor loop, waking and
+rescheduling. Against a 35 µs NVMe read that is 6%. Against a 3.8 µs loopback TCP
+round trip it is 53%. Same cost, different denominator.
+
+A ladder that implements glommio's readiness design *by hand* costs −34 ns
+against completion-based io_uring, so the network design is not the problem and
+rewriting it would gain nothing.
+
 ## The network path is a different story
 
 [network.md](network.md). Loopback TCP ping-pong is **+120% over a raw io_uring

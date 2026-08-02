@@ -71,9 +71,18 @@ schedule closure captures 8 bytes.
 (P2b, "10-15%", Critical unsoundness risk) has an unmeasured premise — a
 `RefCell` borrow costs 0.449 ns.
 
-### [The DMA Read Path](./investigations/io-path/)
-**Status:** Measured — no fat found
-**Result:** glommio adds ~2.2 µs at queue depth 1, ~0.4 µs at 16, nothing at 64
+### [The I/O Path](./investigations/io-path/)
+**Status:** Measured and resolved to a single number
+**Result:** glommio costs **~2 µs per blocking I/O** — 6% of an NVMe read, 53% of a loopback TCP round trip
+
+[synthesis.md](./investigations/io-path/synthesis.md) is the short version. The
+file path, the network path and the reactor loop turned out to be the same
+measurement: the executor round trip forced by any operation that blocks. A
+ladder implementing glommio's readiness design *by hand* costs −34 ns against
+completion-based io_uring, so the network design is not at fault and rewriting it
+would gain nothing.
+
+Older sections below, kept for the reasoning:
 
 4 KiB `O_DIRECT` random reads against a raw io_uring floor. The device dominates
 at every depth, and glommio's absolute overhead *falls* as concurrency rises —

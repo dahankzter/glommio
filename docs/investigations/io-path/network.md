@@ -117,6 +117,17 @@ monoio benchmarks are TCP echo servers, not file reads. If glommio loses to
 monoio, this is a far likelier explanation than anything in the task or DMA
 paths — and it is consistent with monoio being completion-based throughout.
 
+## Resolved: it is not the design
+
+[synthesis.md](synthesis.md) has the read ladder. Implementing glommio's
+readiness pattern by hand, without glommio, costs **−34 ns** against
+completion-based io_uring — the design is free. glommio costs **+2,017 ns over
+its own design**, and that figure matches the ~2.2 µs the DMA read path pays at
+queue depth 1. It is the per-I/O executor round trip, not the network stack.
+
+The section below was written before that was known; keep it for the reasoning,
+ignore its conclusion about redesigning.
+
 ## Before anyone builds something
 
 The obvious move — switch reads and writes to io_uring `Recv`/`Send` — is a
