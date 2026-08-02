@@ -608,11 +608,47 @@ syscall count. This is not a flag you can simply turn on.
 
 **Version gating.** glommio supports 5.8+; `DEFER_TASKRUN` and `SINGLE_ISSUER`
 need 6.0, `COOP_TASKRUN` needs 5.19. All three have to be probed at runtime and
-fall back cleanly, and the vendored `iou` wrapper needs the constants added.
+fall back cleanly.
 
-**Suggested order:** extend `iou`'s `SetupFlags` first (mechanical, no behaviour
-change), then measure `COOP_TASKRUN` + `TASKRUN_FLAG` inside glommio itself,
-which is the smaller semantic step, before touching `DEFER_TASKRUN`.
+~~The vendored `iou` wrapper needs the constants added.~~ **No longer true** —
+`iou` is gone, see [iou-replacement](../iou-replacement/). The flags are one
+builder call away: `IoUring::builder().setup_single_issuer().setup_defer_taskrun()`.
+
+### 5a. Re-measured, and most of section 5 does not survive
+
+The table above is best-of-three with no variance reported. Running the same
+probe three times in one session:
+
+| cell, same L3 | run 1 | run 2 | run 3 | spread |
+|---|---:|---:|---:|---|
+| eventfd, default | 2097 | 2088 | 2401 | ±8% |
+| **eventfd, `SI｜DT`** | **1850** | **2433** | **2213** | **±14%** |
+| MSG_RING, default | 1988 | 1979 | 2116 | ±4% |
+| **MSG_RING, `SI｜DT`** | **1481** | **1464** | **1490** | **±1%** |
+
+**The −11.8% for eventfd plus `DEFER_TASKRUN` is noise.** Three runs give
+−11.8%, +16.5%, −7.8% — mean about zero. The "flags first, keep the eventfd"
+step this section recommended buys nothing measurable, so there is no cheap
+intermediate rung and the phased rollout above should be ignored.
+
+What does reproduce is the endpoint: **MSG_RING on `SINGLE_ISSUER|DEFER_TASKRUN`
+rings, 1481 / 1464 / 1490 ns, stable to 1%**, against a baseline that wobbles
+±8%. Call it −30% of the wake, and treat it as all-or-nothing.
+
+An attempt to separate the sender's flags from the target's
+(`probe_flag_split.rs`) failed: isolating the roles requires MSG_RING on one leg
+and an eventfd on the other, which is exactly the mixed configuration the table
+shows to be unstable. The question is still open and the rig cannot answer it.
+
+**And scale it before believing it.** The wake primitive is ~2.2 µs of glommio's
+~8 µs shard round trip (3c/3e), so −30% of the wake is roughly **−9% of a round
+trip** — and only when the peer is parked, since `notify` skips the eventfd
+entirely when `should_notify` is clear. On a busy shard the peer is already
+awake and none of this executes. That is a much narrower claim than the section
+heading suggests, and it is the honest one.
+
+**Recommendation: do not touch the wake path on spec.** Revisit when a real
+workload is on glommio and cross-shard wakes appear in a profile.
 
 ## 6. What not to do next
 
@@ -654,7 +690,8 @@ finding, on the same hardware, by a different route.
 | 1 | ZST schedule closure | −32% task switch | low | **done** — delivered 19.46 ns |
 | 2 | cache-domain placement | avoids a +58% cross-domain penalty | low | **done** — `MaxPack` now touches one domain at every size |
 | — | ~~biased reference counting~~ | 1.1-2.5 ns (7-15%) | — | **scrapped**: re-measured far smaller than thought, and Miri cannot cover the task lifecycle |
-| 4 | io_uring setup flags | −12% to −29% of the raw wake | med | **measured, not attempted** (section 5); needs `iou` extended and the CQE-collection assumption reworked |
+| — | io_uring setup flags alone | noise (±14%) | — | **dropped** (5a); the cheap intermediate step does not exist |
+| 4 | MSG_RING + `SINGLE_ISSUER｜DEFER_TASKRUN` | −30% of wake, ~−9% of round trip | med | **parked** (5a); all-or-nothing, and only when the peer parks. Needs a real workload before it is worth the second wake mechanism |
 | — | ~~`IORING_OP_MSG_RING`~~ | −3% same-domain | — | **premise measured, dropped**; see 3a |
 | — | ~~latency-ring syscalls~~ | ~600 ns of a ~5 µs gap | — | **dropped**: an enter costs ~100 ns, and removing the preempt timer deadlocks the wake path (3d, 3f) |
 
