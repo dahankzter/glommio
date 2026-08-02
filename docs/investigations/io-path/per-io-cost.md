@@ -72,6 +72,28 @@ What the counts suggest instead:
    last iteration, the install and its matching cancellation are both pure waste.
    Five cancellations per round trip is the signature of arming and retiring the
    same thing repeatedly.
+
+   **This is not a local change.** The cancellation is entangled with the sleep
+   decision:
+
+   ```rust
+   // Cancel the old timer regardless of whether we can sleep: ...
+   // But if we will sleep, there might be a timer registered that needs
+   // to be removed otherwise we'll wake up when it expires.
+   drop(self.latency_preemption_timeout_src.take());
+   ```
+
+   Cancelling clears a pending submission on the latency ring, which changes
+   `lat_ring.can_sleep()`, which feeds `should_sleep` — and `should_sleep` is
+   computed *after* the cancel. So "skip the cancel when nothing changed" cannot
+   be decided before the value it influences. Doing this means restructuring the
+   park decision, in the same function that hangs when the timer is removed
+   naively. Budget accordingly; it is not a guard clause.
+
+   A possibly easier start: the **throughput** preemption timer a few lines below
+   is `replace`d unconditionally every iteration too, and its comment says it
+   does not matter whether the shard sleeps — so it may be separable from the
+   sleep decision in a way the latency timer is not. Unverified.
 2. **Skip it when it cannot matter.** With a single runnable task queue there is
    nothing to preempt in favour of. That is exactly the ping-pong case, and
    exactly where the cost is 53% of the round trip.
