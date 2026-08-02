@@ -46,11 +46,19 @@ the latency ring in a shard ping-pong, and that lengthening `preempt_timer` to 1
 seconds changed nothing — because the cost is **installing and cancelling** a
 timer every loop iteration, not the timer firing.
 
-It also explains why removing the preempt timer deadlocked
-([sleep-failure-path.md](../iou-replacement/sleep-failure-path.md) is adjacent):
-the eventfd read that wakes a parked shard rides into the kernel on the same
-enter the preempt timer forces. The machinery is load-bearing precisely because
-it runs unconditionally.
+**Correction.** An earlier version of this document claimed the eventfd read
+that wakes a parked shard rides into the kernel on the enter the preempt timer
+forces, and that this is why removing the timer deadlocks. **That is not what the
+code does.** `SleepableRing::install_eventfd` pushes the read and then calls
+`submit_sqes()` itself, so the eventfd reaches the kernel at install time
+regardless of the timer.
+
+Removing the preempt timer does still deadlock — that was observed directly, by
+patching `poll_io(|| Some(...))` to `poll_io(|| None)` — but **the mechanism is
+not known**, and the explanation offered here was a guess stated as fact. The
+likeliest remaining candidate is that `need_preempt` never fires, so
+`run_task_queues`' inner loop never yields the shard back to the outer loop; that
+has not been verified either and should not be repeated as fact until it is.
 
 ## The shape of a fix
 
@@ -67,8 +75,10 @@ What the counts suggest instead:
 2. **Skip it when it cannot matter.** With a single runnable task queue there is
    nothing to preempt in favour of. That is exactly the ping-pong case, and
    exactly where the cost is 53% of the round trip.
-3. **Decouple the eventfd arming from the timer** first, or 1 and 2 will
-   reproduce the deadlock.
+3. **Understand the deadlock before removing anything.** Patching the timer out
+   hangs the runtime, and the reason is not yet known — see the correction above.
+   Item 1 does not remove the timer, only the churn, so it can be attempted
+   first; item 2 does remove it in some cases and must wait.
 
 Each needs its own before-and-after measurement, and the ladder in
 `probe_read_ladder.rs` is the instrument: it isolates glommio from its own design
