@@ -36,12 +36,17 @@ A TCP echo round trip processes **nine io_uring completions to perform one
 read**: one real poll, three preempt timers, five cancellations
 ([per-io-cost.md](investigations/io-path/per-io-cost.md)). That is the 2 µs.
 
-**Cost to fix:** higher than it looks. The cancellation is entangled with the
-sleep decision — cancelling changes `can_sleep()`, which feeds `should_sleep`,
-which is computed after the cancel. So it is a restructure of the park decision,
-not a guard clause. And removing the timer naively **hangs the runtime**; that
-was observed directly and **the mechanism is still unknown**. Diagnosing the hang
-gates everything else here.
+**Cost to fix:** higher than it looks, but lower than first thought. The
+cancellation is entangled with the sleep decision — cancelling changes
+`can_sleep()`, which feeds `should_sleep`, which is computed after the cancel. So
+it is a restructure of the park decision, not a guard clause.
+
+The hang that appeared to gate this is **diagnosed and was self-inflicted**:
+`preempt_timer().is_none()` is a *precondition for sleeping*, so patching it to
+return `None` told the reactor it was idle while it still held runnable work, and
+removed the wakeup at the same time. Not re-arming an unchanged timer does not
+change what `preempt_timer()` returns, so it cannot reproduce that hang. See
+[per-io-cost.md](investigations/io-path/per-io-cost.md).
 
 **Payoff:** latency and low-queue-depth workloads only. No throughput win.
 

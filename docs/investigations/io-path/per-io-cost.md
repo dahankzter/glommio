@@ -53,12 +53,35 @@ code does.** `SleepableRing::install_eventfd` pushes the read and then calls
 `submit_sqes()` itself, so the eventfd reaches the kernel at install time
 regardless of the timer.
 
-Removing the preempt timer does still deadlock — that was observed directly, by
-patching `poll_io(|| Some(...))` to `poll_io(|| None)` — but **the mechanism is
-not known**, and the explanation offered here was a guess stated as fact. The
-likeliest remaining candidate is that `need_preempt` never fires, so
-`run_task_queues`' inner loop never yields the shard back to the outer loop; that
-has not been verified either and should not be repeated as fact until it is.
+**The hang is now diagnosed, and it was self-inflicted.** Look at the sleep
+condition in `Reactor::react`:
+
+```rust
+let should_sleep = preempt_timer().is_none()
+    && (woke == 0)
+    && poll_ring.can_sleep()
+    && main_ring.can_sleep()
+    && lat_ring.can_sleep();
+```
+
+`preempt_timer().is_none()` is a **precondition for sleeping**, not a
+consequence of it. It returns `Some(duration)` while a task queue is running —
+meaning "there is something to preempt, do not sleep" — and `None` when the shard
+is genuinely idle.
+
+Patching `poll_io(|| Some(...))` to `poll_io(|| None)` therefore tells the
+reactor *"always idle, always safe to sleep"* while runnable work still exists,
+and simultaneously removes the timer that would have woken it. The shard parks
+holding work, with no completion pending. That is the hang.
+
+Verified two ways: with `|| None` every case hangs, including an executor whose
+only task is `async {}`; with `|| Some(Duration::from_secs(5))` — a timer so long
+it can play no useful role — every case completes normally.
+
+**So the preempt timer is not a load-bearing wakeup source, and removing its
+churn does not risk this hang.** Item 1 below does not change what
+`preempt_timer()` returns, so `should_sleep` sees exactly what it sees today.
+The earlier warning attached to it was based on a broken experiment.
 
 ## The shape of a fix
 
@@ -97,10 +120,11 @@ What the counts suggest instead:
 2. **Skip it when it cannot matter.** With a single runnable task queue there is
    nothing to preempt in favour of. That is exactly the ping-pong case, and
    exactly where the cost is 53% of the round trip.
-3. **Understand the deadlock before removing anything.** Patching the timer out
-   hangs the runtime, and the reason is not yet known — see the correction above.
-   Item 1 does not remove the timer, only the churn, so it can be attempted
-   first; item 2 does remove it in some cases and must wait.
+3. ~~Understand the deadlock before removing anything.~~ **Done — see above.**
+   The hang was an artefact of the experiment, not a property of the timer. Item
+   1 is safe from it by construction. Item 2 changes whether a timer is armed at
+   all, but still does not touch `preempt_timer()`'s return value, so it is
+   likelier to be safe than it looked — verify rather than assume.
 
 Each needs its own before-and-after measurement, and the ladder in
 `probe_read_ladder.rs` is the instrument: it isolates glommio from its own design
