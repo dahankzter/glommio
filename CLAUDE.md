@@ -24,7 +24,7 @@ order, and where it conflicts with their 15 commits we do not have.
 **Upstream Status:**
 - Abandoned original: https://github.com/DataDog/glommio (last commit 2025-04-21)
 - **Live community fork: https://github.com/glommio/glommio** — contribute here
-- This fork: https://github.com/dahankzter/glommio (131 commits ahead of the community fork, 15 behind)
+- This fork: https://github.com/dahankzter/glommio — merged with the community fork on 2026-08-02, now ahead only
 
 ## Development Environment
 

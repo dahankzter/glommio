@@ -82,10 +82,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `nightly` is theirs; the alloc_* cfgs select a global allocator in the
 # alloc_compare example.
 unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(nightly)',
-    'cfg(alloc_system)',
-    'cfg(alloc_mimalloc)',
-    'cfg(alloc_jemalloc)',
+  'cfg(alloc_jemalloc)',
+  'cfg(alloc_mimalloc)',
+  'cfg(alloc_system)',
+  'cfg(nightly)',
 ] }
 
 [[bench]]

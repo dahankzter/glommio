@@ -206,6 +206,6 @@ This fork is maintained by [@dahankzter](https://github.com/dahankzter) while aw
 
 - **Abandoned:** [DataDog/glommio](https://github.com/DataDog/glommio) — last commit 2025-04-21, 16 open PRs
 - **Live:** [glommio/glommio](https://github.com/glommio/glommio) — community fork, active, blessed by the original author to take the crates.io name
-- **This fork:** 131 commits ahead of the community fork, 15 behind
+- **This fork:** merged with the community fork on 2026-08-02; ahead only
 
 See [UPSTREAM.md](./UPSTREAM.md).

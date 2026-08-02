@@ -23,13 +23,16 @@ So: **do not open PRs against DataDog.** Everything below targets
 
 ## Divergence
 
+**Merged 2026-08-02.** Their 15 commits are now in; `upstream` points at
+`glommio/glommio`. We are ahead only.
+
 ```
-ours ahead of community/main:  131 commits
-community/main ahead of ours:   15 commits
-merge base:                     67188c29
+before the merge:
+  ours ahead of community/main:  131 commits
+  community/main ahead of ours:   15 commits
 ```
 
-Their 15 include some that touch the same code we do:
+Their 15 included some that touched the same code we do:
 
 | commit | why it matters to us |
 |---|---|
@@ -38,15 +41,24 @@ Their 15 include some that touch the same code we do:
 | `1981af4` `TcpStream::into_accepted` | new API we do not have |
 | musl CI, dependency updates | infrastructure |
 
-### The one real conflict
+### The one real conflict — resolved
 
-They widened `references` to `AtomicI32`. We put `task_queue_index: u32` into
-`Header`'s four bytes of end padding to keep it at 40 bytes. Naively combined,
-the header grows to 48.
+They widened `references` to `AtomicI32`. We had put `task_queue_index: u32` into
+`Header`'s four bytes of end padding to keep it at 40 bytes. Combined, the header
+grew to 48.
 
-**Reconcilable:** our `executor_id` is a `usize` and does not need to be. As a
-`u32` the combined header is 16 + 4 + 8 + 4 + 4 + 1 + 1 = 38 bytes, still 40
-after padding. Do that as part of the port rather than arguing about it later.
+**Fixed** by narrowing `executor_id` from `usize` to `u32` (`ac43600`) — it is a
+registry index that is only ever compared or looked up, so four billion
+executors is ample. `Header` is back to 40 bytes carrying their wider refcount.
+Kept as a separate commit from the merge so the type change is reviewable on its
+own.
+
+Other resolutions: their `nightly` cfg predicate with our `LOCAL_EX.is_set`
+guard and `spawn_internal` rename; their manifest formatting (they use `taplo`,
+config now in the tree) with our `io-uring` dependency and allocator
+`check-cfg`s; their rewritten CI wholesale, with the branch filter widened to
+cover `master`; and the deletion of `tests/linters.rs`, which they replaced with
+direct fmt and clippy steps in CI.
 
 ## What we have that they do not
 
