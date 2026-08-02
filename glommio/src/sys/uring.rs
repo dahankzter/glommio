@@ -330,8 +330,7 @@ where
                 .flags(types::FsyncFlags::DATASYNC)
                 .build(),
             UringOpDescriptor::Connect(addr) => {
-                opcode::Connect::new(fd, (*addr).as_ptr() as *const libc::sockaddr, (*addr).len())
-                    .build()
+                opcode::Connect::new(fd, (*addr).as_ptr(), (*addr).len()).build()
             }
             UringOpDescriptor::LinkTimeout(timespec) => {
                 // `types::Timespec` and `__kernel_timespec` are the same two
@@ -1744,7 +1743,7 @@ impl Reactor {
             &mut *self.ring_for_source(source),
             source,
             UringOpDescriptor::Nop,
-            &mut *self.source_map.borrow_mut(),
+            &mut self.source_map.borrow_mut(),
         );
     }
 

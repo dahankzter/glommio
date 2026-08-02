@@ -80,11 +80,11 @@ pub(crate) const DEFAULT_RING_SUBMISSION_DEPTH: usize = 128;
 /// the second type parameter.
 type Result<T> = crate::Result<T, ()>;
 
-#[cfg(feature = "native-tls")]
+#[cfg(all(nightly, feature = "native-tls"))]
 #[thread_local]
 static mut LOCAL_EX: *const LocalExecutor = std::ptr::null();
 
-#[cfg(not(feature = "native-tls"))]
+#[cfg(any(not(nightly), not(feature = "native-tls")))]
 scoped_tls::scoped_thread_local!(static LOCAL_EX: LocalExecutor);
 
 /// Returns a proxy struct to the [`LocalExecutor`]
@@ -124,7 +124,7 @@ pub fn early_init() {
 }
 
 pub(crate) fn executor_id() -> Option<usize> {
-    #[cfg(not(feature = "native-tls"))]
+    #[cfg(any(not(nightly), not(feature = "native-tls")))]
     {
         if LOCAL_EX.is_set() {
             Some(LOCAL_EX.with(|ex| ex.id))
@@ -133,7 +133,7 @@ pub(crate) fn executor_id() -> Option<usize> {
         }
     }
 
-    #[cfg(feature = "native-tls")]
+    #[cfg(all(nightly, feature = "native-tls"))]
     unsafe {
         LOCAL_EX.as_ref().map(|ex| ex.id)
     }
@@ -1142,7 +1142,7 @@ pub(crate) fn schedule_runnable(runnable: multitask::Runnable) {
 }
 
 pub(crate) fn maybe_activate(tq: Rc<RefCell<TaskQueue>>) {
-    #[cfg(not(feature = "native-tls"))]
+    #[cfg(any(not(nightly), not(feature = "native-tls")))]
     {
         // Check if LOCAL_EX is set before accessing to avoid panic during cleanup
         // When a task panics and cleanup happens, TLS may not be available
@@ -1156,7 +1156,7 @@ pub(crate) fn maybe_activate(tq: Rc<RefCell<TaskQueue>>) {
         // The executor is shutting down anyway, so there's no point in activating queues
     }
 
-    #[cfg(feature = "native-tls")]
+    #[cfg(all(nightly, feature = "native-tls"))]
     unsafe {
         // Check if LOCAL_EX exists before accessing to avoid panic during cleanup
         if let Some(local_ex) = LOCAL_EX.as_ref() {
@@ -1631,7 +1631,7 @@ impl LocalExecutor {
             }
         };
 
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         {
             assert!(
                 !LOCAL_EX.is_set(),
@@ -1640,7 +1640,7 @@ impl LocalExecutor {
             LOCAL_EX.set(self, || run(self))
         }
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         unsafe {
             assert!(
                 LOCAL_EX.is_null(),
@@ -2229,10 +2229,10 @@ impl ExecutorProxy {
     /// [`RefMut`]: https://doc.rust-lang.org/std/cell/struct.RefMut.html
     #[inline(always)]
     pub fn need_preempt(&self) -> bool {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.need_preempt());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2258,7 +2258,7 @@ impl ExecutorProxy {
     /// [`ExecutorProxy::yield_task_queue_now`].
     #[inline(always)]
     pub async fn yield_if_needed(&self) {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         {
             let need_yield = if LOCAL_EX.is_set() {
                 LOCAL_EX.with(|local_ex| {
@@ -2279,7 +2279,7 @@ impl ExecutorProxy {
             }
         }
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         unsafe {
             if self.need_preempt() {
                 (*LOCAL_EX).mark_me_for_yield();
@@ -2307,7 +2307,7 @@ impl ExecutorProxy {
     /// [`ExecutorProxy::yield_if_needed`] instead is the better choice.
     #[inline(always)]
     pub async fn yield_task_queue_now(&self) {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         {
             if LOCAL_EX.is_set() {
                 LOCAL_EX.with(|local_ex| {
@@ -2317,7 +2317,7 @@ impl ExecutorProxy {
             futures_lite::future::yield_now().await;
         }
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         {
             if let Some(local_ex) = unsafe { LOCAL_EX.as_ref() } {
                 local_ex.mark_me_for_yield();
@@ -2328,10 +2328,10 @@ impl ExecutorProxy {
 
     #[inline(always)]
     pub(crate) fn reactor(&self) -> Rc<reactor::Reactor> {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.get_reactor());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2358,10 +2358,10 @@ impl ExecutorProxy {
     /// });
     /// ```
     pub fn id(&self) -> usize {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.id());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2411,10 +2411,10 @@ impl ExecutorProxy {
         latency: Latency,
         name: &str,
     ) -> TaskQueueHandle {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.create_task_queue(shares, latency, name));
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2461,10 +2461,10 @@ impl ExecutorProxy {
     /// ex.join().unwrap();
     /// ```
     pub fn current_task_queue(&self) -> TaskQueueHandle {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.current_task_queue());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2503,13 +2503,13 @@ impl ExecutorProxy {
     /// [`QueueErrorKind`]: crate::error::QueueErrorKind
     /// [`Result`]: https://doc.rust-lang.org/std/result/enum.Result.html
     pub fn task_queue_stats(&self, handle: TaskQueueHandle) -> Result<TaskQueueStats> {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| match local_ex.get_queue(&handle) {
             Some(x) => Ok(x.borrow_mut().stats.take()),
             None => Err(GlommioError::queue_not_found(handle.index)),
         });
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return match unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2557,7 +2557,7 @@ impl ExecutorProxy {
     where
         V: Extend<TaskQueueStats>,
     {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         LOCAL_EX.with(|local_ex| {
             output.extend(
                 local_ex
@@ -2569,7 +2569,7 @@ impl ExecutorProxy {
             );
         });
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         output.extend(unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2605,10 +2605,10 @@ impl ExecutorProxy {
     ///
     /// [`ExecutorStats`]: struct.ExecutorStats.html
     pub fn executor_stats(&self) -> ExecutorStats {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| std::mem::take(&mut local_ex.queues.borrow_mut().stats));
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return std::mem::take(unsafe {
             &mut LOCAL_EX
                 .as_ref()
@@ -2638,10 +2638,10 @@ impl ExecutorProxy {
     ///
     /// [`IoStats`]: crate::IoStats
     pub fn io_stats(&self) -> IoStats {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.get_reactor().io_stats());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2678,7 +2678,7 @@ impl ExecutorProxy {
     ///
     /// [`IoStats`]: crate::IoStats
     pub fn task_queue_io_stats(&self, handle: TaskQueueHandle) -> Result<IoStats> {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| {
             match local_ex.get_reactor().task_queue_io_stats(&handle) {
                 Some(x) => Ok(x),
@@ -2686,7 +2686,7 @@ impl ExecutorProxy {
             }
         });
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return match unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2725,10 +2725,10 @@ impl ExecutorProxy {
     where
         T: 'static,
     {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| Task::<T>(local_ex.spawn_internal(future)));
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return Task::<T>(unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2774,10 +2774,10 @@ impl ExecutorProxy {
     where
         T: 'static,
     {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| local_ex.spawn_into(future, handle).map(Task::<T>));
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return unsafe {
             LOCAL_EX
                 .as_ref()
@@ -2815,11 +2815,11 @@ impl ExecutorProxy {
         &self,
         future: impl Future<Output = T> + 'a,
     ) -> ScopedTask<'a, T> {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX
             .with(|local_ex| ScopedTask::<'a, T>(local_ex.spawn_internal(future), PhantomData));
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return ScopedTask::<'a, T>(
             LOCAL_EX
                 .as_ref()
@@ -2867,14 +2867,14 @@ impl ExecutorProxy {
         future: impl Future<Output = T> + 'a,
         handle: TaskQueueHandle,
     ) -> Result<ScopedTask<'a, T>> {
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         return LOCAL_EX.with(|local_ex| {
             local_ex
                 .spawn_into(future, handle)
                 .map(|x| ScopedTask::<'a, T>(x, PhantomData))
         });
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         return LOCAL_EX
             .as_ref()
             .expect("this thread doesn't have a LocalExecutor running")
@@ -2925,11 +2925,11 @@ impl ExecutorProxy {
         let result = Arc::new(Mutex::new(MaybeUninit::<R>::uninit()));
         let f_inner = enclose::enclose!((result) move || {result.lock().unwrap().write(func());});
 
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
         let waiter =
             LOCAL_EX.with(move |local_ex| local_ex.reactor.run_blocking(Box::new(f_inner)));
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
         let waiter = unsafe {
             LOCAL_EX
                 .as_ref()
@@ -4222,6 +4222,19 @@ mod test {
     }
 
     #[test]
+    fn wake_refcount_overflow() {
+        LocalExecutor::default().run(async {
+            const NUM_CLONES: usize = u16::MAX as usize;
+
+            crate::spawn_local(poll_fn::<(), _>(move |cx| {
+                let _wakers = Vec::from_iter((0..NUM_CLONES).map(|_| cx.waker().clone()));
+                Poll::Ready(())
+            }))
+            .await;
+        })
+    }
+
+    #[test]
     fn blocking_function() {
         LocalExecutor::default().run(async {
             let started = Instant::now();
@@ -4338,10 +4351,12 @@ mod test {
     fn local_executor_unset() {
         LocalExecutor::default().run(async {});
 
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
+
         assert!(!LOCAL_EX.is_set());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
+
         assert!(unsafe { LOCAL_EX.is_null() });
     }
 
@@ -4354,10 +4369,12 @@ mod test {
         });
         assert!(res.is_err());
 
-        #[cfg(not(feature = "native-tls"))]
+        #[cfg(any(not(nightly), not(feature = "native-tls")))]
+
         assert!(!LOCAL_EX.is_set());
 
-        #[cfg(feature = "native-tls")]
+        #[cfg(all(nightly, feature = "native-tls"))]
+
         assert!(unsafe { LOCAL_EX.is_null() });
     }
 }

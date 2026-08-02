@@ -655,7 +655,12 @@ impl AsyncBufRead for Stdin {
     ) -> Poll<io::Result<&'a [u8]>> {
         match self.source.take() {
             Some(source) => {
-                let res = source.result().unwrap();
+                let res = match source.result() {
+                    Some(res) => res,
+                    None => {
+                        return Poll::Pending;
+                    }
+                };
                 match res {
                     Err(x) => Poll::Ready(Err(x)),
                     Ok(sz) => {
@@ -692,9 +697,9 @@ impl AsyncBufRead for Stdin {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::make_test_directories;
+    use crate::{test_utils::make_test_directories, GlommioError};
     use futures_lite::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
-    use std::io::ErrorKind;
+    use std::{io::ErrorKind, time::Duration};
 
     macro_rules! read_test {
         ( $name:ident, $dir:ident, $kind:ident, $file:ident, $file_size:ident: $size:tt, $code:block) => {
@@ -983,4 +988,31 @@ mod test {
         reader.close().await.unwrap();
         writer.close().await.unwrap();
     });
+
+    #[test]
+    fn test_stream_reader_fuse() {
+        for dir in make_test_directories("test_stream_reader_fuse") {
+            let path = dir.path.clone();
+            test_executor!(async move {
+                let filename = path.join("testfile");
+                let new_file = BufferedFile::create(&filename).await.unwrap();
+                new_file.write_at(vec![1, 2, 3, 4, 5], 0).await.unwrap();
+                new_file.close().await.unwrap();
+
+                let file = BufferedFile::open(&filename).await.unwrap();
+                let reader = StreamReaderBuilder::new(file).build();
+                let mut si = futures_lite::StreamExt::fuse(reader.lines());
+                let result = crate::timer::timeout(Duration::from_millis(100), async move {
+                    si.next().await.ok_or_else(|| {
+                        GlommioError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "stream closed",
+                        ))
+                    })
+                })
+                .await;
+                assert!(result.is_ok());
+            });
+        }
+    }
 }

@@ -357,6 +357,19 @@ impl<T> GlommioError<T> {
             kind: QueueErrorKind::NotFound,
         })
     }
+
+    /// Consumes the error, returning the channel payload it carried, if any.
+    ///
+    /// Channel errors own the item that could not be sent, so a caller can
+    /// recover it rather than lose it. Returns `None` for every other variant.
+    pub fn into_inner(self) -> Option<T> {
+        match self {
+            GlommioError::Closed(ResourceType::Channel(t)) => Some(t),
+            GlommioError::WouldBlock(ResourceType::Channel(t)) => Some(t),
+            GlommioError::CanNotBeClosed(ResourceType::Channel(t), _) => Some(t),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for QueueErrorKind {
