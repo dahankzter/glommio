@@ -1089,19 +1089,28 @@ impl<T> PoolThreadHandles<T> {
 
 pub(crate) fn maybe_activate(tq: Rc<RefCell<TaskQueue>>) {
     #[cfg(any(not(nightly), not(feature = "native-tls")))]
-    LOCAL_EX.with(|local_ex| {
-        let mut queues = local_ex.queues.borrow_mut();
-        queues.maybe_activate(tq);
-    });
+    {
+        // A task that panics unwinds through this path while the executor is
+        // already tearing down, and by then the thread-local may be gone.
+        // Reaching for it unconditionally panics a second time, and a panic
+        // during a panic aborts the process. There is nothing to activate at
+        // that point anyway, so skipping is both safe and correct.
+        if LOCAL_EX.is_set() {
+            LOCAL_EX.with(|local_ex| {
+                let mut queues = local_ex.queues.borrow_mut();
+                queues.maybe_activate(tq);
+            });
+        }
+    }
 
     #[cfg(all(nightly, feature = "native-tls"))]
     unsafe {
-        let mut queues = LOCAL_EX
-            .as_ref()
-            .expect("this thread doesn't have a LocalExecutor running")
-            .queues
-            .borrow_mut();
-        queues.maybe_activate(tq);
+        // Same reasoning as above: null means no executor is installed on this
+        // thread, which happens while unwinding out of a panicked task.
+        if let Some(local_ex) = LOCAL_EX.as_ref() {
+            let mut queues = local_ex.queues.borrow_mut();
+            queues.maybe_activate(tq);
+        }
     };
 }
 
