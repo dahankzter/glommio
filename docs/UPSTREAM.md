@@ -87,8 +87,9 @@ anything large arrives.
    2025 asking exactly what these answer.
 
 **Not yet: the iou retirement.** It depends on `CompletionQueue::head_tail_ptrs`,
-which currently lives on a personal fork of `io-uring`. That has to be upstreamed
-to `tokio-rs/io-uring` and released first, or the change cannot be published by
+which currently lives on a personal fork of `io-uring`. **Submitted upstream as
+[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404)**
+(2026-08-02); until it merges and ships, this change cannot be published by
 anyone. See [investigations/iou-replacement](investigations/iou-replacement/).
 
 ## Honest caveats

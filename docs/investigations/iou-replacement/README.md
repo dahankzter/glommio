@@ -32,9 +32,11 @@ without a cast and corrupt the ring. A `*const u32` needs an explicit
 in io-uring's public API returns an atomic, and `BufRingEntry::tail`, the one
 comparable accessor, returns `*const u16`. glommio's own original signature was
 `(*const u32, *const u32)` too, with only the tail cast to an atomic at the
-point of use, which is where the cast belongs. Until that is upstreamed and released, `cargo publish`
-will not accept this, so a release needs either the PR landed or the accessor
-temporarily inlined.
+point of use, which is where the cast belongs. **Submitted upstream as
+[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404)**
+(2026-08-02). Until it lands and is released, `cargo publish` will not accept
+this, so a release needs either that PR merged or the accessor temporarily
+inlined.
 
 ## Why this was on the table
 
