@@ -112,6 +112,14 @@ An accompanying claim that streaming sends were 10x slower is **retracted**: the
 raw side had Nagle on while glommio had `TCP_NODELAY`. Measured fairly, the
 write path adds 127 ns over the bare syscall and the executor adds nothing.
 
+### [Shard and Connection Scaling](./investigations/io-path/scaling.md)
+**Status:** Measured — scales cleanly on both axes
+
+Eight independent shards cost 1.11x one shard. One shard with 64 connections
+costs the same per message as with 4. And per-round-trip cost **drops 2.4x from
+one connection to four**, which is the first end-to-end evidence that glommio's
+~2 µs per blocking I/O amortises away under realistic concurrency.
+
 ### [Replacing the Vendored `iou` / `uring_sys`](./investigations/iou-replacement/)
 **Status:** Surveyed and scoped, not attempted
 **Prize:** 35% of the fork's unsafe surface, and an unfreezing of io_uring

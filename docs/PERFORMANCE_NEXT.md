@@ -70,18 +70,21 @@ Targets the *wake* half of the same 2 µs. Measured at ~1,480 ns against
 All-or-nothing: the flags alone measured as noise (±14%), so there is no cheap
 intermediate step. Same regime as item 1, and the same parking caveat applies.
 
-### 3. Many-shard and many-connection scaling — untested
+### 3. ~~Many-shard and many-connection scaling~~ — measured, clean
 
-Everything measured so far used one or two shards and one connection. This is
-where a thread-per-core runtime either shines or falls over, and it is the
-closest thing to a production shape that has not been looked at: `accept`
-throughput, per-shard scaling curves, cross-shard fan-out.
+**Done ([scaling.md](investigations/io-path/scaling.md)), and it came back
+clean.** Eight independent shards cost 1.11x one shard, with nothing before that.
+One shard with 64 connections costs the same per message as with 4.
 
-**Cheap, and it might surface something new rather than shave something known.**
-Recommended before item 1, because item 1 is expensive work whose payoff depends
-on a parking rate nobody has measured. If item 3 also comes back thin, that is
-strong evidence the remaining cost really is all in the park path, and item 1
-gains a known denominator.
+The useful result is the other axis: **per-round-trip cost drops 2.4x from one
+connection to four and then stays flat.** That is the first end-to-end evidence
+for the claim the microbenchmarks argued — the ~2 µs is per *blocking* operation,
+so a shard with several things in flight stops parking per message and the cost
+amortises on its own.
+
+**Which devalues items 1 and 2 further.** They target exactly the cost that four
+concurrent connections already remove. Still open: `accept` throughput under
+churn, cross-shard fan-out, and connection counts in the thousands.
 
 ### 4. Breadth on the I/O path
 
