@@ -62,6 +62,14 @@ almost none to give back. Look instead at submission batching policy, at how
 many operations the runtime keeps in flight, at buffer management and
 registration, or at the benchmark itself. Do not look here.
 
+## Follow-up
+
+[reactor-loop.md](reactor-loop.md) attributes the ~2.2 µs. Short version: the
+outer loop does not run at all for CPU-bound work — 200,000 task-queue yields
+produced zero iterations — and on an I/O-bound shard it runs once per batch,
+where most of its 1.8 µs is an `io_uring_enter` issuing the read, which the raw
+floor pays too. Glommio's own bookkeeping is 400-500 ns.
+
 ## What this does not cover
 
 One device, one filesystem, one block size, one access pattern, reads only.
