@@ -30,7 +30,18 @@ cost is being paid; if not, it is not.
 
 ## Ranked
 
-### 1. Preempt-timer churn — the only large target left
+### 1. Preempt-timer churn — real, but the obvious fix does not work
+
+**Update 2026-08-02: the first attempt was made and reverted.** Reusing an
+unchanged timer buys nothing, because there is never one to reuse: the park path
+cancels it between every pair of polls, correctly, since a timer left armed wakes
+a sleeping shard early. The cycle is arm, run, block, cancel, sleep — once per
+round trip — so the churn is structural to sleeping, not redundant re-arming.
+Details in [per-io-cost.md](investigations/io-path/per-io-cost.md).
+
+What remains is harder: **do not arm a timer for a task queue that is about to
+block.** `need_preempt` reads the latency ring, so the arm has to happen before
+the task runs, when whether it will block is unknown.
 
 A TCP echo round trip processes **nine io_uring completions to perform one
 read**: one real poll, three preempt timers, five cancellations

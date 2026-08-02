@@ -91,10 +91,33 @@ depends on it.
 
 What the counts suggest instead:
 
-1. **Do not re-arm an unchanged timer.** If the deadline has not moved since the
-   last iteration, the install and its matching cancellation are both pure waste.
-   Five cancellations per round trip is the signature of arming and retiring the
-   same thing repeatedly.
+1. ~~**Do not re-arm an unchanged timer.**~~ **Attempted and it buys nothing.**
+   Implemented: track the armed duration, and if `preempt_timer()` asks for the
+   same one and the armed timer has not fired, leave it alone. All 433 tests
+   pass; the read ladder is unchanged at ~5,700-5,900 ns, against ~5,800 before.
+
+   Counters say why. The reuse condition fires **zero times per round trip**, and
+   the reason is always *"no existing timer"*:
+
+   ```
+   kept                    0.00 per round trip
+   re-armed                1.00 per round trip
+     no existing timer     1.00 per round trip
+     timer had fired       0.00
+     duration changed      0.00
+   ```
+
+   There is nothing to reuse, because the timer is cancelled between every pair
+   of polls — by the **park path**. `Parker::park()` calls the same code with
+   `|| None`, which both allows sleeping and correctly cancels the armed timer,
+   since one left armed would wake the sleeper early.
+
+   So the cycle is **arm, run, block, cancel, sleep**, once per round trip, and
+   the churn is structural to sleeping rather than redundant re-arming. The
+   optimisation targets iterations that poll repeatedly *without* sleeping — a
+   busy shard — and a busy shard never pays the 2 µs in the first place.
+
+   Reverted: it added state for no measured benefit.
 
    **This is not a local change.** The cancellation is entangled with the sleep
    decision:
@@ -117,9 +140,16 @@ What the counts suggest instead:
    is `replace`d unconditionally every iteration too, and its comment says it
    does not matter whether the shard sleeps — so it may be separable from the
    sleep decision in a way the latency timer is not. Unverified.
-2. **Skip it when it cannot matter.** With a single runnable task queue there is
-   nothing to preempt in favour of. That is exactly the ping-pong case, and
-   exactly where the cost is 53% of the round trip.
+2. **Do not arm a timer for a task queue that is about to block.** This is what
+   item 1 should have been. Per round trip the shard arms a preempt timer, runs
+   one task, that task blocks immediately, and the timer is cancelled unused. The
+   arm was pointless: nothing ran long enough to need preempting.
+
+   The difficulty is that `need_preempt` reads the latency ring's completion
+   queue, so the timer has to be armed *before* the task runs — at which point
+   whether it will block is unknown. Making this work means either a different
+   preemption signal or deferring the arm until a queue has actually been running
+   for a while, and both are larger than they sound.
 3. ~~Understand the deadlock before removing anything.~~ **Done — see above.**
    The hang was an artefact of the experiment, not a property of the timer. Item
    1 is safe from it by construction. Item 2 changes whether a timer is armed at
