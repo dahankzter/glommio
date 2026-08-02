@@ -2,7 +2,18 @@
 
 ## Project Context
 
-This is a **maintained fork** of [DataDog/glommio](https://github.com/DataDog/glommio) created while awaiting upstream maintainer engagement. The original maintainer (Glauber Costa) is no longer at DataDog, and the repository has limited activity.
+This is a **maintained fork** of [DataDog/glommio](https://github.com/DataDog/glommio), created when that repository went quiet.
+
+**The situation has since changed (checked 2026-08-02).** `DataDog/glommio` is
+abandoned — last commit 2025-04-21, sixteen open PRs, the oldest from 2021. A
+community fork at **[glommio/glommio](https://github.com/glommio/glommio)** is
+now the live project: a new org, active through June 2026, already merging the
+DataDog backlog, with the original author's blessing to take the crates.io name
+(DataDog issue #707). This fork's `#700` fix is already merged there.
+
+**So upstream means `glommio/glommio`, not DataDog.** See
+[docs/UPSTREAM.md](docs/UPSTREAM.md) for what is worth contributing, in what
+order, and where it conflicts with their 15 commits we do not have.
 
 **Fork Purpose:**
 - Fix critical safety issues (memory corruption, resource leaks)
@@ -11,9 +22,9 @@ This is a **maintained fork** of [DataDog/glommio](https://github.com/DataDog/gl
 - Maintain compatibility for production users who depend on Glommio
 
 **Upstream Status:**
-- Original Repository: https://github.com/DataDog/glommio
-- Fork Repository: https://github.com/dahankzter/glommio
-- If DataDog resumes maintenance, improvements from this fork can be contributed upstream
+- Abandoned original: https://github.com/DataDog/glommio (last commit 2025-04-21)
+- **Live community fork: https://github.com/glommio/glommio** — contribute here
+- This fork: https://github.com/dahankzter/glommio (131 commits ahead of the community fork, 15 behind)
 
 ## Development Environment
 

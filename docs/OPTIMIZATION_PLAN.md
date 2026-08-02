@@ -1,5 +1,28 @@
 # Glommio Performance Optimization Implementation Plan
 
+> ## ⚠️ Partly superseded — read [PERFORMANCE_NEXT.md](PERFORMANCE_NEXT.md) first
+>
+> Written before any of it was measured. What happened to each priority:
+>
+> - **P1 Hierarchical Timing Wheel — done.** 17.7 → 10.3 ns at 100k timers,
+>   zero unsafe. The plan below was sound.
+> - **P2a/P2b RefCell caching and `UnsafeCell` — do not do this.** P2b claims
+>   10-15% of a task switch and rates its own unsoundness Critical. A `RefCell`
+>   borrow_mut plus drop **measures 0.449 ns** against a 28.72 ns task switch, so
+>   removing every borrow on the path cannot reach 10%. Meanwhile 58% of that
+>   switch was in atomics removable with no unsafe at all. See
+>   [investigations/mechanical-sympathy](investigations/mechanical-sympathy/).
+> - **P3 Adaptive I/O submission — premise not supported.** The I/O path was
+>   measured and is device-dominated: glommio adds ~2 µs per *blocking*
+>   operation, 6% of an NVMe read, and it amortises to nothing at queue depth.
+>   See [investigations/io-path](investigations/io-path/).
+> - **P4/P5 Soft preemption, cross-thread wakeups — unmeasured.** The wake path
+>   was measured separately and is worth ~30% of a wake primitive, which is ~9%
+>   of a cross-shard round trip and only when a shard parks.
+>
+> The timing-wheel sections remain accurate and useful. Treat the rest as a
+> record of what was believed before measurement, not as a plan.
+
 **Status:** Planning Phase
 **Target:** Close performance gap with Monoio
 **Timeline:** 4-6 months

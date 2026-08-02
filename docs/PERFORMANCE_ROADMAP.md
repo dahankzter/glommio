@@ -1,5 +1,17 @@
 # Glommio Performance Roadmap: Competing with Monoio
 
+> ## ⚠️ Superseded by [PERFORMANCE_NEXT.md](PERFORMANCE_NEXT.md)
+>
+> This is the strategy document written before the work was done. It is kept for
+> the reasoning and the architectural context, and its Tier 1 items are complete.
+>
+> Its framing — "monoio outperforms glommio" — was never verified here, and four
+> measured paths since suggest per-operation cost is not where such a gap would
+> come from. glommio's task switch is ~16.5 ns, its DMA read path is within 6% of
+> raw io_uring, its shards scale to 8 at 1.11x, and its per-connection cost is
+> O(1). What remains is ~2 µs per blocking I/O, which realistic concurrency
+> amortises away.
+
 ## Executive Summary
 
 Monoio currently outperforms Glommio in benchmarks due to:

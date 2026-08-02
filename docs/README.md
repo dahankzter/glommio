@@ -1,6 +1,11 @@
 # Glommio Fork Documentation
 
-This fork contains fixes and investigations for critical Glommio issues while the upstream repository awaits maintainer response.
+This fork contains fixes and investigations for critical Glommio issues.
+
+**Upstream is now [glommio/glommio](https://github.com/glommio/glommio)**, a
+community fork that took over when `DataDog/glommio` went quiet (last commit
+2025-04-21). See [UPSTREAM.md](./UPSTREAM.md) for what of this fork's work is
+worth contributing there, and in what order.
 
 ## Start here for performance work
 
@@ -199,8 +204,8 @@ This fork is maintained by [@dahankzter](https://github.com/dahankzter) while aw
 
 ## Upstream Status
 
-- **Original Repository:** [DataDog/glommio](https://github.com/DataDog/glommio)
-- **Original Maintainer:** Glauber Costa (no longer at DataDog)
-- **Current Status:** Awaiting new maintainer assignment
+- **Abandoned:** [DataDog/glommio](https://github.com/DataDog/glommio) — last commit 2025-04-21, 16 open PRs
+- **Live:** [glommio/glommio](https://github.com/glommio/glommio) — community fork, active, blessed by the original author to take the crates.io name
+- **This fork:** 131 commits ahead of the community fork, 15 behind
 
-If DataDog resumes active maintenance, improvements from this fork can be contributed upstream.
+See [UPSTREAM.md](./UPSTREAM.md).
