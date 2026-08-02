@@ -70,6 +70,18 @@ produced zero iterations — and on an I/O-bound shard it runs once per batch,
 where most of its 1.8 µs is an `io_uring_enter` issuing the read, which the raw
 floor pays too. Glommio's own bookkeeping is 400-500 ns.
 
+## The network path is a different story
+
+[network.md](network.md). Loopback TCP ping-pong is **+120% over a raw io_uring
+floor**, and streaming sends are **10x** a blocking socket. glommio's TCP reads
+are readiness-based — a direct `recv` syscall bypassing io_uring, falling back to
+`PollAdd` on `EAGAIN` — so it issues about five SQEs and five kernel enters per
+side per round trip where two suffice.
+
+That is the first large, reproducible, non-hardware gap this fork's performance
+work has found, and it is the likelier explanation for the roadmap's monoio
+complaint than anything in the file path.
+
 ## What this does not cover
 
 One device, one filesystem, one block size, one access pattern, reads only.

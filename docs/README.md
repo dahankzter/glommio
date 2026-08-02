@@ -80,9 +80,16 @@ at every depth, and glommio's absolute overhead *falls* as concurrency rises —
 the shape of one reactor-loop iteration, which overlaps with device time once
 several reads are in flight.
 
-**Nothing here is worth optimising**, and it relocates the roadmap's monoio
+**Nothing there is worth optimising**, and it relocates the roadmap's monoio
 question: per-operation path cost cannot explain a large gap, because there is
 almost none to give back.
+
+**The network path is the opposite** ([network.md](./investigations/io-path/network.md)):
+loopback TCP ping-pong runs **+120% over a raw io_uring floor** and streaming
+sends are **10x** a blocking socket. glommio's TCP reads are readiness-based, a
+`recv` syscall bypassing io_uring with a `PollAdd` fallback, costing about five
+SQEs and five kernel enters per side per round trip where two suffice. First
+large non-hardware gap found.
 
 ### [Replacing the Vendored `iou` / `uring_sys`](./investigations/iou-replacement/)
 **Status:** Surveyed and scoped, not attempted
@@ -132,7 +139,10 @@ docs/
     │   └── README.md         # API design investigation
     ├── io-path/
     │   ├── README.md         # DMA read path vs the raw io_uring floor
-    │   └── probe_dma_read.rs
+    │   ├── network.md        # TCP path — the first large gap found
+    │   ├── reactor-loop.md   # loop attribution; not a constant tax
+    │   ├── probe_dma_read.rs
+    │   └── probe_net.rs
     ├── iou-replacement/
     │   └── README.md         # Retiring the vendored io_uring wrappers
     ├── mechanical-sympathy/
