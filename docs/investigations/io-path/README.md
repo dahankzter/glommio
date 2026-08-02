@@ -70,6 +70,14 @@ produced zero iterations — and on an I/O-bound shard it runs once per batch,
 where most of its 1.8 µs is an `io_uring_enter` issuing the read, which the raw
 floor pays too. Glommio's own bookkeeping is 400-500 ns.
 
+## The monoio question
+
+[monoio-gap.md](monoio-gap.md) covers DataDog/glommio#641, what
+`IORING_FEAT_FAST_POLL` actually is, and why the thread's leading explanation —
+that glommio's userspace poll-then-read is what costs — does not match what we
+measured. Also records the three ways our rig is the wrong shape to call that a
+rebuttal.
+
 ## It is all one number
 
 [synthesis.md](synthesis.md). glommio costs **~2 µs per blocking I/O** — the
