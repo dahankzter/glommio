@@ -1,7 +1,9 @@
 # Upstreaming: Where, What, and Whether
 
-**Date:** 2026-08-02
+**Date:** 2026-08-02, status updated 2026-08-10
 **Short answer:** yes, it is worth it — but to **`glommio/glommio`**, not DataDog.
+**Caveat added 2026-08-10:** that repository has gone quiet too. See
+[Upstream activity](#upstream-activity) before planning around it.
 
 ## The landscape changed
 
@@ -14,6 +16,38 @@ is where the community organised itself.
 already merging the DataDog backlog (musl CI, dependency updates, a stdin fix
 from 2022). Glauber Costa, the original author, has said in #707 that he is happy
 to move the crates.io name to the fork "as long as there is a clear leader".
+
+## Upstream activity
+
+**Checked 2026-08-10, and it is quieter than the paragraph above suggests.**
+
+| | |
+|---|---|
+| last commit to `main` | 2026-06-13 |
+| last merged PR | 2026-06-22 (#25) |
+| open PRs | 9, of which **6 are ours** |
+| reviews on our 6 | none; no comments, and CI has not run on them |
+
+Our PRs went up 2026-08-02 and have sat untouched since. Two months without a
+merge is not abandonment — it is one or two people with other jobs, which is
+what a community fork usually is — but it does mean **nothing here should be
+planned around an upstream merge landing on a schedule**.
+
+Practical consequences:
+
+- **This fork is the artifact.** Consumers should depend on
+  `dahankzter/glommio` directly. That is already true of Slipstream.
+- **Keep the PRs open and keep them rebasing cleanly.** They cost nothing while
+  they wait and they are the whole point of having written them separately.
+- **Do not pile on more.** Six unreviewed PRs is already more than most
+  maintainers want to receive at once. Adding a seventh makes the pile likelier
+  to be ignored, not likelier to be read.
+- **Do not chase.** One factual comment when a real blocker clears is
+  reasonable — that is what the io-uring merge earned on #34. Repeated nudging
+  on a volunteer project is not.
+
+Re-check before spending effort on upstream sequencing: if `main` moves again,
+the calculus changes.
 
 **Your `#700` fix is already in it.** Commit `a60c895` in `glommio/glommio` is
 authored by this fork's maintainer — PR #703 landed there rather than at DataDog.
@@ -80,34 +114,42 @@ Verified against `community/main`, not assumed:
 They still vendor `iou` and `uring_sys`, and still have the old `timer_impl`
 without a wheel — so 3 and 10 are not duplicated effort.
 
-## Suggested order
+## What has been submitted
 
-Smallest and most obviously correct first, to establish review trust before
-anything large arrives.
+Opened 2026-08-02, smallest and most obviously correct first, so review trust
+could be established before anything large arrived. All still open and
+unreviewed — see [Upstream activity](#upstream-activity).
 
-1. **`3f4d113`** (#689) and **public `spawn`** (#695). Both small, both close an
-   open upstream issue, neither touches the header.
-2. **Doctest repairs.** Pure hygiene, uncontroversial.
-3. **Timing wheel.** Large but standalone, zero unsafe, and the measurement is
-   in `docs/investigations/`.
-4. **`f28a619`** with `executor_id` narrowed to `u32` to coexist with their
-   `AtomicI32`. Include the #448 analysis.
-5. **Cache-domain placement.** Note the new public field on `CpuLocation` is a
-   semver consideration for them.
-6. **Miri task-lifecycle tests**, plus the `test_executor_id` hook they require.
-7. **The investigations**, or a condensed version. `#641` has been open since
-   2025 asking exactly what these answer.
+| PR | What | Notes |
+|---|---|---|
+| [#29](https://github.com/glommio/glommio/pull/29) | don't abort the process when a task panics in a custom queue | closes their #689 |
+| [#30](https://github.com/glommio/glommio/pull/30) | non-panicking `LocalExecutor::spawn` | closes their #695 |
+| [#31](https://github.com/glommio/glommio/pull/31) | cache-domain-aware placement | new public field on `CpuLocation` is a semver consideration for them |
+| [#32](https://github.com/glommio/glommio/pull/32) | indices in the task header, not owned references | the #448 fix; `executor_id` narrowed to `u32` to coexist with their `AtomicI32` |
+| [#33](https://github.com/glommio/glommio/pull/33) | timing wheel replacing the timer `BTreeMap` | large but standalone, zero unsafe, measurement in `docs/investigations/` |
+| [#35](https://github.com/glommio/glommio/pull/35) | retire the vendored iou / uring_sys | −3,042 lines, −105 `unsafe`; discussion in their [#34](https://github.com/glommio/glommio/issues/34) |
 
-**The iou retirement is unblocked.** It depended on an `io-uring` accessor that
+**#35 was blocked and no longer is.** It depended on an `io-uring` accessor that
 lived on a personal fork; that **merged upstream as
 [tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404) on
-2026-08-09** as `CompletionQueue::status()`. The dependency now points at
-`tokio-rs/io-uring` directly.
+2026-08-09** as `CompletionQueue::status()`. Taken out of draft 2026-08-10; the
+dependency points at `tokio-rs/io-uring` directly.
 
 One caveat remains before *anyone* can publish: it is pinned to a master rev,
 because crates.io is still on 0.7.13 and the accessor has not shipped in a
 release. Fine for an application, fatal for `cargo publish`. See
 [investigations/iou-replacement](investigations/iou-replacement/).
+
+### Not yet submitted
+
+- **Miri task-lifecycle tests**, plus the `test_executor_id` hook they require.
+  Genuinely depends on #32 landing first — it uses the new `spawn_local`
+  signature.
+- **The investigations**, or a condensed version. DataDog **#641** has been open
+  since 2025 asking exactly what these answer. Deliberately held: see the note
+  about not piling on above, and
+  [investigations/io-path/monoio-gap.md](investigations/io-path/monoio-gap.md)
+  for why that one needs framing as measurement rather than correction.
 
 ## Honest caveats
 

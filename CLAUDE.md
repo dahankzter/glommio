@@ -6,10 +6,17 @@ This is a **maintained fork** of [DataDog/glommio](https://github.com/DataDog/gl
 
 **The situation has since changed (checked 2026-08-02).** `DataDog/glommio` is
 abandoned — last commit 2025-04-21, sixteen open PRs, the oldest from 2021. A
-community fork at **[glommio/glommio](https://github.com/glommio/glommio)** is
-now the live project: a new org, active through June 2026, already merging the
-DataDog backlog, with the original author's blessing to take the crates.io name
+community fork at **[glommio/glommio](https://github.com/glommio/glommio)** took
+over: a new org with the original author's blessing to take the crates.io name
 (DataDog issue #707). This fork's `#700` fix is already merged there.
+
+**But that fork has gone quiet too (checked 2026-08-10).** Last commit
+2026-06-13, last merged PR 2026-06-22. Six of our PRs have been open since
+2026-08-02 with no review, no comments, and no CI runs. Not abandoned — a
+volunteer project between bursts — but **do not plan around an upstream merge
+landing.** This fork is the artifact consumers should depend on. Keep the PRs
+open, keep them rebasing cleanly, don't add more, don't chase. See
+[docs/UPSTREAM.md](docs/UPSTREAM.md#upstream-activity).
 
 **So upstream means `glommio/glommio`, not DataDog.** See
 [docs/UPSTREAM.md](docs/UPSTREAM.md) for what is worth contributing, in what
@@ -23,8 +30,14 @@ order, and where it conflicts with their 15 commits we do not have.
 
 **Upstream Status:**
 - Abandoned original: https://github.com/DataDog/glommio (last commit 2025-04-21)
-- **Live community fork: https://github.com/glommio/glommio** — contribute here
-- This fork: https://github.com/dahankzter/glommio — merged with the community fork on 2026-08-02, now ahead only
+- Community fork: https://github.com/glommio/glommio — contribute here, but it
+  has been quiet since 2026-06-22
+- This fork: https://github.com/dahankzter/glommio — merged with the community
+  fork on 2026-08-02, now ahead only. **This is what consumers should use.**
+- `io-uring` dependency points at `tokio-rs/io-uring` pinned to a master rev,
+  because the accessor `need_preempt` needs
+  ([#404](https://github.com/tokio-rs/io-uring/pull/404), merged 2026-08-09) has
+  not shipped in a release yet. That blocks `cargo publish`, not applications.
 
 ## Development Environment
 
