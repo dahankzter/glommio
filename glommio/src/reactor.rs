@@ -15,14 +15,12 @@ use std::{
     os::unix::{ffi::OsStrExt, io::RawFd},
     path::Path,
     rc::Rc,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
-    },
+    sync::Arc,
     task::Waker,
     time::{Duration, Instant},
 };
 
+use io_uring::CompletionStatus;
 use nix::sys::socket::{MsgFlags, SockaddrLike, SockaddrStorage};
 use smallvec::SmallVec;
 
@@ -152,16 +150,12 @@ pub(crate) struct Reactor {
 
     /// Whether there are events in the latency ring.
     ///
-    /// There will be events if the head and tail of the CQ ring are different.
-    /// `liburing` has an inline function in its header to do this, but it
-    /// becomes a function call if I use through `uring-sys`. This is quite
-    /// critical and already more expensive than it should be (see comments
-    /// for need_preempt()), so implement this ourselves.
-    ///
-    /// Also, we don't want to acquire these addresses (which are behind a
-    /// refcell) every time. Acquire during initialization
-    preempt_ptr_head: *const u32,
-    preempt_ptr_tail: *const AtomicU32,
+    /// Acquired once during initialization: the ring is behind a `RefCell`, and
+    /// `need_preempt` runs on every scheduler iteration and every cooperative
+    /// yield point, so borrowing the queue to ask would cost far more than the
+    /// comparison does. `CompletionStatus` borrows nothing and answers in two
+    /// loads without entering the kernel.
+    preempt_status: CompletionStatus,
 }
 
 impl Reactor {
@@ -173,15 +167,14 @@ impl Reactor {
         blocking_thread: BlockingThreadPool,
     ) -> io::Result<Reactor> {
         let sys = sys::Reactor::new(notifier, io_memory, ring_depth, blocking_thread)?;
-        let (preempt_ptr_head, preempt_ptr_tail) = sys.preempt_pointers();
+        let preempt_status = sys.preempt_status();
         Ok(Reactor {
             sys,
             timers: RefCell::new(Timers::new()),
             shared_channels: RefCell::new(SharedChannels::new()),
             io_scheduler: Rc::new(IoScheduler::new()),
             record_io_latencies,
-            preempt_ptr_head,
-            preempt_ptr_tail: preempt_ptr_tail as _,
+            preempt_status,
         })
     }
 
@@ -195,7 +188,7 @@ impl Reactor {
 
     #[inline(always)]
     pub(crate) fn need_preempt(&self) -> bool {
-        unsafe { *self.preempt_ptr_head != (*self.preempt_ptr_tail).load(Ordering::Acquire) }
+        !self.preempt_status.is_empty()
     }
 
     pub(crate) fn id(&self) -> usize {

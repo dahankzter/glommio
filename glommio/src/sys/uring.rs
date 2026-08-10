@@ -27,7 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use io_uring::{cqueue, opcode, squeue, types, IoUring};
+use io_uring::{cqueue, opcode, squeue, types, CompletionStatus, IoUring};
 
 use crate::{
     free_list::{FreeList, Idx},
@@ -1964,16 +1964,15 @@ impl Reactor {
         self.blocking_thread.flush()
     }
 
-    pub(crate) fn preempt_pointers(&self) -> (*const u32, *const u32) {
+    pub(crate) fn preempt_status(&self) -> CompletionStatus {
         let mut lat_ring = self.latency_ring.borrow_mut();
-        // SAFETY: the pointers are read-only and remain valid for the life of
-        // the ring, which the `Reactor` owns. `need_preempt` compares them
-        // without entering the kernel, which is why it has to be raw pointers
-        // rather than a borrow of the queue.
+        // SAFETY: the status must not outlive the ring. The ring lives in
+        // `self.latency_ring`, and the `Reactor` that stores the status owns
+        // this whole structure, so it is dropped first.
         // Bind before returning: the `CompletionQueue` is a temporary borrowing
-        // `lat_ring`, and only the raw pointers outlive it.
-        let (head, tail) = unsafe { lat_ring.ring.completion().head_tail_ptrs() };
-        (head, tail)
+        // `lat_ring`, and only the owned status outlives it.
+        let status = unsafe { lat_ring.ring.completion().status() };
+        status
     }
 
     /// RAII-truncate asynchronously files that required it, e.g. because of

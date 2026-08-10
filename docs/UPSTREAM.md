@@ -98,11 +98,16 @@ anything large arrives.
 7. **The investigations**, or a condensed version. `#641` has been open since
    2025 asking exactly what these answer.
 
-**Not yet: the iou retirement.** It depends on `CompletionQueue::head_tail_ptrs`,
-which currently lives on a personal fork of `io-uring`. **Submitted upstream as
-[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404)**
-(2026-08-02); until it merges and ships, this change cannot be published by
-anyone. See [investigations/iou-replacement](investigations/iou-replacement/).
+**The iou retirement is unblocked.** It depended on an `io-uring` accessor that
+lived on a personal fork; that **merged upstream as
+[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404) on
+2026-08-09** as `CompletionQueue::status()`. The dependency now points at
+`tokio-rs/io-uring` directly.
+
+One caveat remains before *anyone* can publish: it is pinned to a master rev,
+because crates.io is still on 0.7.13 and the accessor has not shipped in a
+release. Fine for an application, fatal for `cargo publish`. See
+[investigations/iou-replacement](investigations/iou-replacement/).
 
 ## Honest caveats
 
