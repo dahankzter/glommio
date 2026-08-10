@@ -91,12 +91,16 @@ churn, cross-shard fan-out, and connection counts in the thousands.
 Writes, buffered (non-DMA) I/O, `read_many`, registered buffers, UDP. Expected
 value now lower: three siblings came back thin.
 
-### 5. Upstream the io-uring accessor
+### 5. Upstream the io-uring accessor — done
 
-Not performance. `glommio/Cargo.toml` points at `dahankzter/io-uring` branch
-`feat/cq-head-tail-ptrs` for `CompletionQueue::head_tail_ptrs`, which
-`need_preempt` requires. **Blocks `cargo publish`** until upstreamed or inlined.
-Becomes urgent the moment a consumer wants a released version.
+**Merged as [tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404)
+on 2026-08-09.** The maintainer asked for a method rather than the raw pointers
+the first draft exposed, which turned out better: `CompletionQueue::status()`
+hands back an owned `CompletionStatus`, and `need_preempt` is now safe code.
+
+`glommio/Cargo.toml` pins `tokio-rs/io-uring` at a master rev. **Still blocks
+`cargo publish`** — a git dependency either way — until a release carrying it
+lands on crates.io. Latest there is 0.7.13; this needs whatever follows.
 
 ## Method, earned the hard way
 

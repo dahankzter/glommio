@@ -18,11 +18,14 @@ submission path is built on the maintained `io-uring` crate.
 
 Miri clean; spawn, task switch and shard round trip all unchanged or better.
 
-**One caveat: the dependency points at a fork.** `need_preempt` needs raw
-pointers to the latency ring's CQ head and tail, which `io-uring` keeps private
-(see below). `dahankzter/io-uring`, branch `feat/cq-head-tail-ptrs`, adds a
-`CompletionQueue::head_tail_ptrs` accessor — about twenty lines, mostly the
-safety documentation.
+**Resolved: the accessor is upstream.** `need_preempt` needs the latency ring's
+CQ head and tail, which `io-uring` kept private (see below). Submitted as
+[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404) and
+**merged 2026-08-09**; the dependency now points at `tokio-rs/io-uring`, pinned
+to a master rev until a release carries it.
+
+The merged shape is better than what was proposed. See
+[the upstreaming section](#what-to-do-about-it) below.
 
 It returns `(*const u32, *const u32)`, the primitives, **not** the `AtomicU32`s
 the queue stores them in. Handing out `*const AtomicU32` would be no protection
@@ -249,9 +252,10 @@ reading the latency ring's `khead`/`ktail` directly.
   to map the ring independently are unavailable.
 - `completion_shared()` hands back the same opaque `CompletionQueue`.
 
-So the migration **cannot complete against `io-uring` 0.7.13 as published**.
-That is a materially different situation from "several sessions of mechanical
-work", and it was worth finding before spending them.
+So the migration **could not complete against `io-uring` 0.7.13 as published**.
+That was a materially different situation from "several sessions of mechanical
+work", and it was worth finding before spending them. *(Fixed upstream — see
+below. Still true of 0.7.13 itself, which remains the latest release.)*
 
 ### What to do about it
 
@@ -267,10 +271,43 @@ work", and it was worth finding before spending them.
    enters the kernel. It is called on the hottest path in the runtime; the whole
    point of the current design is that it costs two loads.
 
-Option 1 is what was done: `dahankzter/io-uring`, branch
-`feat/cq-head-tail-ptrs`, adds `CompletionQueue::head_tail_ptrs` returning the
-two pointers the queue already holds, kept `unsafe` and documented read-only.
-Options 2 and 3 were rejected for the reasons given and should stay rejected.
+Option 1 is what was done, and **it merged upstream on 2026-08-09**. Options 2
+and 3 were rejected for the reasons given and should stay rejected.
+
+The first draft exposed the two pointers directly as `head_tail_ptrs()`.
+The maintainer asked for a method instead, which produced a better design than
+the one proposed:
+
+```rust
+pub struct CompletionStatus { /* head, tail */ }
+impl CompletionStatus { pub fn is_empty(&self) -> bool; }
+
+impl<E: EntryMarker> CompletionQueue<'_, E> {
+    /// # Safety
+    /// The returned value must not outlive the ring.
+    pub unsafe fn status(&self) -> CompletionStatus;
+}
+```
+
+A method *on* `CompletionQueue` could not work — reaching the queue costs more
+than the comparison, which is the whole constraint. An owned handle, grabbed
+once, does. The win over the pointer version is that the `unsafe` sits at a
+single construction site at reactor startup rather than on a path executed
+millions of times a second:
+
+```rust
+pub(crate) fn need_preempt(&self) -> bool {
+    !self.preempt_status.is_empty()
+}
+```
+
+No `unsafe` at all, where the vendored `iou` version needed a raw dereference
+of two pointers plus a manual `Acquire`.
+
+**Worth recording as a lesson:** the reviewer's four-word comment ("Can we
+expose a `need_preempt` method?") looked at first like a request that the
+constraint ruled out. Explaining the constraint rather than defending the patch
+produced a third option neither party had proposed.
 
 ## Suggested sequencing
 
