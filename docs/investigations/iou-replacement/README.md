@@ -22,24 +22,18 @@ Miri clean; spawn, task switch and shard round trip all unchanged or better.
 CQ head and tail, which `io-uring` kept private (see below). Submitted as
 [tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404) and
 **merged 2026-08-09**; the dependency now points at `tokio-rs/io-uring`, pinned
-to a master rev until a release carries it.
+directly. **Released in 0.7.14 on 2026-08-11**, so the dependency is a plain
+crates.io one and nothing about this blocks publication.
 
 The merged shape is better than what was proposed. See
 [the upstreaming section](#what-to-do-about-it) below.
 
-It returns `(*const u32, *const u32)`, the primitives, **not** the `AtomicU32`s
-the queue stores them in. Handing out `*const AtomicU32` would be no protection
-at all: atomic stores take `&self`, so a caller can write through such a pointer
-without a cast and corrupt the ring. A `*const u32` needs an explicit
-`as *mut u32` first. It is also what the rest of the crate does — nothing else
-in io-uring's public API returns an atomic, and `BufRingEntry::tail`, the one
-comparable accessor, returns `*const u16`. glommio's own original signature was
-`(*const u32, *const u32)` too, with only the tail cast to an atomic at the
-point of use, which is where the cast belongs. **Submitted upstream as
-[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404)**
-(2026-08-02). Until it lands and is released, `cargo publish` will not accept
-this, so a release needs either that PR merged or the accessor temporarily
-inlined.
+*The paragraph that stood here argued for returning `(*const u32, *const u32)`
+— the primitives rather than the `AtomicU32`s the queue stores, since atomic
+stores take `&self` and a `*const AtomicU32` would let a caller corrupt the ring
+without so much as a cast. That reasoning was sound and the submitted patch did
+exactly it, but the shape is moot: the merged API hands out no pointers at all.
+Kept here only because it explains why the first draft looked the way it did.*
 
 ## Why this was on the table
 
@@ -73,7 +67,7 @@ for an abandoned crate.** Deleting it would do more for the "reduce unsafe" goal
 than everything proposed in [unsafe-centralization](../unsafe-centralization/),
 which spends its effort relocating unsafe rather than removing it.
 
-The replacement is `io-uring` (tokio-rs), actively maintained, currently 0.7.13.
+The replacement is `io-uring` (tokio-rs), actively maintained, currently 0.7.14.
 Every probe in the [mechanical-sympathy](../mechanical-sympathy/) investigation
 is written against it, including `MSG_RING` and the modern setup flags, so it is
 already known to cover what glommio needs.
@@ -255,7 +249,7 @@ reading the latency ring's `khead`/`ktail` directly.
 So the migration **could not complete against `io-uring` 0.7.13 as published**.
 That was a materially different situation from "several sessions of mechanical
 work", and it was worth finding before spending them. *(Fixed upstream — see
-below. Still true of 0.7.13 itself, which remains the latest release.)*
+below, and released in 0.7.14 on 2026-08-11.)*
 
 ### What to do about it
 

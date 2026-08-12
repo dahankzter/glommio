@@ -135,9 +135,9 @@ lived on a personal fork; that **merged upstream as
 2026-08-09** as `CompletionQueue::status()`. Taken out of draft 2026-08-10; the
 dependency points at `tokio-rs/io-uring` directly.
 
-One caveat remains before *anyone* can publish: it is pinned to a master rev,
-because crates.io is still on 0.7.13 and the accessor has not shipped in a
-release. Fine for an application, fatal for `cargo publish`. See
+**Fully unblocked as of 2026-08-11**, when `io-uring` released 0.7.14 carrying
+the accessor. The dependency is now a plain `io-uring = "0.7.14"` — no git
+dependency, nothing preventing publication. See
 [investigations/iou-replacement](investigations/iou-replacement/).
 
 ### Not yet submitted
