@@ -3311,15 +3311,17 @@ mod test {
     fn test_spin() {
         let dur = Duration::from_secs(1);
         let ex0 = LocalExecutorBuilder::default().make().unwrap();
-        ex0.run(async {
+        let parked_cpu = ex0.run(async {
             let ex0_ru_start = getrusage();
             timer::sleep(dur).await;
             let ex0_ru_finish = getrusage();
 
+            let used = ex0_ru_finish - ex0_ru_start;
             assert!(
-                ex0_ru_finish - ex0_ru_start < Duration::from_millis(10),
+                used < Duration::from_millis(10),
                 "expected user time on LE0 is less than 10 millisecond"
             );
+            used
         });
 
         let ex = LocalExecutorBuilder::new(Placement::Fixed(0))
@@ -3328,23 +3330,30 @@ mod test {
             .unwrap();
 
         ex.run(async {
-            let threshold = if std::env::var("CI").is_ok_and(|val| val == "1" || val == "true") {
-                // In CI this test seems to measure ~49.8 ms - not sure why the gap in CI.
-                Duration::from_millis(40)
-            } else {
-                // 100 ms may have passed without us running for 100ms in case
-                // there are other threads. Need to be a bit more relaxed
-                Duration::from_millis(90)
-            };
-
             let ex_ru_start = getrusage();
             timer::sleep(dur).await;
             let ex_ru_finish = getrusage();
+            let spinning_cpu = ex_ru_finish - ex_ru_start;
 
+            // Compare against the executor that parked rather than against an
+            // absolute figure. `spin_before_park` spins for a wall-clock
+            // window, but `getrusage` reports the CPU this thread was actually
+            // given, so an absolute threshold silently asserts that the thread
+            // owns a core. Share the core with anything else — a parallel test
+            // suite, a busy CI runner — and it measures the share it got
+            // instead of whether it spun at all. Halve the core and the old
+            // 90 ms threshold sees ~50 ms and fails, which is exactly the
+            // ~49.8 ms that CI used to report.
+            //
+            // The property under test survives that: a spinning executor burns
+            // orders of magnitude more CPU than a parked one, whatever share
+            // of a core it is given. If spinning regressed, this figure would
+            // collapse to `parked_cpu` and the assertion would still catch it.
+            let floor = 10 * parked_cpu.max(Duration::from_millis(1));
             assert!(
-                ex_ru_finish - ex_ru_start >= threshold,
-                "expected user time on LE is greater than {threshold:?} ({:?})",
-                ex_ru_finish - ex_ru_start,
+                spinning_cpu >= floor,
+                "expected the spinning executor to use at least {floor:?} of CPU, \
+                 ten times the {parked_cpu:?} the parked one used, but it used {spinning_cpu:?}",
             );
         });
     }
