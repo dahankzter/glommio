@@ -34,10 +34,11 @@ order, and where it conflicts with their 15 commits we do not have.
   has been quiet since 2026-06-22
 - This fork: https://github.com/dahankzter/glommio — merged with the community
   fork on 2026-08-02, now ahead only. **This is what consumers should use.**
-- `io-uring` dependency points at `tokio-rs/io-uring` pinned to a master rev,
-  because the accessor `need_preempt` needs
-  ([#404](https://github.com/tokio-rs/io-uring/pull/404), merged 2026-08-09) has
-  not shipped in a release yet. That blocks `cargo publish`, not applications.
+- `io-uring` is a plain crates.io dependency at **0.7.14**, which carries the
+  accessor `need_preempt` needs
+  ([#404](https://github.com/tokio-rs/io-uring/pull/404), merged 2026-08-09,
+  released 2026-08-11). **No git dependencies anywhere — this fork is
+  publishable.**
 
 ## Development Environment
 

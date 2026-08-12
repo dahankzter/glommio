@@ -98,9 +98,9 @@ on 2026-08-09.** The maintainer asked for a method rather than the raw pointers
 the first draft exposed, which turned out better: `CompletionQueue::status()`
 hands back an owned `CompletionStatus`, and `need_preempt` is now safe code.
 
-`glommio/Cargo.toml` pins `tokio-rs/io-uring` at a master rev. **Still blocks
-`cargo publish`** — a git dependency either way — until a release carrying it
-lands on crates.io. Latest there is 0.7.13; this needs whatever follows.
+**Released in `io-uring` 0.7.14 on 2026-08-11**, so `glommio/Cargo.toml` now
+carries a plain `io-uring = "0.7.14"`. No git dependency remains, and
+`cargo publish` is no longer blocked by this.
 
 ## Method, earned the hard way
 
