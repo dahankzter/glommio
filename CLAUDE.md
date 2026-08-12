@@ -616,25 +616,36 @@ make miri
 
 ### Remote Setup
 
-This fork uses the following remote configuration:
-
 ```bash
 git remote -v
-# origin        git@github.com:dahankzter/glommio.git (fork)
-# upstream      https://github.com/DataDog/glommio.git (original)
+# origin      https://github.com/dahankzter/glommio.git            (this fork, branch `master`)
+# fork        https://github.com/dahankzter/glommio-community.git  (PR staging, branch `main`)
+# upstream    https://github.com/glommio/glommio.git               (the live community fork)
 ```
+
+**There are two GitHub forks, and this trips people up.** `dahankzter/glommio`
+was forked from `DataDog/glommio` before the community fork existed, so GitHub
+still labels it "forked from DataDog/glommio" — that badge is metadata fixed at
+creation and cannot be repointed. It does **not** mean the remotes are wrong.
+`dahankzter/glommio-community` was forked later from `glommio/glommio` and is
+what upstream pull requests are raised from.
+
+**The footgun:** GitHub's "Contribute" button on `dahankzter/glommio` defaults
+the pull request base to `DataDog/glommio`, which is abandoned. Never accept
+that default.
 
 ### Working with the Fork
 
 ```bash
-# Push to fork
-git push origin <branch>
+# Day-to-day work lives on origin/master
+git push origin master
 
-# Create PR to upstream
-gh pr create --repo DataDog/glommio --base master
+# Upstream pull requests go through the community fork, based on `main`
+git push fork <local-branch>:<pr-branch>
+gh pr create --repo glommio/glommio --base main
 
-# Sync fork with upstream
-gh repo sync dahankzter/glommio --source DataDog/glommio
+# Sync with upstream
+git fetch upstream && git merge upstream/main
 ```
 
 ## Code Style
@@ -679,7 +690,10 @@ git config submodule.glommio/liburing.ignore dirty
 ## Getting Help
 
 - **GitHub Issues:** https://github.com/dahankzter/glommio/issues
-- **Upstream Issues:** https://github.com/DataDog/glommio/issues
+- **Upstream Issues:** https://github.com/glommio/glommio/issues — the live fork
+- **DataDog issues:** https://github.com/DataDog/glommio/issues — abandoned, but
+  still worth reading; several describe problems this fork has since measured or
+  fixed (see `docs/investigations/`)
 - **Maintainer:** @dahankzter
 
 ## Quick Reference for New Claude Sessions
