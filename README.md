@@ -54,7 +54,10 @@ Both take `placement` and `name`; everything else lives on
 If you depend on this crate under another name, e.g.
 `glommio = { package = "glommio-ng", version = "0.10" }`, the attribute path
 changes along with it: write `#[glommio_ng::main(crate = glommio_ng)]`, not
-`#[glommio::main(…)]`. And `use glommio::*;` shadows the standard library's
+`#[glommio::main(…)]`. `crate` takes a path, not just a name, so a crate that
+reaches this one through a facade can write `crate = ::my_runtime::glommio` and
+point at the re-export instead of depending on glommio directly. And
+`use glommio::*;` shadows the standard library's
 `#[test]` with this crate's — import `main`/`test` by name, or write
 `#[glommio::test]`, to keep both available.
 

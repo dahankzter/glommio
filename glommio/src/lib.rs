@@ -276,6 +276,15 @@
 //!
 //! write `#[glommio_ng::main(crate = glommio_ng)]`, not `#[glommio::main(…)]`.
 //!
+//! `crate` takes a path, not just a name, so a crate that reaches this one
+//! through a facade can point at the re-export rather than depending on it
+//! directly:
+//!
+//! ```ignore
+//! #[my_runtime::test(crate = ::my_runtime::glommio)]
+//! async fn it_works() {}
+//! ```
+//!
 //! `use glommio::*;` brings `test` into scope alongside the standard
 //! library's `#[test]` attribute, and the glob import shadows the built-in.
 //! Import `main` and `test` by name instead, or write `#[glommio::test]`, to
