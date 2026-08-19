@@ -222,42 +222,123 @@ static GLOMMIO_URING_OPS: &[(&str, u8)] = &[
     ("WRITE", io_uring::opcode::Write::CODE),
     ("SEND", io_uring::opcode::Send::CODE),
     ("RECV", io_uring::opcode::Recv::CODE),
+    ("ASYNC_CANCEL", io_uring::opcode::AsyncCancel::CODE),
 ];
+
+/// Why this kernel cannot run glommio.
+#[derive(Debug)]
+pub(crate) enum UringUnsupported {
+    /// `io_uring_setup` itself failed.
+    SetupFailed(io::Error),
+    /// The ring was created, but registering a probe against it failed.
+    ProbeFailed(io::Error),
+    /// The ring works and some opcodes glommio submits are missing.
+    MissingOps(Vec<&'static str>),
+}
+
+impl fmt::Display for UringUnsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UringUnsupported::SetupFailed(err) => {
+                write!(f, "failed to create an io_uring: {err}")?;
+                match err.raw_os_error() {
+                    Some(libc::ENOSYS) => write!(
+                        f,
+                        ". The kernel does not implement io_uring at all; glommio needs 5.6 or \
+                         newer"
+                    ),
+                    Some(libc::EPERM) => {
+                        write!(
+                            f,
+                            ". io_uring is present but not permitted for this process"
+                        )?;
+                        match io_uring_disabled() {
+                            Some(1) => write!(
+                                f,
+                                ", because kernel.io_uring_disabled=1 restricts it to processes \
+                                 with CAP_SYS_ADMIN"
+                            ),
+                            Some(2) => {
+                                write!(f, ", because kernel.io_uring_disabled=2 disables it")
+                            }
+                            _ => write!(
+                                f,
+                                ". A seccomp policy blocking io_uring_setup is the usual cause; \
+                                 container runtimes often ship one"
+                            ),
+                        }
+                    }
+                    _ => Ok(()),
+                }
+            }
+            UringUnsupported::ProbeFailed(err) => {
+                write!(f, "failed to register a probe against io_uring: {err}")
+            }
+            UringUnsupported::MissingOps(ops) => write!(
+                f,
+                "the kernel's io_uring is missing operations glommio submits: {}. glommio needs a \
+                 kernel of 5.6 or newer",
+                ops.iter()
+                    .map(|op| format!("IORING_OP_{op}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// Reads `kernel.io_uring_disabled`, which RHEL 9 and other distributions use
+/// to restrict io_uring independently of the kernel version. Absent on kernels
+/// older than 6.6 and on distributions that did not backport it.
+fn io_uring_disabled() -> Option<u8> {
+    std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
 
 /// Verifies the running kernel implements everything glommio needs.
 ///
 /// Uses `io-uring`'s probe rather than liburing's `io_uring_get_probe`, so no
 /// raw pointer handling and no manual free.
-fn check_supported_operations(ops: &[(&str, u8)]) -> bool {
-    let ring = io_uring::IoUring::new(1).expect(
-        "Failed to create an io_uring. The most likely reason is that your kernel witnessed \
-         Romulus killing Remus (too old!! kernel should be at least 5.8)",
-    );
+///
+/// Returns the reason rather than terminating: a library has no business
+/// calling `exit` on a process it does not own, and a caller that cannot use
+/// io_uring here may well have another runtime to fall back to.
+fn check_supported_operations(ops: &[(&'static str, u8)]) -> Result<(), UringUnsupported> {
+    let ring = io_uring::IoUring::new(1).map_err(UringUnsupported::SetupFailed)?;
+
     let mut probe = io_uring::Probe::new();
     ring.submitter()
         .register_probe(&mut probe)
-        .expect("Failed to register a probe against io_uring");
+        .map_err(UringUnsupported::ProbeFailed)?;
 
-    let mut ret = true;
-    for (name, opcode) in ops {
-        let sup = probe.is_supported(*opcode);
-        ret &= sup;
-        if !sup {
-            println!(
-                "Yo kernel is so old it was with Hannibal when he crossed the Alps! Missing \
-                 IORING_OP_{name}"
-            );
-        }
+    let missing: Vec<_> = ops
+        .iter()
+        .filter(|(_, opcode)| !probe.is_supported(*opcode))
+        .map(|(name, _)| *name)
+        .collect();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(UringUnsupported::MissingOps(missing))
     }
-    if !ret {
-        eprintln!("Your kernel is older than Caesar. Bye");
-        std::process::exit(1);
-    }
-    ret
 }
 
 lazy_static! {
-    static ref IO_URING_RECENT_ENOUGH: bool = check_supported_operations(GLOMMIO_URING_OPS);
+    static ref IO_URING_SUPPORT: Result<(), String> =
+        check_supported_operations(GLOMMIO_URING_OPS).map_err(|reason| reason.to_string());
+}
+
+/// Returns `Err` with a description of what is wrong if this kernel cannot run
+/// glommio. Probed once per process.
+pub(crate) fn check_uring_support() -> io::Result<()> {
+    IO_URING_SUPPORT
+        .as_ref()
+        .map(|_| ())
+        .map_err(|reason| io::Error::new(io::ErrorKind::Unsupported, reason.clone()))
 }
 
 /// Builds the submission queue entry for one descriptor.
@@ -961,7 +1042,7 @@ impl SleepableRing {
         allocator: Rc<UringBufferAllocator>,
         source_map: Rc<RefCell<SourceMap>>,
     ) -> io::Result<Self> {
-        assert!(*IO_URING_RECENT_ENOUGH);
+        check_uring_support()?;
         Ok(SleepableRing {
             ring: IoUring::new(size as _)?,
             size,
@@ -2110,6 +2191,63 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn probes_every_opcode_glommio_submits() {
+        // The probe list is the only thing standing between an unsupported
+        // kernel and an -EINVAL on a completion nobody is expecting, so it has
+        // to name every opcode fill_sqe can build.
+        let submitted = [
+            opcode::Nop::CODE,
+            opcode::Fsync::CODE,
+            opcode::ReadFixed::CODE,
+            opcode::WriteFixed::CODE,
+            opcode::PollAdd::CODE,
+            opcode::PollRemove::CODE,
+            opcode::SendMsg::CODE,
+            opcode::RecvMsg::CODE,
+            opcode::Timeout::CODE,
+            opcode::TimeoutRemove::CODE,
+            opcode::Accept::CODE,
+            opcode::LinkTimeout::CODE,
+            opcode::Connect::CODE,
+            opcode::Fallocate::CODE,
+            opcode::OpenAt::CODE,
+            opcode::Close::CODE,
+            opcode::Statx::CODE,
+            opcode::Read::CODE,
+            opcode::Write::CODE,
+            opcode::Send::CODE,
+            opcode::Recv::CODE,
+            opcode::AsyncCancel::CODE,
+        ];
+
+        for code in submitted {
+            assert!(
+                GLOMMIO_URING_OPS.iter().any(|(_, probed)| *probed == code),
+                "opcode {code} is submitted but never probed"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_opcodes_are_named_in_the_error() {
+        let err = UringUnsupported::MissingOps(vec!["STATX", "CLOSE"]).to_string();
+        assert!(err.contains("IORING_OP_STATX"), "{err}");
+        assert!(err.contains("IORING_OP_CLOSE"), "{err}");
+    }
+
+    #[test]
+    fn eperm_points_at_whatever_is_restricting_io_uring() {
+        let err =
+            UringUnsupported::SetupFailed(io::Error::from_raw_os_error(libc::EPERM)).to_string();
+        let expected = match io_uring_disabled() {
+            Some(1) => "kernel.io_uring_disabled=1",
+            Some(2) => "kernel.io_uring_disabled=2",
+            _ => "seccomp",
+        };
+        assert!(err.contains(expected), "{err}");
+    }
 
     #[test]
     fn timeout_smoke_test() {
