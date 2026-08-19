@@ -22,9 +22,6 @@ worth building here.
 - **`ReceiverStream`.** Both channel types already implement `Stream`:
   `ConnectedReceiver` directly (`shared_channel.rs:427`), `local_channel` via
   `.stream()` (`local_channel.rs:731`).
-- **`CancellationToken`** (78 sites). `tokio-util`'s is runtime-agnostic and
-  cancellation legitimately crosses threads, so a `!Send` version buys nothing.
-  Keep the dependency.
 - **`RwLock`** (5 sites), **`Semaphore`**, **`Gate`** — glommio has these.
 - **`Barrier`, `Notify`, `Semaphore`** are re-exported by slipstream's facade
   but unused; they should be trimmed there rather than implemented here.
@@ -70,7 +67,28 @@ atomics, no `Arc` traffic — but the semantics are the difficulty:
 
 Brainstorm before writing.
 
-### 5. `shared_channel` usable from a thread with no executor — investigate first
+### 5. `CancellationToken` (78 sites) — last, and for a different reason
+
+The shutdown idiom throughout slipstream, and the one item here that cannot be
+`!Send`: cross-shard shutdown fan-out means the root token crosses threads. So
+unlike everything above, it buys no typing guarantee.
+
+The reason to build it anyway is vocabulary coherence — a per-core runtime that
+offers channels, locks and gates but sends you elsewhere for cancellation has a
+hole in its story. What it does **not** buy is shedding the tokio dependency:
+slipstream depends on `tokio = { features = ["full"] }` at its workspace root
+and uses it directly in `slipstream-kafka`, `slipstream-wasm`,
+`cargo-slipstream` and `slipstream-ops`.
+
+Harder than it looks, and `tokio-util`'s version is battle-tested where ours
+would start from zero:
+
+- parent/child token trees, and drop-cancels-children
+- subscribing to a token that is already cancelled
+- cancel-safety of the wait future when the awaiting task is itself dropped
+- whether a child outliving its parent is allowed
+
+### 6. `shared_channel` usable from a thread with no executor — investigate first
 
 Both ends currently require `connect()` inside a glommio executor
 (`shared_channel.rs:163,328`). Slipstream's two facade sites (object_store's
