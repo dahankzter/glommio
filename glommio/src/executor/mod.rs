@@ -2901,6 +2901,25 @@ impl ExecutorProxy {
     /// *This method is not meant to be a way to achieve compute parallelism.*
     /// Distributing work across executors is the better way to achieve that.
     ///
+    /// # The returned future is not `Send`
+    ///
+    /// The closure and its result both cross threads — hence the `Send` bounds
+    /// on `F` and `R` — but the future returned here does not. It awaits a
+    /// reactor source belonging to the executor that created it, which pins it
+    /// to that executor.
+    ///
+    /// This matters when implementing a trait that hands back a boxed `Send`
+    /// future, `Pin<Box<dyn Future<Output = T> + Send>>`, which is a common
+    /// shape for pluggable DNS resolvers, connectors and other integration
+    /// points. Runtimes that dispatch blocking work to a shared thread pool
+    /// return a `Send` future and satisfy such a trait directly; this one
+    /// cannot, and the usual workaround is a second, separate thread pool —
+    /// which is worth avoiding in a thread-per-core process.
+    ///
+    /// If you are writing such a binding, discover this before you design
+    /// around it: run the blocking call on the executor that will await it,
+    /// or keep the work inside a `!Send` future of your own.
+    ///
     /// # Examples
     ///
     /// ```
