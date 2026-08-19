@@ -4,6 +4,7 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2020 Datadog, Inc.
 //
 //! glommio::timer is a module that provides timing related primitives.
+mod interval;
 mod timer_impl;
 
 pub mod timing_wheel;
@@ -14,6 +15,7 @@ pub mod timer_id;
 
 pub(crate) mod reactor_adapter;
 
+pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
 use std::{future::Future, time::Duration};
 pub use timer_impl::{Timer, TimerActionOnce, TimerActionRepeat};
 
@@ -42,6 +44,28 @@ pub async fn sleep(wait: std::time::Duration) {
 ///
 /// Returns a `Result`, with `Ok` if the future ran to completion
 /// or a [`GlommioError::TimedOut`] error if the timeout was reached
+///
+/// # Which future wins at the deadline
+///
+/// The inner future is polled before the timer, so one that completes exactly
+/// as the deadline arrives reports success rather than racing. That bias is
+/// deliberate: a caller that has the answer should be given it.
+///
+/// # This function is the narrow form
+///
+/// It only accepts futures that already return a [`crate::Result`]. For
+/// anything else -- a future returning `()`, an `Option`, or another crate's
+/// error type -- use [`future::timeout`](crate::future::timeout), which hands
+/// the output back untouched instead of flattening it.
+///
+/// The general one has the better name and does not have it, which is worth
+/// stating plainly: by the ecosystem's `try_` convention (`try_join`,
+/// `try_select`) the `Result`-aware function should be `try_timeout` and the
+/// general one should be `timeout`. This signature is upstream's, so the two
+/// are separated by module instead, as `async-std` separates `io::timeout`
+/// from `future::timeout`. **At the next breaking release this becomes
+/// `try_timeout` and [`future::timeout`](crate::future::timeout) takes this
+/// name.**
 ///
 /// ```
 /// # use glommio::{
