@@ -21,14 +21,19 @@
 //!    should be preferred; reach for the ['Mutex'] when the lock must be held
 //!    across one.
 //!
-//! 3. RwLock - Implementation of read-write lock optimized for single-thread
+//! 3. OnceCell - A cell initialised at most once, by an initialiser that may
+//!    itself await. Several tasks reaching it during initialisation wait for
+//!    the first rather than each running their own.
+//!
+//! 4. RwLock - Implementation of read-write lock optimized for single-thread
 //!    bounded executor. All methods of RwLock have the same meaning as the methods
 //!    of [`std::sync::RwLock`]. With exception that RwLock can not be poisoned but
 //!    can be closed.
 
 mod gate;
 mod mutex;
+mod once_cell;
 mod rwlock;
 mod semaphore;
 
-pub use self::{gate::*, mutex::*, rwlock::*, semaphore::*};
+pub use self::{gate::*, mutex::*, once_cell::*, rwlock::*, semaphore::*};
