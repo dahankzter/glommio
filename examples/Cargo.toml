@@ -5,7 +5,12 @@ name    = "examples"
 publish = false
 version = "0.0.0"
 
+[lints.rust]
+# The alloc_* cfgs select a global allocator in the allocation probes.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(alloc_mimalloc)'] }
+
 [dev-dependencies]
+mimalloc        = { version = "0.1", default-features = false }
 byte-unit      = "5.1.4"
 clap           = "4.5.3"
 fastrand       = "2"
@@ -64,3 +69,7 @@ path = "hyper_server.rs"
 [[example]]
 name = "hyper_client"
 path = "hyper_client.rs"
+
+[[example]]
+name = "alloc_per_op"
+path = "../docs/investigations/allocations/probe_alloc_per_op.rs"
