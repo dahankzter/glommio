@@ -675,6 +675,22 @@ impl Semaphore {
         let mut state = self.state.borrow_mut();
         state.close();
     }
+
+    /// Returns whether this semaphore has been closed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::sync::Semaphore;
+    ///
+    /// let sem = Semaphore::new(1);
+    /// assert!(!sem.is_closed());
+    /// sem.close();
+    /// assert!(sem.is_closed());
+    /// ```
+    pub fn is_closed(&self) -> bool {
+        self.state.borrow().closed
+    }
 }
 
 impl Drop for Semaphore {

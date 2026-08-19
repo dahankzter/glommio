@@ -16,13 +16,19 @@
 //!    acquirer. There is also ['try_acquire'] method which fails if semaphore
 //!    lacks of permits requested without suspending the fiber.
 //!
-//! 2. RwLock - Implementation of read-write lock optimized for single-thread
+//! 2. Mutex - A mutual exclusion lock for state that stays on one core. Where
+//!    no borrow crosses an `await` a [`std::cell::RefCell`] is cheaper and
+//!    should be preferred; reach for the ['Mutex'] when the lock must be held
+//!    across one.
+//!
+//! 3. RwLock - Implementation of read-write lock optimized for single-thread
 //!    bounded executor. All methods of RwLock have the same meaning as the methods
 //!    of [`std::sync::RwLock`]. With exception that RwLock can not be poisoned but
 //!    can be closed.
 
 mod gate;
+mod mutex;
 mod rwlock;
 mod semaphore;
 
-pub use self::{gate::*, rwlock::*, semaphore::*};
+pub use self::{gate::*, mutex::*, rwlock::*, semaphore::*};
