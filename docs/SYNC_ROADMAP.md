@@ -1,7 +1,7 @@
 # Completing the Synchronisation Set
 
 **Date:** 2026-08-19
-**Status:** planned, not started
+**Status:** all six items shipped, 2026-08-20
 **Origin:** slipstream runs entirely on glommio but still imports `tokio::sync`
 for primitives glommio does not have. Call-site counts below are from its
 `src/`.
@@ -25,6 +25,22 @@ worth building here.
 - **`RwLock`** (5 sites), **`Semaphore`**, **`Gate`** — glommio has these.
 - **`Barrier`, `Notify`, `Semaphore`** are re-exported by slipstream's facade
   but unused; they should be trimmed there rather than implemented here.
+
+## Shipped
+
+| Item | Commit | Notes |
+|---|---|---|
+| Async `Mutex` | `133a565` | `Semaphore(1)` + `UnsafeCell`; `Semaphore` gained `is_closed()` |
+| `oneshot` | `c362fb0` | receiver is the future; unsent value handed back |
+| `watch`, `OnceCell` | `b67355f` | `OnceCell` initialiser runs once under a private semaphore |
+| `broadcast` | `f86bb8a` | tokio semantics, bespoke `RecvError`; spec at `docs/superpowers/specs/2026-08-20-broadcast-channel-design.md` |
+| `CancellationToken` | `5bf58cd` | `!Send`, hierarchical, per-executor |
+| `ForeignSender` | `986213e` | `ConnectedSender::into_foreign`, `Send` + not `Clone`, `try_send` only |
+
+Every suite was mutation-checked. One of those checks earned its keep: three
+`ForeignSender` tests passed with the peer notification deleted, proving
+delivery but not wakeup, which is the entire mechanism. The fourth test parks
+the consumer first and hangs without it.
 
 ## Order of work — simplest first
 
@@ -112,6 +128,29 @@ A channel-backed variant whose future is `Send` looks feasible — a cross-threa
 `waker.wake()` is fine — but cancellation on drop and the pool's ownership of
 the result need design. Everything else on this page is a stylistic
 improvement to code that already works; this one is a capability gap.
+
+## Not built: `ExecutorBound<T>`
+
+A wrapper carrying a `!Send` value through a `Send` bound, `unsafe impl Send`
+with an executor-id assertion — a sharper check than `send_wrapper`'s thread
+affinity, since the executor is the invariant that matters here.
+
+**Proposed and declined, on the consumer's argument rather than ours.** The
+candidate site needs three wrappers, not one: `object_store::HttpService`
+requires the service, the future from `call`, and the *body* to be `Send`, and
+the body streams frames off a glommio socket and outlives the call under
+retry machinery. Three `unsafe impl Send` on the S3 write path, to remove a
+queue hop nobody has measured, against an S3 round trip of hundreds of
+microseconds.
+
+That is the task-arena mistake in new clothes: trading a compile-time guarantee
+for a runtime panic to win what is probably noise.
+
+Build it only when someone has a measured hop. The honest first site would be
+the body path in slipstream's `connector.rs` alone — the piece that exists
+purely to turn a `!Send` hyper body into a `Send` one — not an end-to-end
+facade spike. A measurement was offered: a fourth condition on the
+`shuffle_baseline` p50/p99 run.
 
 ## Cost to keep in mind
 
