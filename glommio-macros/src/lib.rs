@@ -118,7 +118,22 @@ fn expand(
 
     let krate = &args.krate;
     let placement = &args.placement;
-    let named = args.name.map(|name| quote!(.name(#name)));
+    // `name` is rejected rather than emitted: the expansion builds the executor
+    // with `make()`, which runs it on the CALLING thread and never reads the
+    // builder's name -- only `spawn()` does, where the name becomes the name of
+    // the thread it creates. Threading the argument through anyway would accept
+    // an option and silently drop it.
+    if let Some(name) = &args.name {
+        return syn::Error::new_spanned(
+            name,
+            "`name` cannot be honoured here: this attribute builds the executor on the calling \
+             thread with `make()`, which has no thread of its own to name. Use \
+             `LocalExecutorBuilder::new(placement).name(..).spawn(..)` if you want a named \
+             executor thread",
+        )
+        .to_compile_error()
+        .into();
+    }
     let test_attr = if is_test {
         quote!(#[::core::prelude::v1::test])
     } else {
@@ -130,7 +145,6 @@ fn expand(
         #(#attrs)*
         #vis fn #ident() #output {
             #krate::LocalExecutorBuilder::new(#placement)
-                #named
                 .make()
                 .expect("failed to create the glommio executor")
                 .run(async move #body)

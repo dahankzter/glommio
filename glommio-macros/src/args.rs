@@ -55,7 +55,7 @@ impl Parse for Arg {
             "name" => Ok(Arg::Name(input.parse()?)),
             other => Err(syn::Error::new_spanned(
                 &key,
-                format!("unknown argument `{other}`; expected `placement`, `name` or `crate`"),
+                format!("unknown argument `{other}`; expected `placement` or `crate`"),
             )),
         }
     }

@@ -47,7 +47,7 @@ async fn it_works() {
 }
 ```
 
-Both take `placement` and `name`; everything else lives on
+Both take `placement`; everything else lives on
 `LocalExecutorBuilder`. Turning off the default `macros` feature means the
 `glommio-macros` crate is not a dependency and not compiled.
 

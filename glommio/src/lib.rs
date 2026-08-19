@@ -255,9 +255,15 @@
 //! }
 //! ```
 //!
-//! Both accept `placement = <Placement variant>` and `name = "…"`. Anything
+//! Both accept `placement = <Placement variant>`. Anything
 //! else the executor offers stays on [`LocalExecutorBuilder`], which remains
 //! available inside an annotated function.
+//!
+//! There is no `name` argument. The expansion builds the executor with
+//! `make()`, which runs it on the calling thread, and a builder name is only
+//! read by `spawn()`, where it names the thread that call creates. Passing
+//! `name` is rejected rather than silently ignored; reach for
+//! [`LocalExecutorBuilder::spawn`] when you want a named executor thread.
 //!
 //! `placement` takes a variant — `Unbound`, `Fixed(0)`, `Fenced(cpus)` — not
 //! an arbitrary expression. Build the executor by hand if you need a computed

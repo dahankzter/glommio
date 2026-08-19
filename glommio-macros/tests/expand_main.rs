@@ -58,8 +58,8 @@ fn main_runs_the_body_and_defaults_to_unbound() {
 #[glommio_macros::main(placement = Fixed(3))]
 async fn pinned() {}
 
-#[glommio_macros::main(placement = Fixed(1), name = "worker")]
-async fn pinned_and_named() {}
+#[glommio_macros::main(placement = Fixed(1))]
+async fn pinned_again() {}
 
 #[test]
 fn placement_argument_reaches_the_builder() {
@@ -69,8 +69,10 @@ fn placement_argument_reaches_the_builder() {
 }
 
 #[test]
-fn name_argument_compiles_alongside_placement() {
-    pinned_and_named();
+fn second_placement_reaches_the_builder() {
+    pinned_again();
     PLACEMENT.with(|p| assert_eq!(*p.borrow(), Some(Placement::Fixed(1))));
-    NAME.with(|n| assert_eq!(*n.borrow(), Some("worker".to_string())));
+    // The expansion never calls `.name(..)`: `make()` cannot honour it, so the
+    // attribute rejects the argument outright rather than dropping it here.
+    NAME.with(|n| assert_eq!(*n.borrow(), None));
 }
