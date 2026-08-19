@@ -33,6 +33,25 @@ fn count_open_fds() -> usize {
     0 // Unsupported platform
 }
 
+/// Serialises the tests in this file.
+///
+/// Every test here measures `/proc/self/fd`, which counts descriptors for the
+/// whole PROCESS. `cargo test` runs the tests of one binary on parallel
+/// threads, so without this they observe each other's executors and each
+/// other's descriptors, and fail on counts that have nothing to do with the
+/// leak under test.
+///
+/// Under `cargo nextest`, which gives each test its own process, the lock is
+/// uncontended and the isolation is real rather than borrowed -- so this is
+/// correct under both runners.
+static FD_COUNTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes the lock, ignoring poisoning: a panicking test has already failed and
+/// its report is what matters, not a second failure in every test after it.
+fn serialised() -> std::sync::MutexGuard<'static, ()> {
+    FD_COUNTING.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn test_spsc_cycle(capacity: usize, runs: u32) {
     let (sender, receiver) = shared_channel::new_bounded(capacity);
 
@@ -61,6 +80,7 @@ fn test_spsc_cycle(capacity: usize, runs: u32) {
 
 #[test]
 fn test_no_eventfd_leak_on_executor_drop() {
+    let _guard = serialised();
     let initial_fds = count_open_fds();
     println!("Initial FD count: {}", initial_fds);
 
@@ -106,6 +126,7 @@ fn test_no_eventfd_leak_on_executor_drop() {
 
 #[test]
 fn test_rapid_executor_creation() {
+    let _guard = serialised();
     let initial_fds = count_open_fds();
     println!("Initial FD count: {}", initial_fds);
 
@@ -137,6 +158,7 @@ fn test_rapid_executor_creation() {
 // This test requires spawn_local (unsafe detached spawn)
 #[test]
 fn test_executor_with_tasks() {
+    let _guard = serialised();
     let initial_fds = count_open_fds();
 
     // Create executors that spawn tasks
