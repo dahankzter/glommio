@@ -21,6 +21,11 @@ NG_BLURB="Stopgap republish of the community glommio fork (github.com/glommio/gl
 
 MODE="${1:-package}"
 
+# The republish carries its own patch number: fixes can ship to crates.io
+# consumers without moving the version this fork presents upstream, which
+# tracks glommio/glommio.
+NG_VERSION="${NG_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' glommio/Cargo.toml | head -1)}"
+
 restore() {
   git checkout -- glommio/Cargo.toml examples/Cargo.toml README.md 2>/dev/null || true
   rm -f glommio/README.md
@@ -28,13 +33,14 @@ restore() {
 trap restore EXIT
 
 # --- glommio/Cargo.toml -------------------------------------------------
-python3 - "$NG_NAME" "$NG_REPO" "$NG_BLURB" <<'PY'
+python3 - "$NG_NAME" "$NG_REPO" "$NG_BLURB" "$NG_VERSION" <<'PY'
 import re, sys
-name, repo, blurb = sys.argv[1:4]
+name, repo, blurb, version = sys.argv[1:5]
 p = "glommio/Cargo.toml"
 s = open(p).read()
 
 s = re.sub(r'(?m)^name = "glommio"$', f'name = "{name}"', s, count=1)
+s = re.sub(r'(?m)^version = ".*"$', f'version = "{version}"', s, count=1)
 s = re.sub(r'(?m)^readme = .*$', 'readme = "README.md"', s, count=1)
 s = re.sub(r'(?m)^repository = .*$', f'repository = "{repo}"', s, count=1)
 s = re.sub(r'(?m)^homepage = .*$', f'homepage = "{repo}"', s, count=1)
@@ -79,10 +85,10 @@ s = open("README.md").read()
 open("glommio/README.md", "w").write(notice + s)
 PY
 
-echo "== cargo package =="
+echo "== cargo package: $NG_NAME $NG_VERSION =="
 cargo package -p glommio-ng --allow-dirty
 
-TARBALL="target/package/glommio-ng-0.10.0.crate"
+TARBALL="target/package/$NG_NAME-$NG_VERSION.crate"
 echo
 echo "== tarball =="
 ls -lh "$TARBALL"
