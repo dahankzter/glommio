@@ -79,11 +79,11 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-/// Starts counting. Paired with [`report`], which stops and divides.
 thread_local! {
     static STARTED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
 
+/// Starts counting. Paired with [`report`], which stops and divides.
 fn arm() {
     STARTED.with(|s| s.set(Some(std::time::Instant::now())));
     ALLOCS.store(0, Ordering::Relaxed);
