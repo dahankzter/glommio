@@ -68,6 +68,7 @@ pub mod spsc_queue;
 /// [`next`]: https://docs.rs/futures-lite/2.6.0/futures_lite/stream/trait.StreamExt.html#method.next
 /// [`StreamExt`]: https://docs.rs/futures-lite/2.6.0/futures_lite/stream/trait.StreamExt.html
 pub mod local_channel;
+pub mod oneshot;
 
 /// Allow data to be transmitted across two tasks in different executors.
 ///
