@@ -133,11 +133,25 @@ PY
 
 # glommio-ng-macros has no unpublished dependencies and must publish first;
 # glommio-ng depends on it and cannot verify until it is on crates.io.
+# The macro crate goes first everywhere below, and not only in the publish
+# step: until it exists on crates.io at this version, the main crate cannot
+# even be packaged, because packaging resolves the published dependency rather
+# than the path one. So `--publish` publishes the macro crate before the main
+# crate is packaged at all, and `--dry-run` cannot fully verify the main crate
+# until a real publish of the macro crate has happened.
 echo "== cargo package: $NG_NAME-macros $NG_VERSION =="
 cargo package -p "$NG_NAME-macros" --allow-dirty
 
+if [ "$MODE" = "--publish" ]; then
+  echo "== cargo publish: $NG_NAME-macros $NG_VERSION =="
+  cargo publish -p "$NG_NAME-macros" --allow-dirty
+elif [ "$MODE" = "--dry-run" ]; then
+  echo "== cargo publish --dry-run: $NG_NAME-macros =="
+  cargo publish -p "$NG_NAME-macros" --allow-dirty --dry-run
+fi
+
 echo "== cargo package: $NG_NAME $NG_VERSION =="
-cargo package -p glommio-ng --allow-dirty
+cargo package -p "$NG_NAME" --allow-dirty
 
 TARBALL="target/package/$NG_NAME-$NG_VERSION.crate"
 echo
@@ -146,13 +160,9 @@ ls -lh "$TARBALL"
 echo "files: $(tar tzf "$TARBALL" | wc -l)"
 
 if [ "$MODE" = "--dry-run" ]; then
-  echo "== cargo publish --dry-run: $NG_NAME-macros =="
-  cargo publish -p "$NG_NAME-macros" --allow-dirty --dry-run
   echo "== cargo publish --dry-run: $NG_NAME =="
-  cargo publish -p glommio-ng --allow-dirty --dry-run
+  cargo publish -p "$NG_NAME" --allow-dirty --dry-run
 elif [ "$MODE" = "--publish" ]; then
-  echo "== cargo publish: $NG_NAME-macros $NG_VERSION =="
-  cargo publish -p "$NG_NAME-macros" --allow-dirty
   echo "== cargo publish: $NG_NAME $NG_VERSION =="
   cargo publish -p "$NG_NAME" --allow-dirty
 fi
