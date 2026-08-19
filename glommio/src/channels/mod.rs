@@ -10,6 +10,7 @@
 /// to efficiently communicate.
 pub mod spsc_queue;
 
+pub mod broadcast;
 /// Allow data to be transmitted across two tasks in the same shard.
 ///
 /// Asynchronous code is rarely useful if it is serialized. In practice,
