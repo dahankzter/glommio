@@ -25,15 +25,21 @@
 //!    itself await. Several tasks reaching it during initialisation wait for
 //!    the first rather than each running their own.
 //!
-//! 4. RwLock - Implementation of read-write lock optimized for single-thread
+//! 4. CancellationToken - Hierarchical cancellation for task trees on one
+//!    executor. Cancelling a token cancels every token derived from it, never
+//!    upwards. It is `!Send`, so cross-shard shutdown is one root token per
+//!    executor rather than one token shared between them.
+//!
+//! 5. RwLock - Implementation of read-write lock optimized for single-thread
 //!    bounded executor. All methods of RwLock have the same meaning as the methods
 //!    of [`std::sync::RwLock`]. With exception that RwLock can not be poisoned but
 //!    can be closed.
 
+mod cancellation_token;
 mod gate;
 mod mutex;
 mod once_cell;
 mod rwlock;
 mod semaphore;
 
-pub use self::{gate::*, mutex::*, once_cell::*, rwlock::*, semaphore::*};
+pub use self::{cancellation_token::*, gate::*, mutex::*, once_cell::*, rwlock::*, semaphore::*};
