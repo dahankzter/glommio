@@ -89,6 +89,81 @@ pub struct ConnectedSender<T: Send + Sized> {
     notifier: Arc<SleepNotifier>,
 }
 
+/// A sender usable from a thread with no executor.
+///
+/// Minted by [`ConnectedSender::into_foreign`] on the executor that connected
+/// the channel, and then moved anywhere: sending is a lock-free push followed
+/// by a write to the peer's eventfd, neither of which needs a reactor of its
+/// own. The handle outlives the executor that minted it.
+///
+/// Deliberately **not** [`Clone`]. The buffer underneath is strictly
+/// single-producer, so two threads holding handles to it would corrupt the
+/// heap -- the bug this crate's [`spsc_queue`](super::spsc_queue) fix exists
+/// to prevent. If you need several foreign producers, give each its own
+/// channel, or put a lock in front of one handle.
+///
+/// Only [`try_send`](Self::try_send) is offered. The awaiting
+/// [`ConnectedSender::send`] depends on a free-space callback registered with
+/// the local reactor, and a thread with no executor has nothing to register.
+pub struct ForeignSender<T: Send + Sized> {
+    state: Arc<SenderState<T>>,
+    notifier: Arc<SleepNotifier>,
+}
+
+impl<T: Send + Sized> fmt::Debug for ForeignSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ForeignSender {{ .. }}")
+    }
+}
+
+impl<T: Send + Sized> ForeignSender<T> {
+    /// Sends a value, failing rather than waiting if the channel is full.
+    ///
+    /// # Errors
+    ///
+    /// [`GlommioError::Closed`] if the receiver is gone, or
+    /// [`GlommioError::WouldBlock`] if the channel is full. Either way the
+    /// value is handed back inside the error.
+    pub fn try_send(&self, item: T) -> Result<(), T> {
+        if self.state.buffer.consumer_disconnected()
+            || self.state.buffer.buffer.producer_disconnected()
+        {
+            return Err(GlommioError::Closed(ResourceType::Channel(item)));
+        }
+
+        match self.state.buffer.try_push(item) {
+            None => {
+                self.notifier.notify(false);
+                Ok(())
+            }
+            Some(item) => {
+                if self.state.buffer.consumer_disconnected()
+                    || self.state.buffer.buffer.producer_disconnected()
+                {
+                    Err(GlommioError::Closed(ResourceType::Channel(item)))
+                } else {
+                    Err(GlommioError::WouldBlock(ResourceType::Channel(item)))
+                }
+            }
+        }
+    }
+
+    /// How many values the channel can still take before it is full.
+    pub fn free_space(&self) -> usize {
+        self.state.buffer.free_space()
+    }
+}
+
+impl<T: Send + Sized> Drop for ForeignSender<T> {
+    fn drop(&mut self) {
+        // No reactor registration to remove: `into_foreign` did that on the
+        // executor that had one. All that remains is to tell the peer.
+        if !self.state.buffer.disconnect() {
+            self.notifier.notify(false);
+        }
+    }
+}
+
 impl<T: Send + Sized> fmt::Debug for ConnectedReceiver<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Connected Receiver {}: {:?}", self.id, self.state.buffer)
@@ -468,6 +543,59 @@ impl<T: Send + Sized> Drop for ConnectedReceiver<T> {
                 r.unregister_shared_channel(self.id);
             }
         }
+    }
+}
+
+impl<T: Send + Sized> ConnectedSender<T> {
+    /// Converts this sender into one usable from a thread with no executor.
+    ///
+    /// The awaiting [`send`](Self::send) is given up in the process: see
+    /// [`ForeignSender`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::{channels::shared_channel, prelude::*};
+    ///
+    /// let (sender, receiver) = shared_channel::new_bounded(1);
+    /// let producer = LocalExecutorBuilder::default()
+    ///     .spawn(move || async move {
+    ///         let foreign = sender.connect().await.into_foreign();
+    ///         std::thread::spawn(move || foreign.try_send(1).unwrap())
+    ///             .join()
+    ///             .unwrap();
+    ///     })
+    ///     .unwrap();
+    ///
+    /// let consumer = LocalExecutorBuilder::default()
+    ///     .spawn(move || async move {
+    ///         let receiver = receiver.connect().await;
+    ///         assert_eq!(receiver.recv().await.unwrap(), 1);
+    ///     })
+    ///     .unwrap();
+    ///
+    /// producer.join().unwrap();
+    /// consumer.join().unwrap();
+    /// ```
+    pub fn into_foreign(self) -> ForeignSender<T> {
+        // The local reactor tracked this channel's free space so it could
+        // decide whether to sleep. Nothing on this executor will send again,
+        // so that registration goes now rather than at drop -- which is also
+        // the last moment a reactor is in reach.
+        if let Some(reactor) = self.reactor.upgrade() {
+            reactor.unregister_shared_channel(self.id);
+        }
+
+        let foreign = ForeignSender {
+            state: self.state.clone(),
+            notifier: self.notifier.clone(),
+        };
+
+        // `ConnectedSender::drop` disconnects the buffer, which would close
+        // the channel we are handing on.
+        std::mem::forget(self);
+
+        foreign
     }
 }
 
@@ -1001,5 +1129,179 @@ mod test {
 
         ex1.join().unwrap();
         ex2.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod foreign_tests {
+    use super::*;
+    use crate::{LocalExecutorBuilder, Placement};
+    use futures_lite::StreamExt;
+
+    #[test]
+    fn a_foreign_thread_can_send_into_an_executor() {
+        let (sender, receiver) = new_bounded(16);
+
+        let consumer = LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let mut receiver = receiver.connect().await;
+                let mut seen = Vec::new();
+                while let Some(value) = receiver.next().await {
+                    seen.push(value);
+                }
+                seen
+            })
+            .unwrap();
+
+        // The handle is minted inside an executor and then leaves it: this
+        // channel carries it back out to the test thread.
+        let (handoff, collect) = std::sync::mpsc::channel();
+        let producer = LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let sender = sender.connect().await;
+                handoff.send(sender.into_foreign()).unwrap();
+            })
+            .unwrap();
+
+        let foreign = collect.recv().unwrap();
+        // The executor that minted the handle is gone by now, which is the
+        // point: the handle depends on the peer's notifier, not its own.
+        producer.join().unwrap();
+
+        for value in 1..=3u32 {
+            foreign.try_send(value).unwrap();
+        }
+        drop(foreign);
+
+        assert_eq!(consumer.join().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_parked_executor_is_woken_by_a_foreign_send() {
+        let (sender, receiver) = new_bounded(4);
+
+        let consumer = LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let mut receiver = receiver.connect().await;
+                let value = receiver.next().await;
+                (value, std::time::Instant::now())
+            })
+            .unwrap();
+
+        let (handoff, collect) = std::sync::mpsc::channel();
+        LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let sender = sender.connect().await;
+                handoff.send(sender.into_foreign()).unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let foreign = collect.recv().unwrap();
+
+        // Long enough that the consumer has run out of work and parked in the
+        // kernel. Waking it is the eventfd's job, and nothing else will do it.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let sent_at = std::time::Instant::now();
+        foreign.try_send(1u32).unwrap();
+
+        let (value, received_at) = consumer.join().unwrap();
+        assert_eq!(value, Some(1));
+        let delay = received_at.duration_since(sent_at);
+        assert!(
+            delay < std::time::Duration::from_millis(100),
+            "a parked executor took {delay:?} to see a foreign send: it was not woken, \
+             it noticed on its own schedule"
+        );
+    }
+
+    #[test]
+    fn a_full_channel_hands_the_value_back() {
+        let (sender, receiver) = new_bounded(1);
+
+        let (handoff, collect) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let consumer = LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let mut receiver = receiver.connect().await;
+                // Hold the channel full until the test says otherwise.
+                wait.recv().unwrap();
+                let mut seen = Vec::new();
+                while let Some(value) = receiver.next().await {
+                    seen.push(value);
+                }
+                seen
+            })
+            .unwrap();
+
+        LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let sender = sender.connect().await;
+                handoff.send(sender.into_foreign()).unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let foreign = collect.recv().unwrap();
+        foreign.try_send(1u32).unwrap();
+
+        // Capacity is one and nothing has been consumed yet.
+        let mut rejected = None;
+        for _ in 0..100 {
+            if let Err(GlommioError::Closed(ResourceType::Channel(value)))
+            | Err(GlommioError::WouldBlock(ResourceType::Channel(value))) =
+                foreign.try_send(2u32)
+            {
+                rejected = Some(value);
+                break;
+            }
+        }
+        assert_eq!(
+            rejected,
+            Some(2),
+            "a full channel should hand the value back"
+        );
+
+        release.send(()).unwrap();
+        drop(foreign);
+        assert!(!consumer.join().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dropping_the_foreign_sender_closes_the_channel() {
+        let (sender, receiver) = new_bounded(4);
+
+        let consumer = LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let mut receiver = receiver.connect().await;
+                let mut count = 0;
+                while receiver.next().await.is_some() {
+                    count += 1;
+                }
+                count
+            })
+            .unwrap();
+
+        let (handoff, collect) = std::sync::mpsc::channel();
+        LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let sender = sender.connect().await;
+                handoff.send(sender.into_foreign()).unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let foreign = collect.recv().unwrap();
+        foreign.try_send(1u32).unwrap();
+        drop(foreign);
+
+        assert_eq!(
+            consumer.join().unwrap(),
+            1,
+            "the receiver should finish once the foreign sender is gone"
+        );
     }
 }
