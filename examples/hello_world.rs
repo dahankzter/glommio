@@ -19,27 +19,19 @@ async fn hello() {
     join_all(tasks).await;
 }
 
-fn main() -> Result<()> {
-    // There are two ways to create an executor, demonstrated in this example.
-    //
-    // We can create it in the current thread, and run it separately later...
-    let ex = LocalExecutorBuilder::new(Placement::Fixed(0)).make()?;
+// The shortest way to start an executor. Everything below shows what this
+// expands to, and when you would want to write it out by hand instead.
+#[glommio::main(placement = Fixed(0))]
+async fn main() -> Result<()> {
+    hello().await;
 
-    // Or we can spawn a new thread with an executor inside.
+    // You can still build executors by hand inside an annotated main --
+    // spawning one on another thread, for instance.
     let builder = LocalExecutorBuilder::new(Placement::Fixed(1));
     let handle = builder.name("hello").spawn(|| async move {
         hello().await;
     })?;
-
-    // If you create the executor manually, you have to run it like so.
-    //
-    // spawn_new() is the preferred way to create an executor!
-    ex.run(async move {
-        hello().await;
-    });
-
-    // The newly spawned executor runs on a thread, so we need to join on
-    // its handle so we can wait for it to finish
     handle.join().unwrap();
+
     Ok(())
 }

@@ -244,6 +244,43 @@
 //! are reported by name when an executor fails to build.
 //!
 //!
+//! ## Attribute macros
+//!
+//! `#[glommio::main]` and `#[glommio::test]` build the executor for you:
+//!
+//! ```no_run
+//! #[glommio::main(placement = Fixed(0))]
+//! async fn main() {
+//!     glommio::spawn_local(async { println!("hello") }).await;
+//! }
+//! ```
+//!
+//! Both accept `placement = <Placement variant>` and `name = "…"`. Anything
+//! else the executor offers stays on [`LocalExecutorBuilder`], which remains
+//! available inside an annotated function.
+//!
+//! `placement` takes a variant — `Unbound`, `Fixed(0)`, `Fenced(cpus)` — not
+//! an arbitrary expression. Build the executor by hand if you need a computed
+//! placement.
+//!
+//! Both are available under the default `macros` feature. Turning it off
+//! means the `glommio-macros` crate is not a dependency and not compiled.
+//!
+//! If you depend on this crate under a name other than `glommio`, the
+//! attribute path itself has to change too, since `glommio::main` no longer
+//! resolves for you either. Given
+//!
+//! ```toml
+//! glommio = { package = "glommio-ng", version = "0.10" }
+//! ```
+//!
+//! write `#[glommio_ng::main(crate = glommio_ng)]`, not `#[glommio::main(…)]`.
+//!
+//! `use glommio::*;` brings `test` into scope alongside the standard
+//! library's `#[test]` attribute, and the glob import shadows the built-in.
+//! Import `main` and `test` by name instead, or write `#[glommio::test]`, to
+//! keep the built-in `#[test]` available.
+//!
 //! ## Examples
 //!
 //! Connect to `example.com:80`, or time out after 10 seconds:
@@ -471,6 +508,10 @@ use std::{
     iter::Sum,
     time::Duration,
 };
+
+#[cfg(feature = "macros")]
+#[doc(inline)]
+pub use glommio_macros::{main, test};
 
 /// Provides common imports that almost all Glommio applications will need
 pub mod prelude {
@@ -743,6 +784,11 @@ impl IoStats {
 #[cfg(test)]
 pub(crate) mod test_utils {
     use super::*;
+    // `super::*` also brings in our `#[glommio::test]` attribute macro
+    // (re-exported when the `macros` feature is on), which shadows the
+    // built-in `#[test]` attribute and makes it ambiguous below. Import the
+    // built-in explicitly so `#[test]` in this module is unambiguous.
+    use core::prelude::v1::test;
     use nix::sys::statfs::*;
     use std::path::{Path, PathBuf};
     use tracing::{debug, error, info, trace, warn};

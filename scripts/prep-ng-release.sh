@@ -27,7 +27,8 @@ MODE="${1:-package}"
 NG_VERSION="${NG_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' glommio/Cargo.toml | head -1)}"
 
 restore() {
-  git checkout -- glommio/Cargo.toml examples/Cargo.toml README.md 2>/dev/null || true
+  git checkout -- glommio/Cargo.toml examples/Cargo.toml README.md \
+    glommio-macros/Cargo.toml 2>/dev/null || true
   rm -f glommio/README.md
 }
 trap restore EXIT
@@ -35,16 +36,24 @@ trap restore EXIT
 # --- glommio/Cargo.toml -------------------------------------------------
 python3 - "$NG_NAME" "$NG_REPO" "$NG_BLURB" "$NG_VERSION" <<'PY'
 import re, sys
+
+def sub1(pattern, repl, s, what):
+    new_s, n = re.subn(pattern, repl, s, count=1)
+    if n == 0:
+        print(f"prep-ng-release: substitution failed, no match: {what}", file=sys.stderr)
+        raise SystemExit(1)
+    return new_s
+
 name, repo, blurb, version = sys.argv[1:5]
 p = "glommio/Cargo.toml"
 s = open(p).read()
 
-s = re.sub(r'(?m)^name = "glommio"$', f'name = "{name}"', s, count=1)
-s = re.sub(r'(?m)^version = ".*"$', f'version = "{version}"', s, count=1)
-s = re.sub(r'(?m)^readme = .*$', 'readme = "README.md"', s, count=1)
-s = re.sub(r'(?m)^repository = .*$', f'repository = "{repo}"', s, count=1)
-s = re.sub(r'(?m)^homepage = .*$', f'homepage = "{repo}"', s, count=1)
-s = re.sub(r'(?m)^description = "', f'description = "{blurb}', s, count=1)
+s = sub1(r'(?m)^name = "glommio"$', f'name = "{name}"', s, "glommio/Cargo.toml name rename")
+s = sub1(r'(?m)^version = ".*"$', f'version = "{version}"', s, "glommio/Cargo.toml version rewrite")
+s = sub1(r'(?m)^readme = .*$', 'readme = "README.md"', s, "glommio/Cargo.toml readme rewrite")
+s = sub1(r'(?m)^repository = .*$', f'repository = "{repo}"', s, "glommio/Cargo.toml repository rewrite")
+s = sub1(r'(?m)^homepage = .*$', f'homepage = "{repo}"', s, "glommio/Cargo.toml homepage rewrite")
+s = sub1(r'(?m)^description = "', f'description = "{blurb}', s, "glommio/Cargo.toml description rewrite")
 
 # No [lib] rename: consumers get `use glommio::...` via cargo's own
 # `package = "glommio-ng"` renaming, and a duplicate lib name would only make
@@ -54,8 +63,45 @@ open(p, "w").write(s)
 # --- examples/Cargo.toml: path dep must follow the rename ---------------
 p = "examples/Cargo.toml"
 s = open(p).read()
-s = s.replace('glommio        = { path = "../glommio" }',
-              f'glommio        = {{ path = "../glommio", package = "{name}" }}')
+old = 'glommio        = { path = "../glommio" }'
+new = f'glommio        = {{ path = "../glommio", package = "{name}" }}'
+if old not in s:
+    print("prep-ng-release: substitution failed, no match: examples/Cargo.toml path dep rewrite", file=sys.stderr)
+    raise SystemExit(1)
+s = s.replace(old, new)
+open(p, "w").write(s)
+PY
+
+# --- glommio-macros: its own name, and the dependency that points at it ----
+python3 - "$NG_NAME" "$NG_VERSION" <<'PY'
+import re, sys
+
+def sub1(pattern, repl, s, what):
+    new_s, n = re.subn(pattern, repl, s, count=1)
+    if n == 0:
+        print(f"prep-ng-release: substitution failed, no match: {what}", file=sys.stderr)
+        raise SystemExit(1)
+    return new_s
+
+name, version = sys.argv[1:3]
+
+p = "glommio-macros/Cargo.toml"
+s = open(p).read()
+s = sub1(r'(?m)^name = "glommio-macros"$', f'name = "{name}-macros"', s,
+          "glommio-macros/Cargo.toml name rename")
+s = sub1(r'(?m)^version = ".*"$', f'version = "{version}"', s,
+          "glommio-macros/Cargo.toml version rewrite")
+open(p, "w").write(s)
+
+p = "glommio/Cargo.toml"
+s = open(p).read()
+s = sub1(
+    r'(?m)^glommio-macros(\s*)= \{ version = "[^"]*", path = "\.\./glommio-macros"',
+    f'glommio-macros\\1= {{ version = "{version}", package = "{name}-macros", '
+    f'path = "../glommio-macros"',
+    s,
+    "glommio/Cargo.toml glommio-macros dependency rewrite",
+)
 open(p, "w").write(s)
 PY
 
@@ -85,6 +131,11 @@ s = open("README.md").read()
 open("glommio/README.md", "w").write(notice + s)
 PY
 
+# glommio-ng-macros has no unpublished dependencies and must publish first;
+# glommio-ng depends on it and cannot verify until it is on crates.io.
+echo "== cargo package: $NG_NAME-macros $NG_VERSION =="
+cargo package -p "$NG_NAME-macros" --allow-dirty
+
 echo "== cargo package: $NG_NAME $NG_VERSION =="
 cargo package -p glommio-ng --allow-dirty
 
@@ -95,9 +146,13 @@ ls -lh "$TARBALL"
 echo "files: $(tar tzf "$TARBALL" | wc -l)"
 
 if [ "$MODE" = "--dry-run" ]; then
-  echo "== cargo publish --dry-run =="
+  echo "== cargo publish --dry-run: $NG_NAME-macros =="
+  cargo publish -p "$NG_NAME-macros" --allow-dirty --dry-run
+  echo "== cargo publish --dry-run: $NG_NAME =="
   cargo publish -p glommio-ng --allow-dirty --dry-run
 elif [ "$MODE" = "--publish" ]; then
-  echo "== cargo publish =="
-  cargo publish -p glommio-ng --allow-dirty
+  echo "== cargo publish: $NG_NAME-macros $NG_VERSION =="
+  cargo publish -p "$NG_NAME-macros" --allow-dirty
+  echo "== cargo publish: $NG_NAME $NG_VERSION =="
+  cargo publish -p "$NG_NAME" --allow-dirty
 fi

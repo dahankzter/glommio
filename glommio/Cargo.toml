@@ -18,8 +18,10 @@ version = "0.10.0"
 rust-version = "1.92"
 
 [features]
+default   = ["macros"]
 bench     = []
 debugging = []
+macros    = ["dep:glommio-macros"]
 
 # Unstable features based on nightly
 native-tls = []
@@ -37,6 +39,7 @@ crossbeam             = "0.8"
 enclose               = "1.2"
 flume                 = { version = "0.12", features = ["async"] }
 futures-lite          = "2.6"
+glommio-macros        = { version = "0.10.0", path = "../glommio-macros", optional = true }
 intrusive-collections = "0.10"
 io-uring              = "0.7.14"
 lazy_static           = "1.5"

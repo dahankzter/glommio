@@ -33,6 +33,31 @@ LocalExecutorBuilder::default().spawn(|| async move {
 .join();
 ```
 
+### Attribute macros
+
+```rust
+#[glommio::main(placement = Fixed(0))]
+async fn main() {
+    glommio::spawn_local(async { println!("hello") }).await;
+}
+
+#[glommio::test]
+async fn it_works() {
+    assert_eq!(glommio::spawn_local(async { 2 + 2 }).await, 4);
+}
+```
+
+Both take `placement` and `name`; everything else lives on
+`LocalExecutorBuilder`. Turning off the default `macros` feature means the
+`glommio-macros` crate is not a dependency and not compiled.
+
+If you depend on this crate under another name, e.g.
+`glommio = { package = "glommio-ng", version = "0.10" }`, the attribute path
+changes along with it: write `#[glommio_ng::main(crate = glommio_ng)]`, not
+`#[glommio::main(…)]`. And `use glommio::*;` shadows the standard library's
+`#[test]` with this crate's — import `main`/`test` by name, or write
+`#[glommio::test]`, to keep both available.
+
 For more details check out our [docs page](https://docs.rs/glommio/latest/glommio/) and
 an [introductory article.](https://www.datadoghq.com/blog/engineering/introducing-glommio/)
 
