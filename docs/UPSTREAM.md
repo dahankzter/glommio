@@ -243,6 +243,43 @@ recreating today's queue of six.
   not a code review, and no amount of test coverage makes it for them. The
   branch is ready (`upstream/macros-proposal`) if they say yes.
 
+### The series
+
+Numbered in the order they should be offered. The number is the order, **not
+permission to open them all** — the two-at-a-time rule below still holds.
+
+Branches are `upstream/NN-name`, cut from `upstream/main`, pushed to the
+`fork` remote (`dahankzter/glommio-community`), PR'd against `glommio/glommio`
+`main`.
+
+| # | Title | Contains | Apply after | Size | What a reviewer must decide |
+|---|---|---|---|---|---|
+| 1 | fix: don't hang the caller when a `spawn_blocking` closure panics | `dcab422`, tests re-homed | — | ~40 | Nothing. It is a bug fix that deletes `unsafe` |
+| 2 | fix: report why a kernel cannot run glommio instead of exiting | rewrite of `cd7c9d3` against their `iou` probe | — | ~150 | Nothing, once rewritten. A library should not `exit(1)` on its caller |
+| 3 | feat: add `spawn_blocking_send` | `61bb142` | 1 (shares a test module) | ~230 | Whether the pool should hand back a `Send` future at all |
+| 4 | feat: add an async `Mutex` | `133a565`, incl. `Semaphore::is_closed` | — | ~260 | Whether `lock()` returns `Result`, as their `RwLock` does |
+| 5 | feat: add `sync::OnceCell` | split from `b67355f` | 4 (`sync/mod.rs`) | ~250 | Nothing beyond wanting it |
+| 6 | feat: add `channels::oneshot` | `c362fb0` | — | ~230 | Nothing beyond wanting it |
+| 7 | feat: add `channels::watch` | split from `b67355f` | 6 (`channels/mod.rs`) | ~350 | Nothing beyond wanting it |
+| 8 | feat: add `channels::broadcast` | `f86bb8a` + its design doc | 7 (`channels/mod.rs`) | ~480 | The semantics. Mirrors tokio deliberately; `recv` returns a bespoke `RecvError` because `Lagged` is neither closed nor would-block |
+| 9 | feat: add `future::timeout` | split from `8a867b9` | — | ~120 | **The naming.** By the `try_` convention the general form should own `timeout` and theirs should become `try_timeout`. We split by module to avoid breaking their callers; the rename is theirs to take at a breaking release |
+| 10 | feat: add `timer::Interval` and `MissedTickBehavior` | split from `8a867b9` | 9 (`timer/mod.rs`) | ~400 | Whether all three missed-tick behaviours are wanted. Rebase risk if #33 lands first |
+| 11 | feat: add a hierarchical `CancellationToken` | `5bf58cd` | 5 (`sync/mod.rs`) | ~350 | **The scope argument.** `!Send` means it cannot carry a cross-shard shutdown; a maintainer may want the `Send` one instead |
+| 12 | feat: send to a shared channel from a thread with no executor | `986213e` | — | ~300 | That the handle is deliberately not `Clone`, because the buffer is strictly single-producer |
+| 13 | test: stop the eventfd leak tests racing each other | idea from `eff2c49`, rewritten | — | ~30 | Nothing. Their tests count process-wide descriptors in parallel |
+| 14 | refactor: delete the vendored `liburing` and the C it fed | `322fb8d` | **#35 merged** | −3.2 MB | Nothing, once #35 is in. Nothing references the C symbols after it |
+| 15 | `#[glommio::main]` / `#[glommio::test]` | `upstream/macros-proposal` | **an issue first** | ~900 | Whether to publish and maintain a second crate on crates.io. A policy decision, not a review |
+
+**1, 2, 6, 9, 12 and 13 depend on nothing** and can be offered in any order.
+The "apply after" column is almost entirely about two branches appending to the
+same `mod` / `pub use` list; merged out of order, each costs a two-line rebase
+and nothing more.
+
+**Start with 1 and 2.** Both are bug fixes, neither asks for a design decision,
+and 2 is the one that stops a library from calling `exit(1)` on its caller's
+process. If those land, the pipeline works and the rest is worth queueing. If
+they sit, nothing else would have fared better.
+
 ### Verified porting mechanics
 
 Every row below was tested by cherry-picking onto `upstream/main` on
