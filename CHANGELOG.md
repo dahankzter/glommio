@@ -15,6 +15,21 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.8 — 2026-08-20
+
+### Fixed
+
+- **The crate did not compile for musl targets.** `libc` does not define
+  `AT_STATX_SYNC_AS_STAT` there; it is `0` in the kernel UAPI and is now
+  spelled out, so both libcs take the same path. Verified by building and
+  running on Alpine: with the C removal in 0.10.6, glommio itself needs no C
+  toolchain, so `musl-dev` is required only for the linker that any Rust build
+  script needs.
+- Two paths that only `--all-features` compiles: `schedule_runnable` gated its
+  raw-pointer access on the `native-tls` feature without the `nightly` cfg, and
+  `task::debugging` compared the header's `u32` executor id against a `usize`
+  accessor. Neither affects a default build.
+
 ## 0.10.7 — 2026-08-20
 
 ### Fixed
