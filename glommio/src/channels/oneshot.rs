@@ -21,20 +21,22 @@
 //! });
 //! ```
 
-use crate::{error::ResourceType, GlommioError};
+use crate::{error::ResourceType, wakers::WakerList, GlommioError};
 use std::{
     cell::RefCell,
     future::Future,
     pin::Pin,
     rc::Rc,
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
 #[derive(Debug)]
 struct Inner<T> {
     value: Option<T>,
-    /// Set while the receiver is suspended, taken when it is woken.
-    waker: Option<Waker>,
+    /// Holds the receiver's waker while it is suspended. A `WakerList` rather
+    /// than an `Option<Waker>` so that taking it yields an obligation to wake
+    /// rather than a value that can be dropped on the floor.
+    waker: WakerList,
     /// Set when either half is dropped, so the survivor can tell the
     /// difference between "not yet" and "never".
     sender_gone: bool,
@@ -57,7 +59,7 @@ pub struct Receiver<T> {
 pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
     let inner = Rc::new(RefCell::new(Inner {
         value: None,
-        waker: None,
+        waker: WakerList::new(),
         sender_gone: false,
         receiver_gone: false,
     }));
@@ -85,11 +87,9 @@ impl<T> Sender<T> {
         }
 
         inner.value = Some(value);
-        let waker = inner.waker.take();
+        let pending = inner.waker.take();
         drop(inner);
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        pending.wake();
         Ok(())
     }
 
@@ -104,11 +104,9 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         inner.sender_gone = true;
-        let waker = inner.waker.take();
+        let pending = inner.waker.take();
         drop(inner);
-        if let Some(waker) = waker {
-            waker.wake();
-        }
+        pending.wake();
     }
 }
 
@@ -126,7 +124,7 @@ impl<T> Future for Receiver<T> {
             return Poll::Ready(Err(GlommioError::Closed(ResourceType::Channel(()))));
         }
 
-        inner.waker = Some(cx.waker().clone());
+        inner.waker.push(cx.waker().clone());
         Poll::Pending
     }
 }

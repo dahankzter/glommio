@@ -57,7 +57,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     sync::{Arc, Mutex},
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
     thread::{Builder, JoinHandle},
     time::{Duration, Instant},
 };
@@ -3034,7 +3034,7 @@ impl ExecutorProxy {
     {
         let shared = Arc::new(Mutex::new(BlockingSendShared::<R> {
             result: None,
-            waker: None,
+            waker: crate::wakers::WakerList::new(),
         }));
 
         let completion = shared.clone();
@@ -3043,7 +3043,7 @@ impl ExecutorProxy {
             // would take the worker with it and leave the waiter hanging.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(func));
 
-            let waker = {
+            let pending = {
                 let mut state = completion.lock().unwrap();
                 state.result = Some(outcome);
                 state.waker.take()
@@ -3051,9 +3051,7 @@ impl ExecutorProxy {
 
             // Outside the lock: a woken poller would otherwise block on it
             // immediately.
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            pending.wake();
         };
 
         // The reactor's own path -- the source, the pool's id bookkeeping, the
@@ -3077,7 +3075,9 @@ impl ExecutorProxy {
 /// [`ExecutorProxy::spawn_blocking_send`].
 struct BlockingSendShared<R> {
     result: Option<std::thread::Result<R>>,
-    waker: Option<Waker>,
+    /// A `WakerList` rather than an `Option<Waker>`: taking it hands back an
+    /// obligation to wake rather than a value that can be quietly dropped.
+    waker: crate::wakers::WakerList,
 }
 
 /// The `Send` future returned by [`ExecutorProxy::spawn_blocking_send`].
@@ -3097,7 +3097,7 @@ impl<R> Future for BlockingSend<R> {
             // rather than losing it on a pool thread.
             Some(Err(panic)) => std::panic::resume_unwind(panic),
             None => {
-                state.waker = Some(cx.waker().clone());
+                state.waker.push(cx.waker().clone());
                 Poll::Pending
             }
         }

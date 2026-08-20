@@ -21,14 +21,14 @@
 //! });
 //! ```
 
-use crate::{error::ResourceType, GlommioError};
+use crate::{error::ResourceType, wakers::WakerList, GlommioError};
 use futures_lite::Stream;
 use std::{
     cell::{Ref, RefCell},
     future::Future,
     pin::Pin,
     rc::Rc,
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
 #[derive(Debug)]
@@ -38,16 +38,16 @@ struct Inner<T> {
     /// which is what lets a slow receiver skip values instead of queueing
     /// them.
     version: u64,
-    wakers: Vec<Waker>,
+    wakers: WakerList,
     sender_gone: bool,
     receivers: usize,
 }
 
 impl<T> Inner<T> {
-    fn wake_all(&mut self) {
-        for waker in self.wakers.drain(..) {
-            waker.wake();
-        }
+    /// Takes the obligation; the caller wakes it once it has released the
+    /// borrow, so a woken poller does not immediately block on it.
+    fn take_wakers(&mut self) -> crate::wakers::PendingWakes {
+        self.wakers.take()
     }
 }
 
@@ -70,7 +70,7 @@ pub fn watch<T>(initial: T) -> (Sender<T>, Receiver<T>) {
     let inner = Rc::new(RefCell::new(Inner {
         value: initial,
         version: 0,
-        wakers: Vec::new(),
+        wakers: WakerList::new(),
         sender_gone: false,
         receivers: 1,
     }));
@@ -98,7 +98,9 @@ impl<T> Sender<T> {
 
         inner.value = value;
         inner.version += 1;
-        inner.wake_all();
+        let pending = inner.take_wakers();
+        drop(inner);
+        pending.wake();
         Ok(())
     }
 
@@ -117,7 +119,9 @@ impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut inner = self.inner.borrow_mut();
         inner.sender_gone = true;
-        inner.wake_all();
+        let pending = inner.take_wakers();
+        drop(inner);
+        pending.wake();
     }
 }
 

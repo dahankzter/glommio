@@ -35,6 +35,7 @@
 //! });
 //! ```
 
+use crate::wakers::WakerList;
 use std::{
     cell::{Cell, RefCell},
     future::Future,
@@ -44,13 +45,13 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
 #[derive(Debug, Default)]
 struct Node {
     cancelled: Cell<bool>,
-    wakers: RefCell<Vec<Waker>>,
+    wakers: RefCell<WakerList>,
     /// Weak, so a child that outlives its parent keeps working rather than
     /// keeping the parent alive.
     children: RefCell<Vec<Weak<Node>>>,
@@ -69,7 +70,7 @@ struct Node {
 #[derive(Debug, Default)]
 struct ForeignState {
     cancelled: AtomicBool,
-    wakers: Mutex<Vec<Waker>>,
+    wakers: Mutex<WakerList>,
 }
 
 impl ForeignState {
@@ -78,16 +79,10 @@ impl ForeignState {
             return;
         }
 
-        // Taken and dropped outside the lock: a woken poller would otherwise
-        // block on it immediately.
-        let woken: Vec<Waker> = {
-            let mut wakers = self.wakers.lock().unwrap();
-            std::mem::take(&mut *wakers)
-        };
-
-        for waker in woken {
-            waker.wake();
-        }
+        // Taken under the lock, woken outside it: a woken poller would
+        // otherwise block on the lock immediately.
+        let pending = self.wakers.lock().unwrap().take();
+        pending.wake();
     }
 
     fn is_cancelled(&self) -> bool {
@@ -102,9 +97,8 @@ impl Node {
             return;
         }
 
-        for waker in self.wakers.borrow_mut().drain(..) {
-            waker.wake();
-        }
+        let pending = self.wakers.borrow_mut().take();
+        pending.wake();
 
         // Children that have been dropped simply fail to upgrade, which also
         // prunes them from the list.
@@ -161,7 +155,7 @@ impl CancellationToken {
     pub fn child_token(&self) -> Self {
         let child = Rc::new(Node {
             cancelled: Cell::new(self.node.cancelled.get()),
-            wakers: RefCell::new(Vec::new()),
+            wakers: RefCell::new(WakerList::new()),
             children: RefCell::new(Vec::new()),
             foreign: RefCell::new(Vec::new()),
         });
@@ -199,7 +193,7 @@ impl CancellationToken {
     pub fn foreign_child(&self) -> ForeignCancellation {
         let state = Arc::new(ForeignState {
             cancelled: AtomicBool::new(self.node.cancelled.get()),
-            wakers: Mutex::new(Vec::new()),
+            wakers: Mutex::new(WakerList::new()),
         });
 
         if !state.is_cancelled() {

@@ -496,6 +496,7 @@ pub mod net;
 mod shares;
 pub mod sync;
 pub mod timer;
+mod wakers;
 
 use crate::reactor::Reactor;
 pub use crate::{

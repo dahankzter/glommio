@@ -31,7 +31,7 @@
 //! });
 //! ```
 
-use crate::{error::ResourceType, GlommioError};
+use crate::{error::ResourceType, wakers::WakerList, GlommioError};
 use futures_lite::Stream;
 use std::{
     cell::RefCell,
@@ -40,7 +40,7 @@ use std::{
     future::Future,
     pin::Pin,
     rc::Rc,
-    task::{Context, Poll, Waker},
+    task::{Context, Poll},
 };
 
 /// Why [`Receiver::recv`] could not produce a value.
@@ -103,16 +103,16 @@ struct Inner<T> {
     capacity: usize,
     /// The sequence the next sent value will carry.
     next_seq: u64,
-    wakers: Vec<Waker>,
+    wakers: WakerList,
     senders: usize,
     receivers: usize,
 }
 
 impl<T> Inner<T> {
-    fn wake_all(&mut self) {
-        for waker in self.wakers.drain(..) {
-            waker.wake();
-        }
+    /// Takes the obligation; the caller wakes it once it has released the
+    /// borrow, so a woken poller does not immediately block on it.
+    fn take_wakers(&mut self) -> crate::wakers::PendingWakes {
+        self.wakers.take()
     }
 
     /// The sequence of the oldest value still retained, if any.
@@ -151,7 +151,7 @@ pub fn broadcast<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
         values: VecDeque::with_capacity(capacity),
         capacity,
         next_seq: 0,
-        wakers: Vec::new(),
+        wakers: WakerList::new(),
         senders: 1,
         receivers: 1,
     }));
@@ -189,7 +189,9 @@ impl<T: Clone> Sender<T> {
         inner.values.push_back((seq, value));
 
         let reached = inner.receivers;
-        inner.wake_all();
+        let pending = inner.take_wakers();
+        drop(inner);
+        pending.wake();
         Ok(reached)
     }
 
@@ -227,7 +229,9 @@ impl<T> Drop for Sender<T> {
         let mut inner = self.inner.borrow_mut();
         inner.senders -= 1;
         if inner.senders == 0 {
-            inner.wake_all();
+            let pending = inner.take_wakers();
+            drop(inner);
+            pending.wake();
         }
     }
 }
