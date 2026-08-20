@@ -7,6 +7,11 @@ community fork that took over when `DataDog/glommio` went quiet (last commit
 2025-04-21). See [UPSTREAM.md](./UPSTREAM.md) for what of this fork's work is
 worth contributing there, and in what order.
 
+## Porting
+
+- [Porting from tokio](./PORTING_FROM_TOKIO.md) — the differences that fail
+  *silently*, organised around what compiles and then does the wrong thing.
+
 ## Start here for performance work
 
 **[What Is Left, and What It Is Worth](./PERFORMANCE_NEXT.md)** — the current
