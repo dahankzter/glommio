@@ -58,7 +58,7 @@ use std::{
     pin::Pin,
     rc::Rc,
     sync::{Arc, Mutex},
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
     thread::{Builder, JoinHandle},
     time::{Duration, Instant},
 };
@@ -2971,6 +2971,121 @@ impl ExecutorProxy {
             }
         }
     }
+
+    /// Runs a blocking closure on the thread pool, returning a future that is
+    /// itself `Send`.
+    ///
+    /// [`spawn_blocking`](Self::spawn_blocking) sends the closure and its
+    /// result across threads but hands back a future that cannot leave this
+    /// executor, because it awaits a reactor source belonging to it. This one
+    /// can leave, which is what lets a per-core caller satisfy a trait
+    /// demanding `Pin<Box<dyn Future + Send>>` -- pluggable resolvers,
+    /// connectors and HTTP services all take that shape.
+    ///
+    /// Note the asymmetry: this must be *called* on an executor, since that is
+    /// how it reaches the pool. Only the future it returns is `Send`.
+    ///
+    /// # Panics, cancellation and lifetime
+    ///
+    /// A panic inside the closure is caught and re-raised where the future is
+    /// awaited, so the caller sees what it would have seen running the closure
+    /// inline, and the pool thread survives.
+    ///
+    /// Dropping the future does not cancel the work: a blocking call cannot be
+    /// interrupted, so the closure runs to completion and its result is
+    /// dropped.
+    ///
+    /// The future does not depend on the executor that created it, and
+    /// resolves even if that executor is gone.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::LocalExecutor;
+    /// use std::{future::Future, pin::Pin};
+    ///
+    /// let ex = LocalExecutor::default();
+    /// ex.run(async {
+    ///     let handed_over: Pin<Box<dyn Future<Output = u32> + Send>> =
+    ///         Box::pin(glommio::executor().spawn_blocking_send(|| 42));
+    ///     assert_eq!(handed_over.await, 42);
+    /// });
+    /// ```
+    pub fn spawn_blocking_send<F, R>(&self, func: F) -> impl Future<Output = R> + Send
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let shared = Arc::new(Mutex::new(BlockingSendShared::<R> {
+            result: None,
+            waker: None,
+        }));
+
+        let completion = shared.clone();
+        let wrapped = move || {
+            // Caught here rather than left to unwind the pool thread, which
+            // would take the worker with it and leave the waiter hanging.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(func));
+
+            let waker = {
+                let mut state = completion.lock().unwrap();
+                state.result = Some(outcome);
+                state.waker.take()
+            };
+
+            // Outside the lock: a woken poller would otherwise block on it
+            // immediately.
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        };
+
+        // The reactor's own path -- the source, the pool's id bookkeeping, the
+        // notify back to this executor -- is left exactly as it is, and driven
+        // by this detached task. `flush` unwraps a source for every request, so
+        // there is no supported way to enqueue without one. The future below
+        // ignores all of it and completes through `shared` instead, which is
+        // what frees it from this executor.
+        crate::spawn_local(async move {
+            let source = LOCAL_EX.with(|local_ex| local_ex.reactor.run_blocking(Box::new(wrapped)));
+            let source = source.await;
+            let _ = source.collect_rw().await;
+        })
+        .detach();
+
+        BlockingSend { shared }
+    }
+}
+
+/// Result and waker shared with the pool thread by
+/// [`ExecutorProxy::spawn_blocking_send`].
+struct BlockingSendShared<R> {
+    result: Option<std::thread::Result<R>>,
+    waker: Option<Waker>,
+}
+
+/// The `Send` future returned by [`ExecutorProxy::spawn_blocking_send`].
+struct BlockingSend<R> {
+    shared: Arc<Mutex<BlockingSendShared<R>>>,
+}
+
+impl<R> Future for BlockingSend<R> {
+    type Output = R;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.shared.lock().unwrap();
+
+        match state.result.take() {
+            Some(Ok(value)) => Poll::Ready(value),
+            // Re-raised here so the caller sees the panic where it awaited,
+            // rather than losing it on a pool thread.
+            Some(Err(panic)) => std::panic::resume_unwind(panic),
+            None => {
+                state.waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4404,5 +4519,117 @@ mod test {
         #[cfg(all(nightly, feature = "native-tls"))]
 
         assert!(unsafe { LOCAL_EX.is_null() });
+    }
+}
+
+#[cfg(test)]
+mod spawn_blocking_send_test {
+    use crate::{timer::Timer, LocalExecutor, LocalExecutorBuilder, Placement};
+    use futures_lite::future::block_on;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    #[test]
+    fn a_value_comes_back_from_the_pool() {
+        LocalExecutor::default().run(async {
+            let value = crate::executor().spawn_blocking_send(|| 6 * 7).await;
+            assert_eq!(value, 42);
+        });
+    }
+
+    #[test]
+    fn the_future_satisfies_a_send_bound() {
+        LocalExecutor::default().run(async {
+            // The shape that motivated the feature: a per-core caller handing
+            // a future to someone else's `Send` trait object.
+            let boxed: Pin<Box<dyn Future<Output = u32> + Send>> =
+                Box::pin(crate::executor().spawn_blocking_send(|| 1u32));
+            assert_eq!(boxed.await, 1);
+        });
+    }
+
+    #[test]
+    fn the_work_happens_on_another_thread() {
+        LocalExecutor::default().run(async {
+            let here = std::thread::current().id();
+            let there = crate::executor()
+                .spawn_blocking_send(move || std::thread::current().id())
+                .await;
+            assert_ne!(there, here, "the closure ran inline, not on the pool");
+        });
+    }
+
+    #[test]
+    fn the_future_outlives_the_executor_that_made_it() {
+        // The property that distinguishes this from spawn_blocking: nothing in
+        // the completion path belongs to the origin reactor.
+        let (handoff, collect) = std::sync::mpsc::channel();
+
+        LocalExecutorBuilder::new(Placement::Unbound)
+            .spawn(move || async move {
+                let fut = crate::executor().spawn_blocking_send(|| {
+                    std::thread::sleep(Duration::from_millis(50));
+                    99u32
+                });
+                handoff
+                    .send(Box::pin(fut) as Pin<Box<dyn Future<Output = u32> + Send>>)
+                    .unwrap();
+                // Let the enqueue happen, then leave: the executor is torn
+                // down while the blocking work is still in flight.
+                Timer::new(Duration::from_millis(5)).await;
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let fut = collect.recv().unwrap();
+        assert_eq!(
+            block_on(fut),
+            99,
+            "the future should resolve without its origin executor"
+        );
+    }
+
+    #[test]
+    fn a_panicking_closure_unwinds_the_awaiting_side() {
+        LocalExecutor::default().run(async {
+            let outcome = std::panic::AssertUnwindSafe(
+                crate::executor().spawn_blocking_send(|| panic!("boom")),
+            );
+            let caught = futures_lite::FutureExt::catch_unwind(outcome).await;
+            assert!(caught.is_err(), "the panic should reach the awaiting side");
+
+            // And the pool still works, which is what proves the worker did
+            // not die with the closure.
+            let after: u32 = crate::executor().spawn_blocking_send(|| 5).await;
+            assert_eq!(after, 5);
+        });
+    }
+
+    #[test]
+    fn dropping_the_future_does_not_cancel_the_work() {
+        LocalExecutor::default().run(async {
+            let ran = Arc::new(AtomicBool::new(false));
+            let flag = ran.clone();
+
+            drop(crate::executor().spawn_blocking_send(move || {
+                flag.store(true, Ordering::SeqCst);
+            }));
+
+            // A blocking call cannot be interrupted, so the closure runs even
+            // though nobody is waiting for it.
+            Timer::new(Duration::from_millis(100)).await;
+            assert!(
+                ran.load(Ordering::SeqCst),
+                "the closure should still have run"
+            );
+        });
     }
 }
