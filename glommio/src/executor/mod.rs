@@ -53,8 +53,7 @@ use std::{
     future::Future,
     io,
     marker::PhantomData,
-    mem::MaybeUninit,
-    ops::{Deref, DerefMut},
+    ops::Deref,
     pin::Pin,
     rc::Rc,
     sync::{Arc, Mutex},
@@ -2941,8 +2940,16 @@ impl ExecutorProxy {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        let result = Arc::new(Mutex::new(MaybeUninit::<R>::uninit()));
-        let f_inner = enclose::enclose!((result) move || {result.lock().unwrap().write(func());});
+        // A `thread::Result` rather than the value, so a panicking closure
+        // leaves something behind. It previously wrote straight into a
+        // `MaybeUninit`, which a panic left uninitialised while the awaiting
+        // side went on to `assume_init` it -- and the panic took the pool
+        // worker with it, so that side never ran at all and simply hung.
+        let result = Arc::new(Mutex::new(None::<std::thread::Result<R>>));
+        let f_inner = enclose::enclose!((result) move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(func));
+            *result.lock().unwrap() = Some(outcome);
+        });
 
         #[cfg(any(not(nightly), not(feature = "native-tls")))]
         let waiter =
@@ -2960,14 +2967,18 @@ impl ExecutorProxy {
         async move {
             let source = waiter.await;
             assert!(source.collect_rw().await.is_ok());
-            unsafe {
-                let res_arc = Arc::try_unwrap(result).expect("leak");
-                let ret = std::mem::replace(
-                    &mut *res_arc.lock().unwrap().deref_mut(),
-                    MaybeUninit::<R>::uninit(),
-                )
-                .assume_init();
-                ret
+
+            let outcome = result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("the blocking pool completed without leaving a result");
+
+            match outcome {
+                Ok(value) => value,
+                // Re-raised where the caller awaited, which is where it would
+                // have surfaced had the closure run inline.
+                Err(panic) => std::panic::resume_unwind(panic),
             }
         }
     }
@@ -4535,6 +4546,35 @@ mod spawn_blocking_send_test {
         },
         time::Duration,
     };
+
+    #[test]
+    fn a_panicking_spawn_blocking_closure_unwinds_the_awaiting_side() {
+        LocalExecutor::default().run(async {
+            let outcome =
+                std::panic::AssertUnwindSafe(crate::executor().spawn_blocking(|| panic!("boom")));
+            let caught = futures_lite::FutureExt::catch_unwind(outcome).await;
+            assert!(
+                caught.is_err(),
+                "a panic in the closure should reach the awaiting side"
+            );
+        });
+    }
+
+    #[test]
+    fn the_pool_survives_a_panicking_spawn_blocking_closure() {
+        LocalExecutor::default().run(async {
+            for _ in 0..4 {
+                let outcome = std::panic::AssertUnwindSafe(
+                    crate::executor().spawn_blocking(|| panic!("boom")),
+                );
+                let _ = futures_lite::FutureExt::catch_unwind(outcome).await;
+            }
+
+            // Every worker would be dead by now if a panic took one with it.
+            let after: u32 = crate::executor().spawn_blocking(|| 5).await;
+            assert_eq!(after, 5);
+        });
+    }
 
     #[test]
     fn a_value_comes_back_from_the_pool() {
