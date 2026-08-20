@@ -15,6 +15,37 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.10 — 2026-08-20
+
+### Added
+
+- **Cross-core cancellation.** `CancellationToken::foreign_child()` returns a
+  `Send + Clone` handle; `ForeignCancellation::attach()` turns it back into an
+  ordinary token on the destination executor. The token itself stays `!Send`,
+  and an attached token supports `child_token()` and `cancelled()` like any
+  other, so nothing downstream of it need know another core exists.
+
+  This closes the shape a control plane on one core needs to stop work on the
+  others, which previously had no answer and pushed projects back to
+  `tokio_util`.
+
+  Two cases are settled deliberately, both drawn from a real shutdown path
+  where they sit two lines apart:
+
+  - attaching after the origin cancelled yields an already-cancelled token;
+  - attaching after the origin was **dropped** does too. Once the last origin
+    handle is gone nothing can ever cancel that state, so anything else is a
+    permanent hang.
+
+  Note the asymmetry with local tokens, which is deliberate: dropping a local
+  parent leaves its children alive and cancellable through their own handles.
+  Dropping the origin of a `ForeignCancellation` cancels everything attached
+  from it, because no handle to cancel it through survived the crossing.
+
+  Cancellation is asynchronous across the boundary: `cancel()` returns
+  immediately, and the attached token becomes cancelled once its executor polls
+  the task watching for it.
+
 ## 0.10.9 — 2026-08-20
 
 Asks from a downstream that has removed tokio's executor entirely and reported
