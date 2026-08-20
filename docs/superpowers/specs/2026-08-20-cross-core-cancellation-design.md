@@ -141,9 +141,19 @@ one executor, a `foreign_child()` moved to a second, work there observing
 - the far side is woken rather than merely eventually noticing: the executor is
   parked before the origin cancels
 
-Mutation checks: deleting the wake must hang the parked test, and removing the
-`Node::drop` rule must hang the drop-then-attach test. Both are the failure
-this exists to prevent, so both must be observable.
+Mutation checks: removing the `Node::drop` rule must fail the
+drop-then-attach test, and suppressing the wake must hang the parked test.
+
+**The second mutation has to be written carefully, and the obvious version is
+wrong.** Taking the wakers and dropping them without waking still lets the far
+executor notice, in about 350 microseconds -- because dropping a glommio
+`Waker` from a foreign thread routes through the owning executor's notifier and
+perturbs it. Only *leaking* the wakers (`mem::forget`) suppresses the wake
+entirely, and then the parked test hangs, which is the real result.
+
+Worth knowing beyond this module: an implementation that stores wakers and
+drops them without waking will appear to work while depending on incidental
+behaviour of the foreign-drop path.
 
 ## Risks
 

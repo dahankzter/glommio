@@ -40,6 +40,10 @@ use std::{
     future::Future,
     pin::Pin,
     rc::{Rc, Weak},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -50,6 +54,45 @@ struct Node {
     /// Weak, so a child that outlives its parent keeps working rather than
     /// keeping the parent alive.
     children: RefCell<Vec<Weak<Node>>>,
+    /// Held strongly. A foreign handle keeps its own `Arc`, so the state
+    /// survives this node either way; holding it here is what lets `cancel`
+    /// and `drop` reach across.
+    foreign: RefCell<Vec<Arc<ForeignState>>>,
+}
+
+/// The state a [`ForeignCancellation`] shares with the token it came from.
+///
+/// Deliberately reachable without the origin: once the last origin `Rc` is
+/// gone, nothing could ever set this flag again, so the far side must be able
+/// to read "cancelled" out of an `Arc` it owns rather than chase a reference
+/// back to something that no longer exists.
+#[derive(Debug, Default)]
+struct ForeignState {
+    cancelled: AtomicBool,
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl ForeignState {
+    fn cancel(&self) {
+        if self.cancelled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        // Taken and dropped outside the lock: a woken poller would otherwise
+        // block on it immediately.
+        let woken: Vec<Waker> = {
+            let mut wakers = self.wakers.lock().unwrap();
+            std::mem::take(&mut *wakers)
+        };
+
+        for waker in woken {
+            waker.wake();
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 impl Node {
@@ -70,6 +113,25 @@ impl Node {
             if let Some(child) = child.upgrade() {
                 child.cancel();
             }
+        }
+
+        for state in std::mem::take(&mut *self.foreign.borrow_mut()) {
+            state.cancel();
+        }
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        // Unreachable is indistinguishable from cancelled, seen from another
+        // core: no handle to cancel this token through survived the crossing,
+        // so anything still waiting on it would wait forever.
+        //
+        // Note the asymmetry with local children, which outlive a dropped
+        // parent uncancelled -- they can still be cancelled through their own
+        // handle, and a foreign one cannot.
+        for state in self.foreign.borrow().iter() {
+            state.cancel();
         }
     }
 }
@@ -99,7 +161,9 @@ impl CancellationToken {
     pub fn child_token(&self) -> Self {
         let child = Rc::new(Node {
             cancelled: Cell::new(self.node.cancelled.get()),
-            ..Node::default()
+            wakers: RefCell::new(Vec::new()),
+            children: RefCell::new(Vec::new()),
+            foreign: RefCell::new(Vec::new()),
         });
 
         if !child.cancelled.get() {
@@ -107,6 +171,42 @@ impl CancellationToken {
         }
 
         CancellationToken { node: child }
+    }
+
+    /// Creates a handle that can cross to another executor.
+    ///
+    /// The token itself is `!Send` and stays that way. This hands back
+    /// something that is `Send + Clone`, which the destination turns back into
+    /// an ordinary token with [`ForeignCancellation::attach`]. Clone it once
+    /// per task you are sending across.
+    ///
+    /// ```
+    /// use glommio::{sync::CancellationToken, LocalExecutorBuilder, Placement};
+    ///
+    /// let token = CancellationToken::new();
+    /// let remote = token.foreign_child();
+    ///
+    /// let worker = LocalExecutorBuilder::new(Placement::Unbound)
+    ///     .spawn(move || async move {
+    ///         let shutdown = remote.attach();
+    ///         shutdown.cancelled().await;
+    ///     })
+    ///     .unwrap();
+    ///
+    /// token.cancel();
+    /// worker.join().unwrap();
+    /// ```
+    pub fn foreign_child(&self) -> ForeignCancellation {
+        let state = Arc::new(ForeignState {
+            cancelled: AtomicBool::new(self.node.cancelled.get()),
+            wakers: Mutex::new(Vec::new()),
+        });
+
+        if !state.is_cancelled() {
+            self.node.foreign.borrow_mut().push(state.clone());
+        }
+
+        ForeignCancellation { state }
     }
 
     /// Cancels this token and every token derived from it.
@@ -156,11 +256,260 @@ impl Future for Cancelled<'_> {
     }
 }
 
+/// A [`CancellationToken`] handle that can be moved to another executor.
+///
+/// Obtained from [`CancellationToken::foreign_child`] and turned back into an
+/// ordinary token by [`attach`](Self::attach). Cancelling the origin cancels
+/// every token attached from this handle or its clones.
+///
+/// # Dropping the origin cancels
+///
+/// This differs from local tokens on purpose, and it matters.
+///
+/// Dropping a local parent leaves its children alive and uncancelled: they
+/// hold their own `Rc` and can still be cancelled through their own handle.
+///
+/// Dropping the *origin* of a `ForeignCancellation` cancels everything
+/// attached from it, because no handle to cancel it through survived the
+/// crossing. Unreachable and cancelled are the same thing from the far side,
+/// and the alternative is a task that waits for something that can no longer
+/// happen.
+///
+/// This is what makes the common shutdown sequence safe:
+///
+/// ```ignore
+/// if let Some(job) = running.remove(&id) {
+///     job.shutdown.cancel();
+/// }   // the origin token drops here, perhaps before a far core has attached
+/// ```
+///
+/// Attaching after either the cancel or the drop gives an already-cancelled
+/// token, never a hang.
+///
+/// # Timing
+///
+/// Cancellation is asynchronous across the boundary: `cancel()` returns
+/// immediately, and the attached token becomes cancelled once its own executor
+/// polls the task watching for it.
+#[derive(Debug, Clone)]
+pub struct ForeignCancellation {
+    state: Arc<ForeignState>,
+}
+
+impl ForeignCancellation {
+    /// Turns this handle back into an ordinary [`CancellationToken`].
+    ///
+    /// The result behaves like any other token -- [`child_token`] works,
+    /// [`cancelled`] works in a `select!` arm -- and nothing downstream of it
+    /// need know another core exists.
+    ///
+    /// Returns an already-cancelled token if the origin has cancelled, or has
+    /// been dropped. Otherwise it spawns one detached task on this executor
+    /// that waits for the origin and cancels the returned token.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside an executor, since it spawns.
+    ///
+    /// [`child_token`]: CancellationToken::child_token
+    /// [`cancelled`]: CancellationToken::cancelled
+    pub fn attach(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+
+        if self.state.is_cancelled() {
+            token.cancel();
+            return token;
+        }
+
+        let waiting = ForeignCancelled {
+            state: self.state.clone(),
+        };
+        let to_cancel = token.clone();
+
+        crate::spawn_local(async move {
+            waiting.await;
+            to_cancel.cancel();
+        })
+        .detach();
+
+        token
+    }
+
+    /// Whether the origin has cancelled, or has gone away.
+    pub fn is_cancelled(&self) -> bool {
+        self.state.is_cancelled()
+    }
+}
+
+/// Waits for a [`ForeignState`] to be cancelled. `Send`, unlike everything
+/// else here, because it is what the watching task parks on.
+struct ForeignCancelled {
+    state: Arc<ForeignState>,
+}
+
+impl Future for ForeignCancelled {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.state.is_cancelled() {
+            return Poll::Ready(());
+        }
+
+        let mut wakers = self.state.wakers.lock().unwrap();
+
+        // Re-checked under the lock: the origin may have cancelled between the
+        // read above and here, in which case nobody is left to wake us.
+        if self.state.is_cancelled() {
+            return Poll::Ready(());
+        }
+
+        wakers.push(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{timer::Timer, LocalExecutor};
     use std::{cell::RefCell, rc::Rc, time::Duration};
+
+    #[test]
+    fn cancellation_crosses_to_another_executor() {
+        // The downstream shape: a token on the control core, work on another.
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let worker = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move {
+                let local = remote.attach();
+                ready_tx.send(()).unwrap();
+                local.cancelled().await;
+                "observed"
+            })
+            .unwrap();
+
+        ready_rx.recv().unwrap();
+        token.cancel();
+
+        assert_eq!(worker.join().unwrap(), "observed");
+    }
+
+    #[test]
+    fn a_parked_executor_is_woken_by_a_foreign_cancel() {
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let worker = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move {
+                let local = remote.attach();
+                ready_tx.send(()).unwrap();
+                local.cancelled().await;
+                std::time::Instant::now()
+            })
+            .unwrap();
+
+        ready_rx.recv().unwrap();
+        // Long enough that the far executor has run out of work and parked.
+        // Waking it is the whole mechanism; nothing else will.
+        std::thread::sleep(Duration::from_millis(300));
+        let cancelled_at = std::time::Instant::now();
+        token.cancel();
+
+        let observed_at = worker.join().unwrap();
+        let delay = observed_at.duration_since(cancelled_at);
+        assert!(
+            delay < Duration::from_millis(100),
+            "a parked executor took {delay:?} to see the cancel: it was not woken"
+        );
+    }
+
+    #[test]
+    fn attaching_after_the_origin_cancelled_yields_a_cancelled_token() {
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+        token.cancel();
+
+        let worker = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move {
+                let local = remote.attach();
+                assert!(local.is_cancelled());
+                local.cancelled().await; // must not hang
+            })
+            .unwrap();
+
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn attaching_after_the_origin_was_dropped_yields_a_cancelled_token() {
+        // The production race: `remove` takes the job out of the map, `cancel`
+        // fires, and the origin drops at end of scope -- microseconds before a
+        // chain on another core attaches. Waiting forever here is a stuck node.
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+        drop(token);
+
+        let worker = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move {
+                let local = remote.attach();
+                assert!(
+                    local.is_cancelled(),
+                    "an origin that can never cancel again must read as cancelled"
+                );
+                local.cancelled().await; // must not hang
+            })
+            .unwrap();
+
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn an_attached_token_behaves_like_any_other() {
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+
+        let worker = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move {
+                let local = remote.attach();
+                // Chains derive their own scopes from the job token.
+                let grandchild = local.child_token();
+                grandchild.cancelled().await;
+                "grandchild cancelled"
+            })
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(50));
+        token.cancel();
+
+        assert_eq!(worker.join().unwrap(), "grandchild cancelled");
+    }
+
+    #[test]
+    fn one_handle_cloned_reaches_several_executors() {
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+
+        let workers: Vec<_> = (0..3)
+            .map(|_| {
+                let remote = remote.clone();
+                crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+                    .spawn(move || async move {
+                        remote.attach().cancelled().await;
+                        1u32
+                    })
+                    .unwrap()
+            })
+            .collect();
+
+        std::thread::sleep(Duration::from_millis(50));
+        token.cancel();
+
+        let total: u32 = workers.into_iter().map(|w| w.join().unwrap()).sum();
+        assert_eq!(total, 3, "every clone should have been cancelled");
+    }
 
     #[test]
     fn a_fresh_token_is_not_cancelled() {
