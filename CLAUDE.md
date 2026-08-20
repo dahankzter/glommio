@@ -680,13 +680,6 @@ limactl start
 # If issues persist, restart Lima
 ```
 
-### Git-specific
-
-**Problem:** Submodule showing as dirty
-```bash
-git config submodule.glommio/liburing.ignore dirty
-```
-
 ## Getting Help
 
 - **GitHub Issues:** https://github.com/dahankzter/glommio/issues

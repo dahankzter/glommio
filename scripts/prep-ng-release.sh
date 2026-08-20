@@ -26,9 +26,23 @@ MODE="${1:-package}"
 # tracks glommio/glommio.
 NG_VERSION="${NG_VERSION:-$(sed -n 's/^version = "\(.*\)"$/\1/p' glommio/Cargo.toml | head -1)}"
 
+# The files this script rewrites. Backed up byte for byte before anything is
+# touched, and put back on exit -- rather than `git checkout --`, which
+# restores what was last committed and so silently destroys any uncommitted
+# work in these files. That has bitten twice.
+TOUCHED=(glommio/Cargo.toml examples/Cargo.toml README.md glommio-macros/Cargo.toml)
+BACKUP="$(mktemp -d)"
+
+for file in "${TOUCHED[@]}"; do
+  mkdir -p "$BACKUP/$(dirname "$file")"
+  cp "$file" "$BACKUP/$file"
+done
+
 restore() {
-  git checkout -- glommio/Cargo.toml examples/Cargo.toml README.md \
-    glommio-macros/Cargo.toml 2>/dev/null || true
+  for file in "${TOUCHED[@]}"; do
+    cp "$BACKUP/$file" "$file" 2>/dev/null || true
+  done
+  rm -rf "$BACKUP"
   rm -f glommio/README.md
 }
 trap restore EXIT

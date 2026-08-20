@@ -126,19 +126,21 @@ one connection to four**, which is the first end-to-end evidence that glommio's
 ~2 µs per blocking I/O amortises away under realistic concurrency.
 
 ### [Replacing the Vendored `iou` / `uring_sys`](./investigations/iou-replacement/)
-**Status:** Surveyed and scoped, not attempted
-**Prize:** 35% of the fork's unsafe surface, and an unfreezing of io_uring
+**Status:** Done, and the C is gone with it
 
-`glommio/src/iou` and `glommio/src/uring_sys` are 3,042 hand-maintained lines
-holding **108 of glommio's 309 `unsafe` occurrences**. They are a copy of two
-abandoned crates — there is nothing to upgrade to. The vendored `liburing`
-submodule is current, which is why the C header knows `IORING_SETUP_*` flags to
-bit 18 while the Rust wrapper stops at bit 5.
+`glommio/src/iou` and `glommio/src/uring_sys` were 3,042 hand-maintained lines
+holding 108 of glommio's `unsafe` occurrences -- a copy of two abandoned crates
+with nothing to upgrade to. They were replaced by the maintained `io-uring`
+crate (`c2e8394`), and the last thing forcing a git dependency, an accessor
+`need_preempt` needed, was upstreamed as
+[tokio-rs/io-uring#404](https://github.com/tokio-rs/io-uring/pull/404) and
+released in 0.7.14.
 
-Replacing them with the maintained `io-uring` crate would delete more unsafe
-than everything the centralization analysis proposes. Contains the full API
-mapping, the structural reasons this is not a dependency swap, where the risk
-concentrates, and a step-by-step sequencing that keeps the suite green.
+That left the build compiling five C files and carrying a 3.2 MB `liburing`
+submodule that nothing called. Those are now gone too, so the crate needs no C
+toolchain, no `make`, and no `configure` -- retiring the packaging failures
+that came with them. The investigation is kept for the API mapping and the
+reasoning about where the risk sat.
 
 ### [Unsafe Code Centralization Analysis](./investigations/unsafe-centralization/)
 **Status:** Analysis complete
