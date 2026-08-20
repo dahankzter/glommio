@@ -1,4 +1,9 @@
 //! `select!`: race several futures, take the first to finish.
+//!
+//! Like the attribute macros, every path this emits goes through `krate` so a
+//! caller can point it at glommio under another name. See the crate-level
+//! note: a hardcoded `::glommio` here is a compile error in somebody else's
+//! code, and it has already happened twice.
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
@@ -36,17 +41,40 @@ impl Parse for Branch {
 
 struct Select {
     biased: bool,
+    /// The runtime crate's path. Anyone depending on glommio under another
+    /// name -- or reaching it through a facade -- must be able to say so, the
+    /// same way `#[glommio::main]` accepts `crate = …`.
+    krate: syn::Path,
     branches: Vec<Branch>,
 }
 
 impl Parse for Select {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut biased = false;
-        if input.peek(Ident) && input.fork().parse::<Ident>()? == "biased" {
-            input.parse::<Ident>()?;
-            input.parse::<Token![;]>()?;
-            biased = true;
+        let mut krate: Option<syn::Path> = None;
+
+        // Leading directives, in either order, each ended with `;`. `crate` is
+        // a keyword, so it can never be mistaken for a branch pattern.
+        loop {
+            if input.peek(Token![crate]) {
+                input.parse::<Token![crate]>()?;
+                input.parse::<Token![=]>()?;
+                krate = Some(input.parse()?);
+                input.parse::<Token![;]>()?;
+                continue;
+            }
+
+            if input.peek(Ident) && input.fork().parse::<Ident>()? == "biased" {
+                input.parse::<Ident>()?;
+                input.parse::<Token![;]>()?;
+                biased = true;
+                continue;
+            }
+
+            break;
         }
+
+        let krate = krate.unwrap_or_else(|| syn::parse_quote!(::glommio));
 
         let mut branches = Vec::new();
         while !input.is_empty() {
@@ -64,12 +92,20 @@ impl Parse for Select {
             ));
         }
 
-        Ok(Select { biased, branches })
+        Ok(Select {
+            biased,
+            krate,
+            branches,
+        })
     }
 }
 
 pub(crate) fn expand(input: TokenStream) -> TokenStream {
-    let Select { biased, branches } = match syn::parse2(input) {
+    let Select {
+        biased,
+        krate,
+        branches,
+    } = match syn::parse2(input) {
         Ok(parsed) => parsed,
         Err(err) => return err.to_compile_error(),
     };
@@ -130,7 +166,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     let start = if biased {
         quote! { 0usize }
     } else {
-        quote! { ::glommio::__private::next_select_start() }
+        quote! { #krate::__private::next_select_start() }
     };
 
     quote! {{
@@ -143,7 +179,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         // await, and a non-async closure cannot. So this reports which branch
         // fired and stashes its output; the handler runs afterwards, in the
         // caller's async context.
-        let __glommio_select_which = ::glommio::__private::poll_fn(
+        let __glommio_select_which = #krate::__private::poll_fn(
             |__glommio_select_cx| {
                 for __glommio_select_step in 0..#count {
                     match (__glommio_select_start

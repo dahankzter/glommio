@@ -15,6 +15,31 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.12 — 2026-08-20
+
+### Fixed
+
+- **`select!` now accepts `crate = <path>`**, like `#[glommio::main]` and
+  `#[glommio::test]`. Its expansion hardcoded `::glommio::…`, so a caller
+  reaching glommio under another name — `glommio-ng` without a rename, or
+  through a facade that re-exports it — could not compile it.
+
+  ```rust
+  my_runtime::select! {
+      crate = ::my_runtime::glommio;
+      biased;
+      () = shutdown.cancelled() => break,
+      maybe = upstream.recv()   => handle(maybe).await,
+  }
+  ```
+
+  This is the second time the same defect has shipped: `#[main]` had it, it
+  was fixed, and the new macro repeated it. `glommio-macros` now says in its
+  own crate documentation that a macro is not finished until it takes
+  `crate = <path>` **and** carries a trybuild case naming a crate that does not
+  exist — which fails to resolve only if the override actually reaches the
+  expansion. Parsing the argument proves nothing; the negative control does.
+
 ## 0.10.11 — 2026-08-20
 
 ### Added

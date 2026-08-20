@@ -20,3 +20,27 @@ async fn runs_under_an_aliased_crate_name() {
 
 #[glommio_ng::test(crate = glommio_ng, placement = Fixed(0))]
 async fn accepts_crate_alongside_other_arguments() {}
+
+#[glommio_ng::test(crate = glommio_ng)]
+async fn select_resolves_the_crate_it_is_told_to() {
+    // The same macro-boundary problem as the attributes: a caller reaching
+    // glommio under another name, or through a facade, cannot resolve a
+    // hardcoded `::glommio` path in the expansion.
+    let value = glommio_ng::select! {
+        crate = glommio_ng;
+        v = async { 5u32 } => v,
+        _ = glommio_ng::timer::sleep(std::time::Duration::from_secs(30)) => 0,
+    };
+    assert_eq!(value, 5);
+}
+
+#[glommio_ng::test(crate = glommio_ng)]
+async fn select_takes_crate_and_biased_together() {
+    let value = glommio_ng::select! {
+        crate = glommio_ng;
+        biased;
+        v = async { 1u32 } => v,
+        _ = async {} => 2,
+    };
+    assert_eq!(value, 1);
+}
