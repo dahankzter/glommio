@@ -1,0 +1,138 @@
+# Changelog
+
+`glommio-ng` is a republish of the community [glommio](https://github.com/glommio/glommio)
+fork. Versions track the fork's own `0.10.0`; the patch number belongs to this
+republish and is applied at release time, so a bump here does not imply a
+change upstream.
+
+Dependency line, unchanged across every version below:
+
+```toml
+glommio = { package = "glommio-ng", version = "0.10" }
+```
+
+`glommio-ng-macros` is published in lockstep from `0.10.2` onward and is pulled
+in automatically by the default `macros` feature. You do not depend on it
+directly.
+
+## 0.10.7 — 2026-08-20
+
+### Fixed
+
+- **A panicking `spawn_blocking` closure no longer hangs its caller.** The
+  closure wrote its result straight into a `MaybeUninit` on the pool thread; a
+  panic skipped that write and unwound the worker, so no response was ever
+  sent. The awaiting future hung forever and the pool lost a thread
+  permanently — four panics exhausted a four-thread pool. The panic now
+  surfaces where the caller awaited. **This bug is present in every earlier
+  glommio release, including the canonical 0.9.0.**
+
+### Added
+
+- `ExecutorProxy::spawn_blocking_send` — same pool, but the returned future is
+  `Send` and does not depend on the executor that created it. Lets a per-core
+  client satisfy a trait demanding `Pin<Box<dyn Future + Send>>` without
+  running a second thread pool. Panics are caught and re-raised at the await
+  point.
+
+## 0.10.6 — 2026-08-20
+
+### Changed
+
+- **No C toolchain, `make`, `configure` or submodule required.** The vendored
+  `liburing` and the five C files it fed were deleted: nothing in the crate
+  referenced them once the `io-uring` crate migration completed. The package
+  went from 630 files and 3.9 MB to 110 files and 1.6 MB.
+
+## 0.10.5 — 2026-08-20
+
+### Added
+
+- `future::timeout` — races any future against a deadline, whatever it returns.
+  `timer::timeout` only accepts futures already returning a glommio `Result`.
+  Both now document that the inner future is polled before the timer, so one
+  ready exactly at the deadline reports success.
+- `timer::interval`, `timer::interval_at`, `Interval`, `MissedTickBehavior` —
+  a pollable stream of ticks, first one immediate, usable in a `select!` arm.
+  `Burst`, `Delay` and `Skip` are three genuinely different schedules.
+
+### Note
+
+At the next breaking release `timer::timeout` becomes `try_timeout` and
+`future::timeout` takes the plain name, matching the ecosystem's `try_`
+convention for `Result`-aware combinators.
+
+## 0.10.4 — 2026-08-20
+
+### Added
+
+- `sync::Mutex` — an async mutex for state held across an `await`. Prefer
+  `RefCell` where no borrow crosses one.
+- `sync::OnceCell` — initialised at most once by an initialiser that may
+  itself await; concurrent callers wait for the first rather than running
+  their own.
+- `sync::CancellationToken` — hierarchical cancellation within one executor.
+  `!Send` by design: cross-shard shutdown is one root token per executor.
+- `channels::oneshot` — a channel carrying exactly one value; an unsent value
+  is handed back rather than dropped.
+- `channels::watch` — keeps only the latest value; slow receivers skip rather
+  than queue.
+- `channels::broadcast` — multi-consumer fan-out with `RecvError::Lagged(n)`
+  for receivers that fall behind. Semantics mirror tokio's deliberately.
+- `ConnectedSender::into_foreign` — a `Send`, non-`Clone`, `try_send`-only
+  handle usable from a thread with no executor. Not `Clone` on purpose: the
+  buffer underneath is strictly single-producer.
+- `Semaphore::is_closed`.
+
+## 0.10.3 — 2026-08-19
+
+### Fixed
+
+- **`#[glommio::main(name = "…")]` is now rejected rather than silently
+  ignored.** `LocalExecutorBuilder::name` is only read by `spawn()`; the
+  macros build with `make()`, which never reads it, so the argument was
+  accepted and discarded. It now fails to compile with a message pointing at
+  `spawn()`.
+
+### Documentation
+
+- `crate = …` accepts a path, not just an identifier, so a crate reaching
+  glommio through a facade can point at the re-export.
+
+## 0.10.2 — 2026-08-19
+
+### Added
+
+- `#[glommio::main]` and `#[glommio::test]`, from the new `glommio-ng-macros`
+  crate, behind a default-on `macros` feature. Arguments: `placement` and
+  `crate`. `#[glommio::test]` emits a plain `#[test]`, so `#[should_panic]`,
+  `#[ignore]` and `Result` returns compose.
+
+### Note
+
+Re-exporting a macro named `test` means `use glommio::*` shadows the built-in
+`#[test]`. Import the macros by name, or write `#[glommio::test]`.
+
+## 0.10.1 — 2026-08-19
+
+### Fixed
+
+- **A kernel that cannot run glommio now returns an error instead of calling
+  `exit(1)` on your process.** The failure names the missing `IORING_OP_*`, or
+  reports `kernel.io_uring_disabled` by value, or points at a container seccomp
+  policy — the three ways this fails on RHEL and in containers.
+- The documented kernel floor was 5.8; the newest operation glommio submits
+  landed in 5.6.
+
+## 0.10.0 — 2026-08-19
+
+First release. The canonical `glommio` crate last published 0.9.0 in March
+2024, and 0.9.0 no longer compiles against current kernel headers, leaving
+downstreams pinned to git revisions.
+
+### Fixed
+
+- **`cargo package` was impossible.** `build.rs` ran `./configure` inside the
+  vendored `liburing`, mutating the crate's own source directory, which cargo
+  rejects outright. Configuring outside the source tree made the crate
+  publishable at all. (Superseded in 0.10.6, which removed the C entirely.)
