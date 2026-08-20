@@ -15,6 +15,43 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.14 — 2026-08-20
+
+### Fixed
+
+- **`select!` no longer requires a comma after a block-bodied branch**, the
+  same rule `match` arms and tokio's `select!` follow:
+
+  ```rust
+  select! {
+      _ = interval.tick() => {
+          work().await;
+      }                                  // no comma needed
+      () = token.cancelled() => break,
+  }
+  ```
+
+  The cause was not the comma rule itself. `{ … }` followed by `(` parses as a
+  **call expression** — `{block}()` — so the general expression parser swallowed
+  the next branch, and the error surfaced against *that* branch's `=>` with a
+  list of expected pattern tokens. It read as "unit patterns are unsupported",
+  which is why it cost a first pass looking at the wrong branch entirely. A
+  braced body is now parsed as a block, as syn's own `Arm` does.
+
+  Where a comma genuinely is required, the error names the branch that needs
+  it rather than the next one.
+
+- A single-branch `select!` no longer emits a degenerate loop and modulo.
+
+### Testing
+
+The three `select!` defects so far were each invisible to the tests that
+existed: two were semantic and one was purely syntactic. There is now a syntax
+corpus — block body with and without the trailing comma, bare expressions,
+`if` and `match` bodies, unit patterns, mixed forms, `biased;` — because real
+call sites produce that spread naturally and a hand-written behavioural suite
+does not.
+
 ## 0.10.13 — 2026-08-20
 
 ### Fixed
@@ -29,10 +66,12 @@ directly.
   }
   ```
 
-  Only futures with a destructor were affected — for the rest the compiler ends
-  the borrow at its last use — which made it a difference that shows up late
-  and reads as inexplicable. It is a compile error rather than a silent
-  divergence, but it rejects correct code written against tokio's semantics.
+  The compiler ends a borrow at its last use unless the borrower has **drop
+  glue** — any field needing drop, not a hand-written `Drop` impl — which
+  covers nearly every `async fn` future that captures a borrow alongside
+  anything droppable. So this rejected ordinary code while contrived examples
+  kept compiling. A compile error rather than a silent divergence, but it
+  refused code that is correct under tokio.
 
 ## 0.10.12 — 2026-08-20
 

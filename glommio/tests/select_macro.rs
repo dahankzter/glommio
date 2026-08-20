@@ -178,3 +178,175 @@ async fn a_handler_can_use_what_its_own_branch_borrowed() {
     // 1 polled, +1 from the destructor, then + the polled value.
     assert_eq!(total, 3);
 }
+
+#[glommio::test]
+async fn handlers_keep_the_enclosing_control_flow() {
+    // `break`, `continue` and `return` must mean what they mean at the call
+    // site: the handler runs there, not inside a closure.
+    let mut ticks = 0;
+
+    let total = loop {
+        ticks += 1;
+
+        select! {
+            _ = async {} => {
+                if ticks < 3 {
+                    continue;
+                }
+                break ticks;
+            },
+            _ = sleep(Duration::from_secs(30)) => break 0,
+        }
+    };
+
+    assert_eq!(total, 3);
+}
+
+#[glommio::test]
+async fn a_handler_can_take_self_mutably_after_a_branch_borrowed_it() {
+    // The second downstream shape: the branch borrows `self`, the handler
+    // calls a `&mut self` method. The borrow is of `self` rather than of a
+    // local, which is where a scope-based fix might still trip.
+    struct Source {
+        pending: Vec<u32>,
+        drained: u32,
+    }
+
+    impl Source {
+        async fn next(&mut self) -> Option<u32> {
+            self.pending.pop()
+        }
+
+        fn drain(&mut self) -> u32 {
+            self.drained += 1;
+            self.drained
+        }
+
+        async fn run(&mut self) -> u32 {
+            select! {
+                item = self.next() => {
+                    let seen = item.unwrap_or(0);
+                    seen + self.drain()
+                },
+                _ = sleep(Duration::from_secs(30)) => 0,
+            }
+        }
+    }
+
+    let mut source = Source {
+        pending: vec![41],
+        drained: 0,
+    };
+
+    assert_eq!(source.run().await, 42);
+}
+
+/// A syntax corpus rather than a semantic one.
+///
+/// The comma-after-block defect was invisible to every behavioural test:
+/// each of those happened to write the comma. Only a spread of *forms* --
+/// block body with and without the comma, bare expression, unit pattern,
+/// mixed, trailing comma present and absent -- reaches it, and real call
+/// sites produce that spread naturally, which is why 51 of them found it in
+/// one build.
+mod syntax_corpus {
+    use super::*;
+
+    #[glommio::test]
+    async fn block_body_without_trailing_comma() {
+        let value = select! {
+            v = async { 1u32 } => {
+                v
+            }
+            _ = sleep(Duration::from_secs(30)) => 0,
+        };
+        assert_eq!(value, 1);
+    }
+
+    #[glommio::test]
+    async fn block_body_with_trailing_comma() {
+        let value = select! {
+            v = async { 1u32 } => {
+                v
+            },
+            _ = sleep(Duration::from_secs(30)) => 0,
+        };
+        assert_eq!(value, 1);
+    }
+
+    #[glommio::test]
+    async fn bare_expression_bodies() {
+        let value = select! {
+            v = async { 2u32 } => v,
+            _ = sleep(Duration::from_secs(30)) => 0
+        };
+        assert_eq!(value, 2);
+    }
+
+    #[glommio::test]
+    async fn mixed_block_and_expression_bodies() {
+        let value = select! {
+            _ = sleep(Duration::from_secs(30)) => 0,
+            v = async { 3u32 } => {
+                v + 1
+            }
+            _ = sleep(Duration::from_secs(30)) => 0,
+        };
+        assert_eq!(value, 4);
+    }
+
+    #[glommio::test]
+    async fn if_and_match_bodies_also_stand_alone() {
+        // Every body that ends in a block, not just a literal `{ .. }`.
+        let value = select! {
+            v = async { 5u32 } => if v > 4 {
+                v
+            } else {
+                0
+            }
+            _ = sleep(Duration::from_secs(30)) => 0,
+        };
+        assert_eq!(value, 5);
+
+        let value = select! {
+            v = async { 6u32 } => match v {
+                6 => v,
+                other => other,
+            }
+            _ = sleep(Duration::from_secs(30)) => 0,
+        };
+        assert_eq!(value, 6);
+    }
+
+    #[glommio::test]
+    async fn unit_pattern_alone_and_alongside() {
+        let value = select! {
+            () = async {} => 7u32,
+        };
+        assert_eq!(value, 7);
+
+        // `biased;` because both branches are ready and the default order
+        // rotates -- the caveat this macro documents, tripped over here while
+        // writing a test about syntax.
+        let value = select! {
+            biased;
+            () = async {} => {
+                8u32
+            }
+            () = async {} => 0,
+        };
+        assert_eq!(value, 8);
+    }
+
+    #[glommio::test]
+    async fn biased_with_a_block_body() {
+        let value = select! {
+            biased;
+            v = async { 9u32 } => {
+                v
+            }
+            _ = async {} => 0,
+        };
+        assert_eq!(value, 9);
+    }
+}

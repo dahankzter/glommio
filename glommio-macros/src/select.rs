@@ -19,6 +19,29 @@ struct Branch {
     body: Expr,
 }
 
+/// Whether a branch body must be followed by a comma.
+///
+/// The same rule `match` arms use: a body that ends in a block stands on its
+/// own, anything else needs separating from the branch that follows. tokio's
+/// `select!` follows `match` here, so code written against it omits the comma
+/// after block bodies -- and requiring one produced an error pointing at the
+/// *next* branch's `=>`, which reads as a complaint about that branch's
+/// pattern rather than a missing token on the line above.
+fn needs_trailing_comma(body: &Expr) -> bool {
+    !matches!(
+        body,
+        Expr::Block(_)
+            | Expr::If(_)
+            | Expr::Match(_)
+            | Expr::ForLoop(_)
+            | Expr::While(_)
+            | Expr::Loop(_)
+            | Expr::Unsafe(_)
+            | Expr::TryBlock(_)
+            | Expr::Const(_)
+    )
+}
+
 impl Parse for Branch {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         // Refutable patterns are rejected: tokio disables a non-matching
@@ -29,7 +52,20 @@ impl Parse for Branch {
         input.parse::<Token![=]>()?;
         let future: Expr = input.parse()?;
         input.parse::<Token![=>]>()?;
-        let body: Expr = input.parse()?;
+
+        // A braced body is parsed as a block, not handed to the general
+        // expression parser. `Expr::parse` would read `{ .. } (` as a call --
+        // `{block}()` -- and swallow the following branch, which is what made
+        // the missing-comma error point at the *next* branch's pattern.
+        let body = if input.peek(syn::token::Brace) {
+            Expr::Block(syn::ExprBlock {
+                attrs: Vec::new(),
+                label: None,
+                block: input.parse()?,
+            })
+        } else {
+            input.parse()?
+        };
 
         Ok(Branch {
             pattern,
@@ -78,10 +114,29 @@ impl Parse for Select {
 
         let mut branches = Vec::new();
         while !input.is_empty() {
-            branches.push(input.parse()?);
-            // A comma between branches, optional after the last.
+            let branch: Branch = input.parse()?;
+            let comma_required = needs_trailing_comma(&branch.body);
+            branches.push(branch);
+
             if input.peek(Token![,]) {
                 input.parse::<Token![,]>()?;
+                continue;
+            }
+
+            // Trailing comma is always optional on the last branch.
+            if input.is_empty() {
+                break;
+            }
+
+            if comma_required {
+                // Reported here, against the body that needs separating,
+                // rather than letting the next branch fail to parse and blame
+                // its own pattern.
+                return Err(syn::Error::new_spanned(
+                    &branches.last().expect("just pushed").body,
+                    "expected `,` after this branch: only a body ending in a block may omit it, \
+                     as in a `match` arm",
+                ));
             }
         }
 
@@ -162,11 +217,38 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     });
 
     // `biased` starts at zero every time; otherwise the start rotates, so a
-    // branch that is always ready cannot starve the ones after it.
-    let start = if biased {
+    // branch that is always ready cannot starve the ones after it. With one
+    // branch there is nothing to rotate between, and the loop and modulo a
+    // general expansion would emit are degenerate.
+    let single = count == 1;
+
+    let start = if biased || single {
         quote! { 0usize }
     } else {
         quote! { #krate::__private::next_select_start() }
+    };
+
+    let poll_arms: Vec<_> = poll_arms.collect();
+    let poll_body = if single {
+        let only = &poll_arms[0];
+        quote! {
+            match 0usize {
+                #only
+                _ => ::core::unreachable!(),
+            }
+        }
+    } else {
+        quote! {
+            for __glommio_select_step in 0..#count {
+                match (__glommio_select_start
+                    .wrapping_add(__glommio_select_step))
+                    % #count
+                {
+                    #(#poll_arms)*
+                    _ => ::core::unreachable!(),
+                }
+            }
+        }
     };
 
     quote! {{
@@ -188,15 +270,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
             #krate::__private::poll_fn(
             |__glommio_select_cx| {
-                for __glommio_select_step in 0..#count {
-                    match (__glommio_select_start
-                        .wrapping_add(__glommio_select_step))
-                        % #count
-                    {
-                        #(#poll_arms)*
-                        _ => ::core::unreachable!(),
-                    }
-                }
+                #poll_body
 
                 ::core::task::Poll::Pending
             },

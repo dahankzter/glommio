@@ -176,10 +176,21 @@ fn expand(
 /// channel and was about to return loses it.
 ///
 /// **All** the branch futures are dropped before any handler runs, as tokio
-/// does, so a handler may use whatever its own branch borrowed. Holding them
-/// across the handler would reject correct code -- and only for futures with
-/// a destructor, since the compiler otherwise ends the borrow at its last use,
-/// which makes it a difference that appears late and confusingly.
+/// does, so a handler may use whatever its own branch borrowed:
+///
+/// ```ignore
+/// msg = upstream.recv() => process(&mut upstream, msg).await,
+/// ```
+///
+/// The compiler ends a borrow at its last use unless the borrower has drop
+/// glue -- any field that needs dropping, not a hand-written `Drop` impl. That
+/// covers nearly every `async fn` future capturing a borrow alongside anything
+/// droppable, so holding the futures across handlers rejects ordinary code
+/// while leaving contrived examples compiling.
+///
+/// A handler cannot bind a reference *into* a dropped future's output, but that
+/// is unrepresentable anyway: stable Rust has no lending futures, so an
+/// `Output` can only borrow from something that outlives the future.
 ///
 /// Where a future is not cancel-safe, hold it in a variable outside the loop
 /// and poll it by `&mut` rather than recreating it each iteration.
