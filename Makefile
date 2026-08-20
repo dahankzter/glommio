@@ -2,7 +2,7 @@
 #
 # Quick commands for common development tasks
 
-.PHONY: help test build fmt lint check bench clean all
+.PHONY: help test test-nextest build fmt lint check bench clean all
 .PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
 .PHONY: bench-timer bench-ci
 .PHONY: miri miri-core miri-setup
@@ -63,6 +63,7 @@ help:
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test              - Run all tests (may hit resource limits)"
+	@echo "  make test-nextest      - Run all tests under nextest, plus doctests"
 	@echo "  make test-lib          - Run library tests only"
 	@echo "  make test-all-modules  - ⭐ Complete suite by module (RECOMMENDED)"
 	@echo "  make test-lima-safe    - Run core tests in batches (macOS/Lima only)"
@@ -122,6 +123,12 @@ help:
 test:
 	@echo "→ Running all tests on $(PLATFORM)..."
 	@$(call run_cargo,test --workspace)
+
+test-nextest:
+	@echo "→ Running all tests under nextest on $(PLATFORM)..."
+	@echo "  (each test in its own process; doctests run separately -- nextest skips them)"
+	@$(call run_cargo,nextest run --workspace)
+	@$(call run_cargo,test --workspace --doc)
 
 test-lib:
 	@echo "→ Running library tests on $(PLATFORM)..."
