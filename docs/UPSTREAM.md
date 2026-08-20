@@ -151,6 +151,105 @@ dependency, nothing preventing publication. See
   [investigations/io-path/monoio-gap.md](investigations/io-path/monoio-gap.md)
   for why that one needs framing as measurement rather than correction.
 
+## Plan for the 2026-08-19/20 additions
+
+Everything below was written after the six PRs above were opened, and none of
+it has been offered upstream. The constraint has not changed: **their scarce
+resource is review capacity, not code.** Six of ours have sat unreviewed since
+2026-08-02. Arriving with nine more would make that worse, not better.
+
+So this is staged, and each stage has a gate that must open before the next
+begins.
+
+### Stage 0 — three bug reports, no patches (do this first, unconditionally)
+
+Issues cost a maintainer minutes to read and nothing to review. All three are
+defects in **their** code, found while working here, and two of them block
+things they want.
+
+| Report | Why it matters to them |
+|---|---|
+| A panicking `spawn_blocking` closure hangs its caller forever and permanently costs the pool a worker | Live in canonical 0.9.0 and their `main`. Four panics exhaust a four-thread pool. The obvious fix is worse than the bug: the awaiting side calls `assume_init` on memory a panicked closure never wrote |
+| `build.rs` runs `./configure` inside the vendored `liburing`, mutating the crate's own source directory | `cargo package` rejects the tarball outright, so **they cannot publish 0.10 under any name.** DataDog's `configure()` runs it in `OUT_DIR`; the regression is theirs alone |
+| `LocalExecutorBuilder::name` is silently ignored by `make()` | Only `spawn()` reads it. Every caller building with `make()` sets a name that goes nowhere |
+
+Report the `configure` one as a bug, **not** as our patch: ours copies the whole
+tree because the liburing revision we vendored needs `Makefile.common`, and
+theirs may not. Tell them what breaks and let them pick the fix.
+
+**Gate to Stage 1: any human reply on any of the three.** That is the signal
+that review capacity exists. Without it, nothing else is worth queueing.
+
+### Stage 1 — two self-contained bug fixes
+
+Both are small, obviously correct, carry tests, depend on none of the six open
+PRs, and ask for no design decision.
+
+| PR | Size | Notes |
+|---|---|---|
+| Kernel probe returns an error instead of calling `exit(1)` | ~150 lines | A library terminating the caller's process. Names the missing `IORING_OP_*`, or `kernel.io_uring_disabled`, or a container seccomp policy — the three ways this fails on RHEL. `make()` already returns `Result`, so no API break |
+| `spawn_blocking` panic fix | ~40 lines | Deletes an `unsafe` block, an `assume_init` and an `Arc::try_unwrap(..).expect("leak")`. Best review-to-value ratio we have |
+
+**Gate to Stage 2: one of these merged.** A merge proves the pipeline works
+end to end. Anything larger before that is speculative.
+
+### Stage 2 — API additions, smallest commitment first
+
+Each is additive, each stands alone, and each is sized to be reviewable in one
+sitting. Ordered by how much a maintainer is being asked to take on, not by how
+much we want it.
+
+1. **`spawn_blocking_send`** (~150 lines). One method. No new module.
+2. **`future::timeout`** (~120 lines). Carries a question they must answer, and
+   the PR should ask it plainly: by the `try_` convention the general form
+   should own the name `timeout` and the `Result`-aware one should be
+   `try_timeout`. We split by module to avoid breaking their callers. Their
+   call whether to take the rename at their next breaking release.
+3. **`Interval` + `MissedTickBehavior`** (~400 lines). Rebase risk if #33
+   lands first, since both touch `timer/`.
+4. **`sync::Mutex` + `Semaphore::is_closed`** (~400 lines). `Mutex` needs
+   `is_closed`, so they ship together.
+5. **`sync::OnceCell`** (~250 lines).
+6. **`channels::oneshot` + `channels::watch`** (~600 lines). Two small channels
+   with one review context.
+7. **`channels::broadcast`** (~700 lines). Its own PR: the semantics are the
+   substance, and the design doc travels with it.
+8. **`CancellationToken`** (~350 lines). Last of the additions because it is
+   the one with an argument attached — `!Send` means it cannot carry a
+   cross-shard shutdown, and a maintainer may reasonably want the `Send` one
+   instead.
+9. **`ConnectedSender::into_foreign`** (~250 lines). Touches `shared_channel`,
+   so it wants a rested reviewer rather than a ninth-in-a-row one.
+
+**Never more than two of these open at once.** The failure mode to avoid is
+recreating today's queue of six.
+
+### Stage 3 — the structural ones, each behind a hard dependency
+
+- **Deleting the vendored `liburing` and the five C files.** Strictly
+  downstream of #35: their `main` still has `iou`/`uring_sys` calling into that
+  C. Cannot be offered before #35 lands, and is trivial afterwards — the
+  finding that made it possible is that *nothing references the C symbols* once
+  the `io-uring` migration is complete.
+- **`#[glommio::main]` / `#[glommio::test]`.** Raise as an **issue**, never as
+  an unsolicited PR. Merging it obliges them to publish and maintain a second
+  crate on crates.io under their name, permanently. That is a policy decision,
+  not a code review, and no amount of test coverage makes it for them. The
+  branch is ready (`upstream/macros-proposal`) if they say yes.
+
+### Rules that apply to every stage
+
+- **Strip the fork.** No `glommio-ng` in any diff. The macros branch already
+  uses a generic alias in its `crate = ` examples for this reason.
+- **One coherent change per PR**, rebased on their `main`, with tests, and
+  under ~600 lines including them.
+- **Nothing new opens while the previous stage's gate is shut.** If the six
+  existing PRs are still untouched, the answer to "should we send this too" is
+  no, regardless of how good it is.
+- **If the canonical `glommio` name transfers to us, this plan is void.**
+  Upstream becomes us and the mergeability constraint dissolves — including the
+  one that shaped several decisions this week.
+
 ## Honest caveats
 
 **131 commits is not a pull request.** It is roughly seven, and several need
