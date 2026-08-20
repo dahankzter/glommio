@@ -15,6 +15,38 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.9 — 2026-08-20
+
+Asks from a downstream that has removed tokio's executor entirely and reported
+what it hit afterwards.
+
+### Added
+
+- `OnceCell::get_or_try_init` — for lazily-initialised resources that can fail,
+  which is most of them. **A failed initialiser does not poison the cell:** the
+  next caller, queued or later, runs its own. One transient failure must not
+  leave a permanently dead cell.
+- `Stream` for `broadcast::Receiver` and `watch::Receiver`, which
+  `local_channel` and `shared_channel` already had. `broadcast` yields
+  `Result<T, RecvError>` rather than skipping quietly — a stream that hid
+  `Lagged(n)` would turn a detectable gap into a silent one.
+
+### Deprecated
+
+- `timer::timeout`, in favour of `future::timeout`, which accepts any future
+  rather than only one returning glommio's `Result`. Two public functions with
+  the same name and different contracts is a trap for whoever greps first. At
+  the next breaking release the name moves and this becomes `try_timeout`.
+
+### Documentation
+
+- [Porting from tokio](docs/PORTING_FROM_TOKIO.md), organised around
+  differences that fail **silently**. It leads with `Task` cancelling on drop,
+  and with the case `#[must_use]` cannot catch: the attribute does not survive
+  a newtype wrapper, so a runtime-agnostic library that wraps `Task` in its own
+  handle type gets no warning at all. That cost one downstream more time than
+  anything else in their port.
+
 ## 0.10.8 — 2026-08-20
 
 ### Fixed
