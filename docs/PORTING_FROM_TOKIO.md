@@ -93,7 +93,12 @@ shadows the built-in attribute. Import the macros by name, or write
 
 - `tokio::select!` contains no runtime. It expands to a `poll_fn` over its
   branches and works fine over glommio futures. Keeping it is not a porting
-  failure.
+  failure — though `glommio::select!` now exists if you want the dependency
+  line gone. It takes plain futures, like tokio's and unlike
+  `futures::select!`, which demands `FusedFuture + Unpin`. It has no `if`
+  guards, no `else`, and requires irrefutable patterns; and its default
+  polling order rotates rather than being random, so a test asserting a fixed
+  winner wants `biased;`.
 - `tokio::sync` primitives need no reactor either. They work; they are just
   `Send` when your program is per-core, so the type system stops helping you.
   Swapping them for glommio's buys typing, not speed.

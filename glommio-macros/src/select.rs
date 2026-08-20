@@ -1,0 +1,168 @@
+//! `select!`: race several futures, take the first to finish.
+
+use proc_macro2::{Span, TokenStream};
+use quote::quote;
+use syn::{
+    parse::{Parse, ParseStream},
+    Expr, Ident, Pat, Token,
+};
+
+/// One `pat = future => body` branch.
+struct Branch {
+    pattern: Pat,
+    future: Expr,
+    body: Expr,
+}
+
+impl Parse for Branch {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        // Refutable patterns are rejected: tokio disables a non-matching
+        // branch and keeps polling, which is a surprising rule to reimplement
+        // and nothing here needs it. `parse_single` accepts the irrefutable
+        // forms and rejects `|` alternatives outright.
+        let pattern = Pat::parse_single(input)?;
+        input.parse::<Token![=]>()?;
+        let future: Expr = input.parse()?;
+        input.parse::<Token![=>]>()?;
+        let body: Expr = input.parse()?;
+
+        Ok(Branch {
+            pattern,
+            future,
+            body,
+        })
+    }
+}
+
+struct Select {
+    biased: bool,
+    branches: Vec<Branch>,
+}
+
+impl Parse for Select {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let mut biased = false;
+        if input.peek(Ident) && input.fork().parse::<Ident>()? == "biased" {
+            input.parse::<Ident>()?;
+            input.parse::<Token![;]>()?;
+            biased = true;
+        }
+
+        let mut branches = Vec::new();
+        while !input.is_empty() {
+            branches.push(input.parse()?);
+            // A comma between branches, optional after the last.
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        if branches.is_empty() {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "select! needs at least one branch, written `pattern = future => body`",
+            ));
+        }
+
+        Ok(Select { biased, branches })
+    }
+}
+
+pub(crate) fn expand(input: TokenStream) -> TokenStream {
+    let Select { biased, branches } = match syn::parse2(input) {
+        Ok(parsed) => parsed,
+        Err(err) => return err.to_compile_error(),
+    };
+
+    let count = branches.len();
+    // Prefixed so nothing at the call site can collide with them.
+    let futures: Vec<Ident> = (0..count)
+        .map(|i| Ident::new(&format!("__glommio_select_f{i}"), Span::call_site()))
+        .collect();
+    let outputs: Vec<Ident> = (0..count)
+        .map(|i| Ident::new(&format!("__glommio_select_o{i}"), Span::call_site()))
+        .collect();
+
+    let pin = branches.iter().zip(&futures).map(|(branch, name)| {
+        let future = &branch.future;
+        quote! { let mut #name = ::core::pin::pin!(#future); }
+    });
+
+    let declare = outputs.iter().map(|name| {
+        quote! { let mut #name = ::core::option::Option::None; }
+    });
+
+    // One arm per branch, selected by the rotated offset. Written as a match
+    // on the index so the futures keep their distinct types.
+    let poll_arms = (0..count).map(|i| {
+        let future = &futures[i];
+        let output = &outputs[i];
+        let index = syn::Index::from(i);
+        quote! {
+            #index => {
+                if let ::core::task::Poll::Ready(value) =
+                    ::core::future::Future::poll(#future.as_mut(), __glommio_select_cx)
+                {
+                    #output = ::core::option::Option::Some(value);
+                    return ::core::task::Poll::Ready(#index);
+                }
+            }
+        }
+    });
+
+    let handlers = branches.iter().enumerate().map(|(i, branch)| {
+        let output = &outputs[i];
+        let pattern = &branch.pattern;
+        let body = &branch.body;
+        let index = syn::Index::from(i);
+        quote! {
+            #index => {
+                let #pattern = #output
+                    .take()
+                    .expect("select! recorded a branch without its output");
+                #body
+            }
+        }
+    });
+
+    // `biased` starts at zero every time; otherwise the start rotates, so a
+    // branch that is always ready cannot starve the ones after it.
+    let start = if biased {
+        quote! { 0usize }
+    } else {
+        quote! { ::glommio::__private::next_select_start() }
+    };
+
+    quote! {{
+        #(#pin)*
+        #(#declare)*
+
+        let __glommio_select_start = #start;
+
+        // The futures are polled here, but the handlers are not: a handler may
+        // await, and a non-async closure cannot. So this reports which branch
+        // fired and stashes its output; the handler runs afterwards, in the
+        // caller's async context.
+        let __glommio_select_which = ::glommio::__private::poll_fn(
+            |__glommio_select_cx| {
+                for __glommio_select_step in 0..#count {
+                    match (__glommio_select_start
+                        .wrapping_add(__glommio_select_step))
+                        % #count
+                    {
+                        #(#poll_arms)*
+                        _ => ::core::unreachable!(),
+                    }
+                }
+
+                ::core::task::Poll::Pending
+            },
+        )
+        .await;
+
+        match __glommio_select_which {
+            #(#handlers)*
+            _ => ::core::unreachable!(),
+        }
+    }}
+}

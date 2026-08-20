@@ -4,6 +4,7 @@
 //! `::glommio::…` unless the caller overrides it with `crate = <ident>`.
 
 mod args;
+mod select;
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -151,4 +152,43 @@ fn expand(
         }
     }
     .into()
+}
+
+/// Races several futures, running the body of whichever finishes first.
+///
+/// ```ignore
+/// glommio::select! {
+///     biased;                                   // optional: poll top to bottom
+///     () = shutdown.cancelled() => break,
+///     maybe = upstream.recv()   => handle(maybe).await,
+/// }
+/// ```
+///
+/// Each future is evaluated once and pinned on the stack, so branches need
+/// neither `Unpin` nor `FusedFuture` and no `.fuse()` wrappers. The winning
+/// branch's output binds to its pattern, its body runs in the caller's async
+/// context -- `.await` inside a body works -- and `select!` evaluates to that
+/// body's value.
+///
+/// # The losing futures are dropped
+///
+/// Not suspended: dropped. A branch that had already taken an item from a
+/// channel and was about to return loses it.
+///
+/// Where a future is not cancel-safe, hold it in a variable outside the loop
+/// and poll it by `&mut` rather than recreating it each iteration.
+///
+/// # Polling order
+///
+/// By default the starting branch rotates between invocations, so a branch
+/// that is always ready cannot starve the ones after it. `biased;` polls top
+/// to bottom instead, which a test asserting a fixed winner will want.
+///
+/// # Not supported
+///
+/// No `if` guards, no `else`, and patterns must be irrefutable. Nothing in the
+/// codebases that asked for this uses them, and each is additive later.
+#[proc_macro]
+pub fn select(input: TokenStream) -> TokenStream {
+    select::expand(input.into()).into()
 }

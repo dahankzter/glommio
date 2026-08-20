@@ -528,7 +528,34 @@ use std::{
 
 #[cfg(feature = "macros")]
 #[doc(inline)]
-pub use glommio_macros::{main, test};
+pub use glommio_macros::{main, select, test};
+
+/// Runtime support for macros expanded by `glommio-macros`.
+///
+/// Not a public API: the shapes here exist because a proc macro cannot own
+/// runtime state, and they may change whenever the macros do.
+#[doc(hidden)]
+pub mod __private {
+    pub use std::future::poll_fn;
+
+    thread_local! {
+        static SELECT_START: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The branch index `select!` should poll first.
+    ///
+    /// Rotating rather than always starting at zero is what stops a hot first
+    /// branch starving a later one. tokio randomises for the same reason;
+    /// counting is cheaper and, unlike a random order, reproduces between
+    /// runs, which is worth more in a test suite than the randomness is.
+    pub fn next_select_start() -> usize {
+        SELECT_START.with(|start| {
+            let current = start.get();
+            start.set(current.wrapping_add(1));
+            current
+        })
+    }
+}
 
 /// Provides common imports that almost all Glommio applications will need
 pub mod prelude {
