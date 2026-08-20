@@ -28,6 +28,45 @@ doing, and it cannot be obtained from a microbenchmark. `spin_before_park` is a
 builder knob today: if setting it changes throughput or p99 materially, the park
 cost is being paid; if not, it is not.
 
+## The gate was measured, and items 1 and 2 do not pass it
+
+**2026-08-20, slipstream commit `44316f4`.** The instruction below -- "if
+setting `spin_before_park` changes throughput or p99 materially, the park cost
+is being paid; if not, it is not" -- was carried out on a real workload. 21
+interleaved runs per setting on an idle machine, warm-up discarded, medians in
+microseconds:
+
+| link | metric | off | 10 us | 100 us |
+|---|---|---:|---:|---:|
+| direct loopback | p50 | 763.6 | 761.8 | 758.1 |
+| | p99 | 1041.5 | 1053.7 | 955.7 |
+| relay + 0 us | p50 | 929.7 | 929.7 | 926.0 |
+| | p99 | 1174.8 | 1005.0 | 964.5 |
+| relay + injected RTT | p50 | 1571.7 | 1576.0 | 1562.7 |
+| | p99 | 1788.8 | 1774.1 | 1682.8 |
+
+**p50 does not move** -- under 1% everywhere. At ~760 us between messages the
+reactor has nothing to spin for, which is the predicted null.
+
+**p99 looks tempting and does not hold up.** The 100 us setting has a lower
+median p99 in all three configurations, by 6-18%. Mann-Whitney U against unset
+gives p = 0.094, 0.414, 0.105; the ranges overlap heavily. A consistent
+direction across three configurations is suggestive, not evidence, and 21
+samples of a tail statistic cannot call a 6% shift.
+
+**Consequence: do not build items 1 or 2.** Both target the ~2 us paid per
+blocking operation, and this workload does not pay it -- its shards are not
+parking often enough for the cost to reach the numbers anyone cares about.
+That is the answer the gate existed to get.
+
+**What would change the answer** is a workload whose inter-event gap falls
+inside the spin window, not more analysis of this one. If such a workload turns
+up, re-run this experiment before writing any code.
+
+Worth recording that the protocol was written before the data was seen. "p99
+median 8% lower in all three configurations" is exactly the sort of finding
+that becomes a shipped default when someone goes looking after the fact.
+
 ## Ranked
 
 ### 1. Preempt-timer churn — real, but the obvious fix does not work
