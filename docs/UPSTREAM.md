@@ -243,6 +243,37 @@ recreating today's queue of six.
   not a code review, and no amount of test coverage makes it for them. The
   branch is ready (`upstream/macros-proposal`) if they say yes.
 
+### The six already in flight come first — mostly
+
+They are older, they are already queued, and asking for attention on new work
+while six sit unreviewed is how a contributor becomes noise. They are also
+load-bearing for what follows:
+
+| Open PR | Touches | Consequence for the new series |
+|---|---|---|
+| [#35](https://github.com/glommio/glommio/pull/35) retire vendored `iou` | `sys/uring.rs`, **+474/−258** | **Decides the shape of new #2** and hard-gates new #14 |
+| [#33](https://github.com/glommio/glommio/pull/33) timing wheel | `timer/mod.rs`, **+8** | Barely interacts with new #9 and #10 |
+| [#29](https://github.com/glommio/glommio/pull/29), [#30](https://github.com/glommio/glommio/pull/30), [#32](https://github.com/glommio/glommio/pull/32) | `executor/mod.rs` | Same file as new #1 and #3, different regions |
+| [#31](https://github.com/glommio/glommio/pull/31) cache-domain placement | `executor/placement/` | No overlap |
+
+**The exception: new #1 and #2 need not wait.** Strict seniority would put a
+two-thousand-line performance PR ahead of a forty-line bug fix that deletes
+`unsafe` and stops a hang. Both are bugs rather than features, both are small,
+and one of them stops a library calling `exit(1)` on its caller's process.
+Offer them alongside the existing six, not behind them — and say in the PR
+body that they are deliberately jumping a queue of our own making, so it reads
+as triage rather than impatience.
+
+**New #2 exists in two mutually exclusive forms**, and #35 decides which:
+
+- **If #35 has not landed:** write it against their `iou` probe. It lands now,
+  and *we* own porting it forward when #35 later merges. That obligation is
+  ours to carry, not theirs to discover.
+- **If #35 has landed:** `cd7c9d3` applies as it stands.
+
+Everything else in the series waits for the existing six to move. If they never
+do, the queue was never the problem.
+
 ### The series
 
 Numbered in the order they should be offered. The number is the order, **not
