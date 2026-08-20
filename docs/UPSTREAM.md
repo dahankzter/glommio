@@ -180,15 +180,21 @@ theirs may not. Tell them what breaks and let them pick the fix.
 **Gate to Stage 1: any human reply on any of the three.** That is the signal
 that review capacity exists. Without it, nothing else is worth queueing.
 
-### Stage 1 — two self-contained bug fixes
-
-Both are small, obviously correct, carry tests, depend on none of the six open
-PRs, and ask for no design decision.
+### Stage 1 — two small bug fixes
 
 | PR | Size | Notes |
 |---|---|---|
-| Kernel probe returns an error instead of calling `exit(1)` | ~150 lines | A library terminating the caller's process. Names the missing `IORING_OP_*`, or `kernel.io_uring_disabled`, or a container seccomp policy — the three ways this fails on RHEL. `make()` already returns `Result`, so no API break |
-| `spawn_blocking` panic fix | ~40 lines | Deletes an `unsafe` block, an `assume_init` and an `Arc::try_unwrap(..).expect("leak")`. Best review-to-value ratio we have |
+| `spawn_blocking` panic fix (`dcab422`) | ~40 lines | Deletes an `unsafe` block, an `assume_init` and an `Arc::try_unwrap(..).expect("leak")`. Best review-to-value ratio we have. **Code applies cleanly to their `main`**; only its tests need re-homing, since ours live in a module a later commit introduced |
+| Kernel probe returns an error instead of calling `exit(1)` (`cd7c9d3`) | ~150 lines, **needs a rewrite** | See below — it does not apply to their tree |
+
+**The kernel probe fix is not independent of #35, contrary to what an earlier
+draft of this plan said.** Their `main` still contains `glommio/src/iou` and
+`glommio/src/uring_sys`; ours is written against the `io-uring` crate's
+`Probe`, which only exists after that PR. Two ways forward, and the second is
+better: gate it behind #35, or **rewrite it against their liburing-based
+probe**. The valuable half — a library not calling `exit(1)` on its caller's
+process — is independent of which probe API reports the opcodes. Do not let
+the best bug fix we have wait behind a stalled PR for an incidental reason.
 
 **Gate to Stage 2: one of these merged.** A merge proves the pipeline works
 end to end. Anything larger before that is speculative.
@@ -236,6 +242,32 @@ recreating today's queue of six.
   crate on crates.io under their name, permanently. That is a policy decision,
   not a code review, and no amount of test coverage makes it for them. The
   branch is ready (`upstream/macros-proposal`) if they say yes.
+
+### Verified porting mechanics
+
+Every row below was tested by cherry-picking onto `upstream/main` on
+2026-08-20, not estimated.
+
+| Item | Commit | Onto their `main` alone | Note |
+|---|---|---|---|
+| `spawn_blocking_send` | `61bb142` | **clean**, 1 file, +228 | — |
+| `sync::Mutex` + `Semaphore::is_closed` | `133a565` | **clean**, 3 files, +257 | — |
+| `channels::oneshot` | `c362fb0` | **clean**, 2 files, +226 | — |
+| `channels::broadcast` | `f86bb8a` | **clean**, 2 files, +482 | design doc travels with it |
+| `ConnectedSender::into_foreign` | `986213e` | **clean**, 1 file, +302 | — |
+| `watch` + `OnceCell` | `b67355f` | module-list conflict alone; clean when stacked | **split into two PRs** — one commit, two unrelated features |
+| `CancellationToken` | `5bf58cd` | `sync/mod.rs` list conflict; clean when stacked | — |
+| `future::timeout` + `Interval` | `8a867b9` | `timer/mod.rs` list conflict, 3 lines | **split into two PRs**; their `timeout` sits at `timer/mod.rs:56`, unchanged |
+| `spawn_blocking` panic fix | `dcab422` | code clean; test module conflicts | re-home the tests |
+| Kernel probe error | `cd7c9d3` | **conflicts on `sys/uring.rs`** | needs rewriting against their `iou` probe — see Stage 1 |
+| eventfd leak test race | `eff2c49` | conflicts | their test file differs; port the mutex idea, not the diff |
+| Delete the vendored C | `322fb8d` | n/a | **hard-gated on #35** — verified: `iou` and `uring_sys` are still in their tree |
+
+**Applied in order, the seven additive commits stack onto `upstream/main` with
+zero conflicts and the result compiles.** The conflicts in that table are
+almost all one kind — two branches adding lines to the same `mod` / `pub use`
+list — and they evaporate when the PRs land in sequence. That is worth knowing
+before anyone budgets rebase time for this.
 
 ### Rules that apply to every stage
 
