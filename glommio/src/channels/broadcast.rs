@@ -32,6 +32,7 @@
 //! ```
 
 use crate::{error::ResourceType, GlommioError};
+use futures_lite::Stream;
 use std::{
     cell::RefCell,
     collections::VecDeque,
@@ -286,6 +287,29 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+impl<T: Clone> Stream for Receiver<T> {
+    type Item = Result<T, RecvError>;
+
+    /// Yields `Err(RecvError::Lagged(n))` rather than skipping quietly, and
+    /// ends when the channel closes.
+    ///
+    /// A lagging receiver is a fact its consumer usually wants to know -- a
+    /// stream that hid it would turn a detectable gap into a silent one.
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        match this.try_recv() {
+            Ok(value) => Poll::Ready(Some(Ok(value))),
+            Err(TryRecvError::Lagged(missed)) => Poll::Ready(Some(Err(RecvError::Lagged(missed)))),
+            Err(TryRecvError::Closed) => Poll::Ready(None),
+            Err(TryRecvError::Empty) => {
+                this.inner.borrow_mut().wakers.push(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
 /// The future returned by [`Receiver::recv`].
 #[derive(Debug)]
 pub struct Recv<'a, T> {
@@ -458,6 +482,32 @@ mod tests {
             let _second = sender.subscribe();
             assert_eq!(sender.send(2).unwrap(), 2);
             assert_eq!(sender.receiver_count(), 2);
+        });
+    }
+
+    #[test]
+    fn a_receiver_is_a_stream_that_surfaces_lag() {
+        LocalExecutor::default().run(async {
+            use futures_lite::StreamExt;
+
+            let (sender, receiver) = broadcast(2);
+            for value in 1..=4 {
+                sender.send(value).unwrap();
+            }
+            drop(sender);
+
+            let seen: Vec<_> = receiver.collect().await;
+
+            // Capacity 2 of 4 sent: the stream reports the gap rather than
+            // hiding it, then yields what survived, then ends.
+            assert!(matches!(seen[0], Err(RecvError::Lagged(2))));
+            assert_eq!(seen[1].as_ref().unwrap(), &3);
+            assert_eq!(seen[2].as_ref().unwrap(), &4);
+            assert_eq!(
+                seen.len(),
+                3,
+                "the stream should end when the channel closes"
+            );
         });
     }
 

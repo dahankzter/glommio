@@ -22,6 +22,7 @@
 //! ```
 
 use crate::{error::ResourceType, GlommioError};
+use futures_lite::Stream;
 use std::{
     cell::{Ref, RefCell},
     future::Future,
@@ -159,6 +160,29 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+impl<T: Clone> Stream for Receiver<T> {
+    type Item = T;
+
+    /// Yields the latest value each time one arrives, skipping any the
+    /// consumer was too slow to see, and ends when the sender goes away.
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let mut inner = this.inner.borrow_mut();
+
+        if inner.version > this.seen {
+            this.seen = inner.version;
+            return Poll::Ready(Some(inner.value.clone()));
+        }
+
+        if inner.sender_gone {
+            return Poll::Ready(None);
+        }
+
+        inner.wakers.push(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
 /// The future returned by [`Receiver::changed`].
 #[derive(Debug)]
 pub struct Changed<'a, T> {
@@ -282,6 +306,26 @@ mod tests {
             assert!(
                 waiter.await.unwrap().is_err(),
                 "a receiver waiting on a departed sender should be woken with an error"
+            );
+        });
+    }
+
+    #[test]
+    fn a_receiver_is_a_stream_of_the_latest_values() {
+        LocalExecutor::default().run(async {
+            use futures_lite::StreamExt;
+
+            let (sender, receiver) = watch(0);
+            sender.send(1).unwrap();
+            sender.send(2).unwrap();
+            sender.send(3).unwrap();
+            drop(sender);
+
+            let seen: Vec<_> = receiver.collect().await;
+            assert_eq!(
+                seen,
+                vec![3],
+                "a watch stream yields the latest value, not every one"
             );
         });
     }

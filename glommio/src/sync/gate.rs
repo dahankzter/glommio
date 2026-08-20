@@ -209,7 +209,7 @@ impl GateInner {
 mod tests {
     use super::*;
     use crate::sync::Semaphore;
-    use crate::{enclose, timer::timeout, LocalExecutor};
+    use crate::{enclose, future::timeout, LocalExecutor};
     use futures::{join, FutureExt};
     use std::time::Duration;
 
@@ -331,7 +331,6 @@ mod tests {
 
             timeout(Duration::from_millis(1), async move {
                 gate.close().await.unwrap();
-                Ok(())
             })
             .await
             .expect_err("Should have timed out");

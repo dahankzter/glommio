@@ -85,6 +85,12 @@ pub async fn sleep(wait: std::time::Duration) {
 /// ```
 ///
 /// [`GlommioError::TimedOut`]: crate::GlommioError::TimedOut
+#[deprecated(
+    since = "0.10.9",
+    note = "use `glommio::future::timeout`, which accepts any future rather than only one \
+            returning a glommio Result. At the next breaking release this name moves to that \
+            function and this one becomes `try_timeout`."
+)]
 pub async fn timeout<F, T>(dur: Duration, f: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,

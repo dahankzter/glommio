@@ -1179,6 +1179,11 @@ impl WeakDmaFile {
 
 #[cfg(test)]
 pub(crate) mod test {
+    // The advisory-lock tests below exercise the Result-flattening behaviour of
+    // the deprecated `timer::timeout` specifically. Migrating them would change
+    // what they assert, so they keep it deliberately.
+    #![allow(deprecated)]
+
     use super::*;
     use crate::{
         enclose,

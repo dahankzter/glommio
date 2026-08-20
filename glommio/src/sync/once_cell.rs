@@ -69,6 +69,58 @@ impl<T> OnceCell<T> {
         Ok(())
     }
 
+    /// Returns the value, running a fallible `init` to produce it if the cell
+    /// is empty.
+    ///
+    /// **A failed initialiser does not poison the cell.** Lazily-initialised
+    /// resources are usually fallible -- connecting to a catalog, opening a
+    /// file -- and a transient failure should leave the next caller free to
+    /// try again. A caller queued behind one that failed runs its own
+    /// initialiser rather than inheriting the error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use glommio::{sync::OnceCell, LocalExecutor};
+    ///
+    /// let ex = LocalExecutor::default();
+    /// ex.run(async {
+    ///     let cell = OnceCell::new();
+    ///     let value = cell
+    ///         .get_or_try_init(|| async { Ok::<_, std::io::Error>(42) })
+    ///         .await
+    ///         .unwrap();
+    ///     assert_eq!(*value, 42);
+    /// });
+    /// ```
+    pub async fn get_or_try_init<F, Fut, E>(&self, init: F) -> Result<&T, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, E>>,
+    {
+        if let Some(value) = self.get() {
+            return Ok(value);
+        }
+
+        let _permit = self
+            .initialising
+            .acquire_permit(1)
+            .await
+            .expect("the initialisation semaphore is private and never closed");
+
+        // Re-checked under the permit: whoever held it before may have
+        // succeeded, in which case there is nothing to do -- or failed, in
+        // which case the cell is still empty and this caller tries.
+        if self.get().is_none() {
+            let value = init().await?;
+            // Safety: the permit makes this the only writer, and the check
+            // above proved nobody has published a value yet.
+            unsafe { *self.value.get() = Some(value) };
+        }
+
+        Ok(self.get().expect("the cell was just initialised"))
+    }
+
     /// Returns the value, running `init` to produce it if the cell is empty.
     ///
     /// If another task is already initialising the cell, this waits for that
@@ -155,6 +207,109 @@ mod tests {
             }
 
             assert_eq!(*runs.borrow(), 1, "the initialiser ran more than once");
+        });
+    }
+
+    #[test]
+    fn get_or_try_init_stores_a_successful_value() {
+        LocalExecutor::default().run(async {
+            let cell = OnceCell::new();
+            let value = cell
+                .get_or_try_init(|| async { Ok::<_, String>(3) })
+                .await
+                .unwrap();
+            assert_eq!(*value, 3);
+            assert!(cell.is_initialized());
+        });
+    }
+
+    #[test]
+    fn a_failed_get_or_try_init_leaves_the_cell_empty() {
+        LocalExecutor::default().run(async {
+            let cell: OnceCell<u32> = OnceCell::new();
+            let err = cell
+                .get_or_try_init(|| async { Err::<u32, _>("catalog unreachable") })
+                .await
+                .unwrap_err();
+
+            assert_eq!(err, "catalog unreachable");
+            assert!(
+                !cell.is_initialized(),
+                "a failed initialiser must not poison the cell"
+            );
+            assert!(cell.get().is_none());
+        });
+    }
+
+    #[test]
+    fn a_cell_can_be_retried_after_a_failure() {
+        LocalExecutor::default().run(async {
+            let cell = OnceCell::new();
+            let attempts = Rc::new(RefCell::new(0));
+
+            for _ in 0..2 {
+                let _ = cell
+                    .get_or_try_init(|| {
+                        let attempts = attempts.clone();
+                        async move {
+                            *attempts.borrow_mut() += 1;
+                            Err::<u32, _>("still down")
+                        }
+                    })
+                    .await;
+            }
+
+            let value = cell
+                .get_or_try_init(|| async { Ok::<_, &str>(7) })
+                .await
+                .unwrap();
+
+            assert_eq!(*value, 7);
+            assert_eq!(*attempts.borrow(), 2, "each failure should have retried");
+        });
+    }
+
+    #[test]
+    fn a_caller_waiting_behind_a_failed_init_runs_its_own() {
+        LocalExecutor::default().run(async {
+            let cell = Rc::new(OnceCell::new());
+            let order = Rc::new(RefCell::new(Vec::new()));
+
+            // The first initialiser suspends, then fails, so the second is
+            // queued behind it and must not inherit the failure.
+            let failing = crate::spawn_local({
+                let cell = cell.clone();
+                let order = order.clone();
+                async move {
+                    cell.get_or_try_init(|| {
+                        let order = order.clone();
+                        async move {
+                            Timer::new(Duration::from_millis(20)).await;
+                            order.borrow_mut().push("first failed");
+                            Err::<u32, _>("no")
+                        }
+                    })
+                    .await
+                    .is_err()
+                }
+            })
+            .detach();
+
+            Timer::new(Duration::from_millis(5)).await;
+
+            let second = cell
+                .get_or_try_init(|| {
+                    let order = order.clone();
+                    async move {
+                        order.borrow_mut().push("second ran");
+                        Ok::<_, &str>(11)
+                    }
+                })
+                .await;
+
+            assert!(failing.await.unwrap());
+            assert_eq!(*second.unwrap(), 11);
+            assert_eq!(*order.borrow(), vec!["first failed", "second ran"]);
         });
     }
 

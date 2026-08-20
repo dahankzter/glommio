@@ -697,7 +697,7 @@ impl AsyncBufRead for Stdin {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{test_utils::make_test_directories, GlommioError};
+    use crate::test_utils::make_test_directories;
     use futures_lite::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, StreamExt};
     use std::{io::ErrorKind, time::Duration};
 
@@ -1002,16 +1002,14 @@ mod test {
                 let file = BufferedFile::open(&filename).await.unwrap();
                 let reader = StreamReaderBuilder::new(file).build();
                 let mut si = futures_lite::StreamExt::fuse(reader.lines());
-                let result = crate::timer::timeout(Duration::from_millis(100), async move {
-                    si.next().await.ok_or_else(|| {
-                        GlommioError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "stream closed",
-                        ))
-                    })
-                })
-                .await;
-                assert!(result.is_ok());
+                let result =
+                    crate::future::timeout(
+                        Duration::from_millis(100),
+                        async move { si.next().await },
+                    )
+                    .await;
+                assert!(result.is_ok(), "timed out waiting for a line");
+                assert!(result.unwrap().is_some(), "stream closed unexpectedly");
             });
         }
     }
