@@ -15,6 +15,44 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.11 — 2026-08-20
+
+### Added
+
+- **`glommio::select!`** — races several futures and runs the body of whichever
+  finishes first. Branches are pinned on the stack, so they need neither
+  `Unpin` nor `FusedFuture` nor `.fuse()` wrappers, which is what made
+  `futures::select!` unusable as a replacement for tokio's.
+
+  ```rust
+  glommio::select! {
+      biased;                                   // optional: poll top to bottom
+      () = shutdown.cancelled() => break,
+      maybe = upstream.recv()   => handle(maybe).await,
+  }
+  ```
+
+  Branch bodies run in the caller's async context, so `.await` inside one
+  works. Losing futures are **dropped**, not suspended — the usual
+  cancellation-safety caveat applies and is documented on the macro.
+
+  By default the starting branch **rotates** between invocations, so a branch
+  that is always ready cannot starve the ones after it. tokio randomises for
+  the same reason; counting is cheaper and reproduces between runs. A test
+  asserting a fixed winner wants `biased;`.
+
+  Not supported, each additive later and none with a user today: `if` guards,
+  `else`, and refutable patterns.
+
+  Requires the default-on `macros` feature.
+
+### Changed
+
+- Internal: the waker stores added over the last two releases now hand back an
+  obligation that can only be discharged by waking, rather than a bare
+  `Vec<Waker>` that can be dropped on the floor. No API change; it removes a
+  class of bug whose symptom was silence.
+
 ## 0.10.10 — 2026-08-20
 
 ### Added
