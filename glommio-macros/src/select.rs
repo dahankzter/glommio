@@ -170,16 +170,23 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
     };
 
     quote! {{
-        #(#pin)*
         #(#declare)*
 
         let __glommio_select_start = #start;
 
-        // The futures are polled here, but the handlers are not: a handler may
+        // The futures live only for this block, so they are dropped -- and
+        // whatever they borrowed is released -- before any handler runs. tokio
+        // does the same, and code written against it will not compile
+        // otherwise: a handler commonly touches what its own branch borrowed.
+        //
+        // The futures are polled here but the handlers are not: a handler may
         // await, and a non-async closure cannot. So this reports which branch
         // fired and stashes its output; the handler runs afterwards, in the
         // caller's async context.
-        let __glommio_select_which = #krate::__private::poll_fn(
+        let __glommio_select_which = {
+            #(#pin)*
+
+            #krate::__private::poll_fn(
             |__glommio_select_cx| {
                 for __glommio_select_step in 0..#count {
                     match (__glommio_select_start
@@ -193,8 +200,9 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
 
                 ::core::task::Poll::Pending
             },
-        )
-        .await;
+            )
+            .await
+        };
 
         match __glommio_select_which {
             #(#handlers)*

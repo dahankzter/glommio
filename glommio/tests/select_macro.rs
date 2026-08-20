@@ -134,3 +134,47 @@ async fn a_pending_branch_does_not_win() {
     assert_eq!(value, "quick");
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+#[glommio::test]
+async fn a_handler_can_use_what_its_own_branch_borrowed() {
+    // tokio drops the branch futures before running the handler, so the
+    // handler may touch whatever they borrowed. Holding them across the
+    // handler makes this a borrow error -- correct code that will not
+    // compile.
+    // A branch future that borrows mutably *and* has a destructor: without a
+    // `Drop` impl the compiler ends the borrow at its last use, so the hazard
+    // only appears for futures that own cleanup -- which real ones do.
+    struct BorrowsUntilDropped<'a>(&'a mut u32);
+
+    impl Drop for BorrowsUntilDropped<'_> {
+        fn drop(&mut self) {
+            *self.0 += 1;
+        }
+    }
+
+    impl std::future::Future for BorrowsUntilDropped<'_> {
+        type Output = u32;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<u32> {
+            std::task::Poll::Ready(*self.0)
+        }
+    }
+
+    let mut counter = 1u32;
+
+    let total = select! {
+        first = BorrowsUntilDropped(&mut counter) => {
+            // `counter` was borrowed by the branch future. tokio drops branch
+            // futures before running the handler, so this is legal there.
+            counter += first;
+            counter
+        },
+        _ = sleep(Duration::from_secs(30)) => 0,
+    };
+
+    // 1 polled, +1 from the destructor, then + the polled value.
+    assert_eq!(total, 3);
+}

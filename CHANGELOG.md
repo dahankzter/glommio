@@ -15,6 +15,25 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.13 — 2026-08-20
+
+### Fixed
+
+- **`select!` now drops the branch futures before running a handler**, as
+  tokio's does. They were held across the handler, so a handler could not use
+  anything its own branch had borrowed:
+
+  ```rust
+  select! {
+      msg = upstream.recv() => process(&mut upstream, msg).await,  // borrow error
+  }
+  ```
+
+  Only futures with a destructor were affected — for the rest the compiler ends
+  the borrow at its last use — which made it a difference that shows up late
+  and reads as inexplicable. It is a compile error rather than a silent
+  divergence, but it rejects correct code written against tokio's semantics.
+
 ## 0.10.12 — 2026-08-20
 
 ### Fixed

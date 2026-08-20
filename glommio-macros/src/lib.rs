@@ -175,6 +175,12 @@ fn expand(
 /// Not suspended: dropped. A branch that had already taken an item from a
 /// channel and was about to return loses it.
 ///
+/// **All** the branch futures are dropped before any handler runs, as tokio
+/// does, so a handler may use whatever its own branch borrowed. Holding them
+/// across the handler would reject correct code -- and only for futures with
+/// a destructor, since the compiler otherwise ends the borrow at its last use,
+/// which makes it a difference that appears late and confusingly.
+///
 /// Where a future is not cancel-safe, hold it in a variable outside the loop
 /// and poll it by `&mut` rather than recreating it each iteration.
 ///
