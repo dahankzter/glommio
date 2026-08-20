@@ -1,32 +1,32 @@
 #!/usr/bin/env bash
+# Runs the test suite the same way a developer does: `make test-nextest`.
+#
+# Deliberately the same entry point as local development. When this script and
+# the Makefile drifted apart, CI checked things no local target ran, and stayed
+# red for a fortnight while every local run was green.
 set -euo pipefail
 
 target="${1:-}"
-test_threads="$(nproc)"
+
+# nextest is not in the toolchain; install it if the runner has not cached it.
+if ! command -v cargo-nextest >/dev/null 2>&1; then
+    echo "installing cargo-nextest"
+    curl -LsSf https://get.nexte.st/latest/linux \
+        | tar zxf - -C "${CARGO_HOME:-$HOME/.cargo}/bin"
+fi
 
 sudo -E \
     PATH="${PATH}:/usr/share/rust/.cargo/bin" \
     TEST_TARGET="${target}" \
-    TEST_THREADS="${test_threads}" \
     bash -c '
         set -euo pipefail
 
+        # glommio registers io_uring buffers, which are locked pages.
         ulimit -Sl 512
         ulimit -Hl 512
 
-        echo "${TEST_THREADS} CPU(s) available"
-        echo "PATH=${PATH}"
+        echo "$(nproc) CPU(s) available"
         rustup show
 
-        args=(
-            test
-            --locked
-        )
-
-        if [[ -n "${TEST_TARGET}" ]]; then
-            args+=(--target "${TEST_TARGET}")
-        fi
-
-        exec cargo "${args[@]}" -- \
-            --test-threads="${TEST_THREADS}"
+        exec make test-nextest TARGET="${TEST_TARGET}" NEXTEST_PROFILE=ci
     '

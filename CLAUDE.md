@@ -140,6 +140,7 @@ make clean             # Remove build artifacts
 # Meta
 make all               # Format + lint + test (pre-commit check)
 make ci                # Everything CI runs (pre-PUSH check)
+make test-nextest      # What CI runs for tests: nextest + doctests
 ```
 
 ### How It Works

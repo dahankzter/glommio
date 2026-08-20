@@ -124,11 +124,19 @@ test:
 	@echo "→ Running all tests on $(PLATFORM)..."
 	@$(call run_cargo,test --workspace)
 
+# TARGET cross-compiles (e.g. TARGET=x86_64-unknown-linux-musl); empty means host.
+# NEXTEST_PROFILE picks a profile from .config/nextest.toml; CI passes `ci`.
+TARGET ?=
+NEXTEST_PROFILE ?= default
+target_arg := $(if $(TARGET),--target $(TARGET),)
+
 test-nextest:
-	@echo "→ Running all tests under nextest on $(PLATFORM)..."
-	@echo "  (each test in its own process; doctests run separately -- nextest skips them)"
-	@$(call run_cargo,nextest run --workspace)
-	@$(call run_cargo,test --workspace --doc)
+	@echo "→ Running all tests under nextest on $(PLATFORM)$(if $(TARGET), for $(TARGET),)..."
+	@echo "  (each test in its own process; doctests run separately -- nextest cannot"
+	@echo "   enumerate them, since rustdoc compiles them itself rather than emitting"
+	@echo "   a test binary to list)"
+	@$(call run_cargo,nextest run --profile $(NEXTEST_PROFILE) --workspace $(target_arg))
+	@$(call run_cargo,test --workspace --doc $(target_arg))
 
 test-lib:
 	@echo "→ Running library tests on $(PLATFORM)..."
