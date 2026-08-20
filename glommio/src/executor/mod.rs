@@ -1115,7 +1115,12 @@ pub(crate) fn schedule_runnable(runnable: multitask::Runnable) {
         index: runnable.task_queue_index() as usize,
     };
 
-    #[cfg(not(feature = "native-tls"))]
+    // `LOCAL_EX` is only a raw pointer under the nightly cfg; with the feature
+    // on but a stable toolchain it is still a `ScopedKey`. Gating on the
+    // feature alone compiled the pointer path on stable and broke the build --
+    // which only `--all-features` ever revealed, since nothing else turns
+    // `native-tls` on.
+    #[cfg(any(not(nightly), not(feature = "native-tls")))]
     {
         if LOCAL_EX.is_set() {
             LOCAL_EX.with(|local_ex| {
@@ -1127,7 +1132,7 @@ pub(crate) fn schedule_runnable(runnable: multitask::Runnable) {
         }
     }
 
-    #[cfg(feature = "native-tls")]
+    #[cfg(all(nightly, feature = "native-tls"))]
     {
         // SAFETY: `LOCAL_EX` is a thread-local raw pointer to the executor
         // running on this thread; it is null when none is running.

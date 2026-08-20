@@ -126,7 +126,9 @@ impl TaskDebugger {
             }
 
             let header = unsafe { &*(ptr as *const Header) };
-            if Some(header.executor_id) != executor_id() && header.debugging.get() {
+            // `Header::executor_id` was narrowed to `u32` to fit the header's
+            // padding; `executor_id()` still answers in `usize`.
+            if executor_id() != Some(header.executor_id as usize) && header.debugging.get() {
                 dbg.context.push(ctx);
                 dbg.debug_foreign_task(ptr);
                 return true;
