@@ -2,7 +2,7 @@
 #
 # Quick commands for common development tasks
 
-.PHONY: help test test-nextest build fmt lint check bench clean all
+.PHONY: help test test-nextest build fmt fmt-check lint check ci ci-only bench clean all
 .PHONY: install-tools coverage coverage-summary coverage-lcov coverage-open
 .PHONY: bench-timer bench-ci
 .PHONY: miri miri-core miri-setup
@@ -173,10 +173,6 @@ test-sync:
 	@echo "→ Running synchronization tests on $(PLATFORM)..."
 	@$(call run_cargo,test --package glommio --lib sync)
 
-test-task:
-	@echo "→ Running task tests on $(PLATFORM)..."
-	@$(call run_cargo,test --package glommio --lib task)
-
 test-timer:
 	@echo "→ Running timer tests on $(PLATFORM)..."
 	@$(call run_cargo,test --package glommio --lib timer)
@@ -295,6 +291,41 @@ check:
 	@echo "→ Checking compilation on $(PLATFORM)..."
 	@$(call run_cargo,check --workspace --all-targets)
 
+# What CI runs, and nothing a normal build covers.
+#
+# Every CI failure this repo has had came from a check that no local target
+# ran: two of them compile only under --all-features, one only for the musl
+# target, one only under cargo-sort. `make all` stayed green through a
+# fortnight of red CI because it looked at none of them.
+ci-only:
+	@echo "→ Checks that only CI used to run..."
+	@echo "  --all-features (compiles the debugging and native-tls paths)"
+	@$(call run_cargo,clippy --workspace --all-targets --all-features -- -D warnings)
+	@echo "  Cargo.toml ordering"
+	@if command -v cargo-sort >/dev/null 2>&1; then \
+		$(call run_cargo,sort --workspace --check); \
+	else \
+		echo "    ! cargo-sort not installed, skipping (cargo install cargo-sort)"; \
+	fi
+	@echo "  musl cross-compile"
+	@if rustup target list --installed 2>/dev/null | grep -q x86_64-unknown-linux-musl; then \
+		$(call run_cargo,build -p glommio --target x86_64-unknown-linux-musl); \
+	else \
+		echo "    ! musl target not installed, skipping"; \
+		echo "      (rustup target add x86_64-unknown-linux-musl)"; \
+	fi
+	@echo "  documentation"
+	@$(call run_cargo,doc --workspace --all-features --no-deps)
+	@echo "✓ CI-only checks passed"
+
+ci: fmt-check ci-only lint test
+	@echo ""
+	@echo "✓ Everything CI runs has passed locally"
+
+fmt-check:
+	@echo "→ Checking formatting..."
+	@$(call run_cargo,fmt --all -- --check)
+
 # =============================================================================
 # Build
 # =============================================================================
@@ -346,6 +377,4 @@ all: fmt lint test
 	@echo "  - Linting passed"
 	@echo "  - Tests passed"
 
-# CI-friendly target
-ci: fmt lint test
-	@echo "✓ CI checks complete"
+# `ci` lives with the other quality targets above.

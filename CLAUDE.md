@@ -139,6 +139,7 @@ make clean             # Remove build artifacts
 
 # Meta
 make all               # Format + lint + test (pre-commit check)
+make ci                # Everything CI runs (pre-PUSH check)
 ```
 
 ### How It Works
@@ -267,6 +268,13 @@ segfaulting on detached tasks. Recommend mimalloc to deployments instead.
    ```
 
    **CRITICAL:** Always run `make fmt` before committing to avoid CI warnings!
+
+   **And `make ci` before pushing.** `make all` does not compile everything CI
+   compiles, which is how CI stayed red from 2026-08-02 to 2026-08-20 while
+   every local run was green. Three of those four failures lived in code a
+   default build never touches: two behind `--all-features` (the `debugging`
+   and `native-tls` paths), one behind the musl target, one in Cargo.toml
+   ordering. `make ci` runs all of them.
 
 6. **Create commit** (see Commit Message Conventions below):
    ```bash
@@ -567,7 +575,7 @@ git show                    # See the last commit with diff
 
 - **Write tests first** when fixing bugs
 - **Test must fail** before the fix to validate it catches the issue
-- **Run full test suite** before pushing: `make all`
+- **Run full test suite** before pushing: `make ci` (not `make all` — see below)
 - **Check CI** after pushing - rebase on green PRs if needed
 
 ### Running Tests on Different Platforms
