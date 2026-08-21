@@ -22,7 +22,7 @@ pub use timer_impl::{Timer, TimerActionOnce, TimerActionRepeat};
 type Result<T> = crate::Result<T, ()>;
 
 /// Sleep for some time on the current task. Explicit sleeps can introduce undesirable delays if not used correctly.
-/// Consider using [crate::timer::timeout] instead if you are implementing timeout-like semantics or
+/// Consider using [crate::timer::try_timeout] instead if you are implementing timeout-like semantics or
 /// [crate::timer::TimerActionOnce] if you need to schedule a future for some later date in the future without needing
 /// to await.
 ///
@@ -53,29 +53,26 @@ pub async fn sleep(wait: std::time::Duration) {
 ///
 /// # This function is the narrow form
 ///
-/// It only accepts futures that already return a [`crate::Result`]. For
-/// anything else -- a future returning `()`, an `Option`, or another crate's
-/// error type -- use [`future::timeout`](crate::future::timeout), which hands
-/// the output back untouched instead of flattening it.
+/// It only accepts futures that already return a [`crate::Result`], whose
+/// error it flattens into its own. For anything else -- a future returning
+/// `()`, an `Option`, or another crate's error type -- use
+/// [`future::timeout`](crate::future::timeout), which hands the output back
+/// untouched.
 ///
-/// The general one has the better name and does not have it, which is worth
-/// stating plainly: by the ecosystem's `try_` convention (`try_join`,
-/// `try_select`) the `Result`-aware function should be `try_timeout` and the
-/// general one should be `timeout`. This signature is upstream's, so the two
-/// are separated by module instead, as `async-std` separates `io::timeout`
-/// from `future::timeout`. **At the next breaking release this becomes
-/// `try_timeout` and [`future::timeout`](crate::future::timeout) takes this
-/// name.**
+/// The names follow the ecosystem's `try_` convention, where `try_` marks the
+/// `Result`-aware variant: `try_join`, `try_select`, `try_for_each`. Until
+/// 0.11 this function was called `timeout`, which meant two public functions
+/// shared that name.
 ///
 /// ```
 /// # use glommio::{
-/// #    timer::{timeout, Timer},
+/// #    timer::{try_timeout, Timer},
 /// #    LocalExecutor,
 /// # };
 /// # use std::time::Duration;
 /// # let ex = LocalExecutor::default();
 /// # ex.run(async {
-/// timeout(Duration::from_millis(1), async move {
+/// try_timeout(Duration::from_millis(1), async move {
 ///     // this future will wait for 100ms, but won't complete, as the timeout is 1ms
 ///     Timer::new(Duration::from_millis(100)).await;
 ///     Ok(())
@@ -85,13 +82,7 @@ pub async fn sleep(wait: std::time::Duration) {
 /// ```
 ///
 /// [`GlommioError::TimedOut`]: crate::GlommioError::TimedOut
-#[deprecated(
-    since = "0.10.9",
-    note = "use `glommio::future::timeout`, which accepts any future rather than only one \
-            returning a glommio Result. At the next breaking release this name moves to that \
-            function and this one becomes `try_timeout`."
-)]
-pub async fn timeout<F, T>(dur: Duration, f: F) -> Result<T>
+pub async fn try_timeout<F, T>(dur: Duration, f: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {

@@ -55,7 +55,7 @@ impl Inner {
 /// be awaited.
 ///
 /// If you want timeout-like semantics where a future has to complete within a given deadline, consider using
-/// [crate::timer::timeout].
+/// [crate::timer::try_timeout].
 ///
 /// # Examples
 ///

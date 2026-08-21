@@ -1,10 +1,10 @@
 //! Combinators over futures.
 //!
-//! [`timeout`] here races any future against a deadline.
-//! [`timer::timeout`](crate::timer::timeout) is the older, narrower form that
-//! only accepts futures already returning a [`crate::Result`]; the two are
-//! separated by module rather than by name, as `async-std` separates
-//! `io::timeout` from `future::timeout`.
+//! [`timeout`] here races any future against a deadline, whatever it returns.
+//! [`timer::try_timeout`](crate::timer::try_timeout) is the narrower form that
+//! accepts only futures already returning a [`crate::Result`], and flattens
+//! it. The `try_` prefix marks the `Result`-aware one, as it does for
+//! `try_join` and `try_select`.
 
 use crate::{timer::Timer, GlommioError};
 /// The same shorthand `timer` uses: a glommio error carrying no payload.
@@ -21,7 +21,7 @@ use std::{
 ///
 /// Returns the future's output if it finishes in time, or
 /// [`GlommioError::TimedOut`] if the deadline arrives first. Unlike
-/// [`timer::timeout`](crate::timer::timeout) the future may return anything at
+/// [`timer::try_timeout`](crate::timer::try_timeout) the future may return anything at
 /// all -- `()`, an `Option`, or somebody else's error type -- and its output is
 /// handed back untouched rather than flattened.
 ///

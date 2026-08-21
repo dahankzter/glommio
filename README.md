@@ -33,6 +33,14 @@ LocalExecutorBuilder::default().spawn(|| async move {
 .join();
 ```
 
+### Versioning
+
+Published versions are this republish's own, not the upstream fork's. Through
+`0.10.15` the patch number was ours and the `0.10` mirrored upstream; from
+`0.11.0` they diverge, because a breaking change to `GlommioError` required a
+minor bump under cargo's rules. Upstream `glommio` remains at `0.10.0`, and a
+higher number here means releases, not distance ahead.
+
 ### Attribute macros
 
 ```rust

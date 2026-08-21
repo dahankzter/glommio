@@ -1179,18 +1179,19 @@ impl WeakDmaFile {
 
 #[cfg(test)]
 pub(crate) mod test {
-    // The advisory-lock tests below exercise the Result-flattening behaviour of
-    // the deprecated `timer::timeout` specifically. Migrating them would change
-    // what they assert, so they keep it deliberately.
-    #![allow(deprecated)]
-
     use super::*;
     use crate::{
         enclose,
         sync::Semaphore,
         test_utils::make_test_directories,
-        timer::{sleep, timeout},
-        ByteSliceMutExt, GlommioError, Latency, LocalExecutor, ResourceType, Shares,
+        // These advisory-lock tests want the Result-flattening form.
+        timer::{sleep, try_timeout as timeout},
+        ByteSliceMutExt,
+        GlommioError,
+        Latency,
+        LocalExecutor,
+        ResourceType,
+        Shares,
     };
     use futures::join;
     use futures_lite::{stream, StreamExt};

@@ -15,6 +15,63 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.11.0 — 2026-08-21
+
+The first release that asks anything of downstreams. Both changes are
+mechanical; the whole migration is below.
+
+### Migrating
+
+**`GlommioError::BuilderError(BuilderErrorKind::ThreadPanic(..))` now carries a
+`String`** instead of `Box<dyn Any + Send>`. Only code that matched that
+variant and inspected its payload is affected — and since `Display` printed
+`"thread panicked"` and discarded it, there was nothing useful to inspect.
+
+**`timer::timeout` is now `timer::try_timeout`.** If you were using it you have
+had a deprecation warning since 0.10.9. Two ways forward:
+
+- Take `future::timeout` — it accepts any future and hands the output back
+  untouched. This is what you want in almost every case.
+- Or rename the call to `timer::try_timeout` to keep the `Result`-flattening
+  behaviour.
+
+Nothing else changes.
+
+### Fixed
+
+- **`GlommioError` is now `Send + Sync`.** It never was, for any `T`, because
+  `ThreadPanic` held a `Box<dyn Any + Send>`, and `Box<dyn Any + Send>` is not
+  `Sync`. That made even the `GlommioError<()>` returned by every file and
+  socket operation unusable with `anyhow`, which requires
+  `Send + Sync + 'static` — so a glommio error could not be `?`'d into an
+  `anyhow::Result`, and downstream code grew flattening shims purely to get
+  `Sync` back.
+
+  The panic message is now captured where the panic is caught. That is `Sync`,
+  and strictly more useful than what it replaced: a panic carries a `&str` or
+  `String` in essentially every real case, and that text now reaches `Display`
+  rather than being dropped.
+
+### Changed
+
+- `timer::timeout` renamed to `timer::try_timeout`, completing the split begun
+  in 0.10.9. `future::timeout` keeps the plain name, so exactly one public
+  function is called `timeout` and the `try_` prefix marks the `Result`-aware
+  variant, as it does for `try_join` and `try_select`.
+
+- The test-directory notice no longer claims glommio needs an NVMe volume
+  generally. **Poll io** (`IORING_SETUP_IOPOLL`) does and always will.
+  `DmaFile` needs only `O_DIRECT`, which tmpfs has supported since Linux 6.1 —
+  so plain DMA file tests run anywhere recent.
+
+### A note on the version
+
+Releases so far were `0.10.x`, mirroring the fork's own `0.10.0` with the patch
+number belonging to this republish. This release breaks that: `0.11.0` is
+required by cargo's compatibility rules, since every `0.10.x` is treated as
+interchangeable and this one is not. **It does not mean this crate is a minor
+version ahead of glommio proper** — the upstream fork is still at `0.10.0`.
+
 ## 0.10.15 — 2026-08-21
 
 Two asks from a downstream's second field report, both of which unblock real
