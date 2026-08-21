@@ -691,7 +691,118 @@ impl<T> Drop for ChannelStream<'_, T> {
     }
 }
 
+/// A [`Stream`] that owns the receiver it reads from.
+///
+/// Returned by [`LocalReceiver::into_stream`]. Unlike the borrowing
+/// [`stream`](LocalReceiver::stream) it carries no lifetime, so it can be
+/// boxed and handed to something that wants a `'static` stream.
+pub struct OwnedChannelStream<T> {
+    // Boxed so the stream is `Unpin` despite the receiver's pinned waiter
+    // node -- the same courtesy `ChannelStream` extends by boxing its own.
+    receiver: Box<LocalReceiver<T>>,
+    // Boxed for the same reason `ChannelStream` boxes it: an unpinned node
+    // would make the stream `!Unpin` and force callers to pin it themselves.
+    node: Pin<Box<WaiterNode>>,
+}
+
+impl<T> std::fmt::Debug for OwnedChannelStream<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OwnedChannelStream {{ .. }}")
+    }
+}
+
+impl<T> Stream for OwnedChannelStream<T> {
+    type Item = T;
+
+    #[inline]
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = unsafe { self.get_unchecked_mut() };
+        poll_channel(&this.receiver.channel, this.node.as_mut(), cx)
+    }
+}
+
+impl<T> Drop for OwnedChannelStream<T> {
+    fn drop(&mut self) {
+        remove_from_the_waiting_queue(
+            self.node.as_mut(),
+            &mut self.receiver.channel.state.borrow_mut(),
+        );
+    }
+}
+
+/// The body shared by the borrowing and owning streams.
+#[inline]
+fn poll_channel<T>(
+    channel: &LocalChannel<T>,
+    mut node: Pin<&mut WaiterNode>,
+    cx: &mut Context<'_>,
+) -> Poll<Option<T>> {
+    let result = channel.state.borrow_mut().recv_one();
+
+    match result {
+        PollResult::Pending(kind) => {
+            *node.waker.borrow_mut() = Some(cx.waker().clone());
+            *node.kind.borrow_mut() = Some(kind);
+
+            register_into_waiting_queue(node.as_mut(), &mut channel.state.borrow_mut());
+
+            Poll::Pending
+        }
+        PollResult::Ready(result) => {
+            remove_from_the_waiting_queue(node.as_mut(), &mut channel.state.borrow_mut());
+
+            Poll::Ready(result.map(|(ret, mw)| {
+                if let Some(waker) = mw {
+                    waker.wake();
+                }
+
+                ret
+            }))
+        }
+    }
+}
+
 impl<T> LocalReceiver<T> {
+    /// Converts this receiver into a [`Stream`] that owns it.
+    ///
+    /// [`stream`](Self::stream) borrows, which is right for a loop in the same
+    /// scope and useless for handing the stream to something else. This one
+    /// carries no lifetime, so it can be boxed as
+    /// `Pin<Box<dyn Stream<Item = T>>>` and passed to a library.
+    ///
+    /// The receiving end closes when the stream is dropped, exactly as it does
+    /// when the receiver is.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use futures_lite::StreamExt;
+    /// use glommio::{channels::local_channel, LocalExecutor};
+    ///
+    /// let ex = LocalExecutor::default();
+    /// ex.run(async move {
+    ///     let (sender, receiver) = local_channel::new_unbounded();
+    ///     sender.try_send(1).unwrap();
+    ///     drop(sender);
+    ///
+    ///     let stream: std::pin::Pin<Box<dyn futures_lite::Stream<Item = i32>>> =
+    ///         Box::pin(receiver.into_stream());
+    ///     assert_eq!(stream.collect::<Vec<_>>().await, vec![1]);
+    /// });
+    /// ```
+    pub fn into_stream(self) -> OwnedChannelStream<T> {
+        OwnedChannelStream {
+            receiver: Box::new(self),
+            node: Box::pin(WaiterNode {
+                waker: RefCell::new(None),
+                link: LinkedListLink::new(),
+                kind: RefCell::new(None),
+
+                _p: PhantomPinned,
+            }),
+        }
+    }
+
     /// Receives data from this channel
     ///
     /// If the sender is no longer available it returns [`None`]. Otherwise,
@@ -749,6 +860,51 @@ impl<T> LocalReceiver<T> {
 
 #[cfg(test)]
 mod test {
+    use crate::LocalExecutor;
+
+    #[test]
+    fn owned_stream_outlives_the_scope_that_made_it() {
+        // The point of `into_stream`: hand it to something that needs 'static,
+        // rather than looping over a borrow in place.
+        LocalExecutor::default().run(async move {
+            let (sender, receiver) = new_unbounded();
+
+            let boxed: std::pin::Pin<Box<dyn Stream<Item = u32>>> =
+                Box::pin(receiver.into_stream());
+
+            for value in 1..=3 {
+                sender.try_send(value).unwrap();
+            }
+            drop(sender);
+
+            let seen: Vec<u32> = boxed.collect().await;
+            assert_eq!(seen, vec![1, 2, 3]);
+        });
+    }
+
+    #[test]
+    fn an_owned_stream_ends_when_the_sender_goes_away() {
+        LocalExecutor::default().run(async move {
+            let (sender, receiver) = new_unbounded::<u32>();
+            let mut stream = receiver.into_stream();
+            drop(sender);
+            assert_eq!(stream.next().await, None);
+        });
+    }
+
+    #[test]
+    fn dropping_an_owned_stream_releases_the_receiving_end() {
+        LocalExecutor::default().run(async move {
+            let (sender, receiver) = new_unbounded();
+            let stream = receiver.into_stream();
+            drop(stream);
+
+            // The receiver went with the stream, so the channel is closed to
+            // the sender as it would be had the receiver itself been dropped.
+            assert!(sender.try_send(1u32).is_err());
+        });
+    }
+
     use super::*;
     use crate::enclose;
     use futures_lite::stream::{self, StreamExt};

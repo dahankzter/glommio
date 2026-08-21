@@ -27,6 +27,10 @@ use std::{
     future::Future,
     pin::Pin,
     rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     task::{Context, Poll},
 };
 
@@ -135,11 +139,214 @@ impl<T> Drop for Receiver<T> {
     }
 }
 
+/// State shared by a [`SharedSender`] and [`SharedReceiver`].
+///
+/// Reachable from both halves directly, rather than one holding a reference to
+/// the other: once a sender is gone nothing could ever fill this, so the
+/// receiver must be able to read "closed" out of state it owns. Same reasoning
+/// as [`ForeignCancellation`](crate::sync::ForeignCancellation).
+#[derive(Debug)]
+struct SharedInner<T> {
+    value: Mutex<Option<T>>,
+    waker: Mutex<crate::wakers::WakerList>,
+    sender_gone: AtomicBool,
+    receiver_gone: AtomicBool,
+}
+
+/// Sends the single value, from anywhere.
+#[derive(Debug)]
+pub struct SharedSender<T> {
+    inner: Arc<SharedInner<T>>,
+}
+
+/// Resolves to the single value, on whichever executor polls it.
+#[derive(Debug)]
+pub struct SharedReceiver<T> {
+    inner: Arc<SharedInner<T>>,
+}
+
+/// Creates a one-shot channel whose halves can be sent between executors.
+///
+/// [`oneshot`] is `Rc`-based and stays on one core, which is the right default.
+/// This one is for the ask-and-reply idiom across cores: the sender travels to
+/// the service that will answer, the receiver is awaited where the question was
+/// asked.
+///
+/// # Examples
+///
+/// ```
+/// use glommio::{channels::oneshot::shared, LocalExecutor, LocalExecutorBuilder, Placement};
+///
+/// let (sender, receiver) = shared();
+///
+/// let answering = LocalExecutorBuilder::new(Placement::Unbound)
+///     .spawn(move || async move { sender.send(42).unwrap() })
+///     .unwrap();
+///
+/// let answer = LocalExecutor::default().run(async move { receiver.await });
+/// answering.join().unwrap();
+/// assert_eq!(answer.unwrap(), 42);
+/// ```
+pub fn shared<T: Send>() -> (SharedSender<T>, SharedReceiver<T>) {
+    let inner = Arc::new(SharedInner {
+        value: Mutex::new(None),
+        waker: Mutex::new(crate::wakers::WakerList::new()),
+        sender_gone: AtomicBool::new(false),
+        receiver_gone: AtomicBool::new(false),
+    });
+
+    (
+        SharedSender {
+            inner: inner.clone(),
+        },
+        SharedReceiver { inner },
+    )
+}
+
+impl<T: Send> SharedSender<T> {
+    /// Sends the value, waking the receiver wherever it is waiting.
+    ///
+    /// # Errors
+    ///
+    /// Hands the value back if the receiver has been dropped.
+    pub fn send(self, value: T) -> Result<(), GlommioError<T>> {
+        if self.inner.receiver_gone.load(Ordering::Acquire) {
+            return Err(GlommioError::Closed(ResourceType::Channel(value)));
+        }
+
+        *self.inner.value.lock().unwrap() = Some(value);
+
+        // Taken under the lock, woken outside it.
+        let pending = self.inner.waker.lock().unwrap().take();
+        pending.wake();
+        Ok(())
+    }
+
+    /// Whether the receiver has gone away, so an expensive answer can be
+    /// skipped rather than computed and thrown away.
+    pub fn is_closed(&self) -> bool {
+        self.inner.receiver_gone.load(Ordering::Acquire)
+    }
+}
+
+impl<T> Drop for SharedSender<T> {
+    fn drop(&mut self) {
+        self.inner.sender_gone.store(true, Ordering::Release);
+        let pending = self.inner.waker.lock().unwrap().take();
+        pending.wake();
+    }
+}
+
+impl<T> Future for SharedReceiver<T> {
+    type Output = Result<T, GlommioError<()>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Some(value) = self.inner.value.lock().unwrap().take() {
+            return Poll::Ready(Ok(value));
+        }
+
+        let mut waker = self.inner.waker.lock().unwrap();
+
+        // Re-checked under the waker lock: a sender may have filled the value
+        // between the read above and here, in which case nobody is left to
+        // wake us.
+        if let Some(value) = self.inner.value.lock().unwrap().take() {
+            return Poll::Ready(Ok(value));
+        }
+
+        if self.inner.sender_gone.load(Ordering::Acquire) {
+            return Poll::Ready(Err(GlommioError::Closed(ResourceType::Channel(()))));
+        }
+
+        waker.push(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl<T> Drop for SharedReceiver<T> {
+    fn drop(&mut self) {
+        self.inner.receiver_gone.store(true, Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{timer::Timer, LocalExecutor};
-    use std::{cell::RefCell, rc::Rc, time::Duration};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn a_shared_value_crosses_cores() {
+        // The control-plane idiom: a reply channel handed to a service on
+        // another core, fired there, awaited here.
+        let (sender, receiver) = shared::<u32>();
+
+        let worker = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move { sender.send(9).unwrap() })
+            .unwrap();
+
+        let value = crate::LocalExecutor::default().run(receiver);
+
+        worker.join().unwrap();
+        assert_eq!(value.unwrap(), 9);
+    }
+
+    #[test]
+    fn a_shared_receiver_is_woken_when_it_was_parked() {
+        let (sender, receiver) = shared::<u32>();
+
+        let sender_thread = std::thread::spawn(move || {
+            // Long enough that the receiving executor has parked in the
+            // kernel: waking it is the whole mechanism.
+            std::thread::sleep(Duration::from_millis(300));
+            let sent_at = std::time::Instant::now();
+            sender.send(1).unwrap();
+            sent_at
+        });
+
+        let received_at = crate::LocalExecutor::default()
+            .run(async move { receiver.await.map(|_| Instant::now()) });
+
+        let sent_at = sender_thread.join().unwrap();
+        let delay = received_at.unwrap().duration_since(sent_at);
+        assert!(
+            delay < Duration::from_millis(100),
+            "a parked executor took {delay:?} to see the reply: it was not woken"
+        );
+    }
+
+    #[test]
+    fn dropping_a_shared_sender_wakes_the_receiver_with_an_error() {
+        let (sender, receiver) = shared::<u32>();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(sender);
+        });
+
+        let outcome = crate::LocalExecutor::default().run(receiver);
+        assert!(
+            outcome.is_err(),
+            "a receiver whose sender went away must not wait forever"
+        );
+    }
+
+    #[test]
+    fn sending_to_a_departed_shared_receiver_hands_the_value_back() {
+        let (sender, receiver) = shared::<String>();
+        drop(receiver);
+
+        match sender.send("payload".to_string()) {
+            Err(GlommioError::Closed(ResourceType::Channel(value))) => {
+                assert_eq!(value, "payload")
+            }
+            other => panic!("expected the value back, got {other:?}"),
+        }
+    }
 
     #[test]
     fn a_sent_value_is_received() {

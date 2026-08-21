@@ -15,6 +15,33 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.10.15 — 2026-08-21
+
+Two asks from a downstream's second field report, both of which unblock real
+call sites and neither of which had open design questions.
+
+### Added
+
+- **`channels::oneshot::shared()`** — a one-shot reply channel whose halves can
+  be sent between executors. The existing `oneshot` is `Rc`-based and stays on
+  one core, which is the right default; this is for the ask-and-reply idiom
+  across cores, where the sender travels to the service that will answer and
+  the receiver is awaited where the question was asked.
+
+  `shared_channel` can already cross, but it is mpsc-shaped, bounded, and needs
+  a `connect()` handshake — a lot of machinery to carry one value back.
+
+  Dropping the sender wakes the receiver with an error rather than leaving it
+  waiting for something that can no longer arrive, and sending to a departed
+  receiver hands the value back.
+
+- **`LocalReceiver::into_stream()`** — an owned, `'static` stream.
+  [`stream()`](https://docs.rs/glommio-ng/latest/glommio_ng/channels/local_channel/struct.LocalReceiver.html#method.stream)
+  borrows the receiver, which is right for a loop in the same scope and useless
+  for handing the stream to a library that wants
+  `Pin<Box<dyn Stream<Item = T>>>`. The receiving end closes when the stream is
+  dropped, exactly as when the receiver is.
+
 ## 0.10.14 — 2026-08-20
 
 ### Fixed
