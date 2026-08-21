@@ -64,6 +64,24 @@ If one end has no executor — a thread you spawned yourself — use
 anywhere. It is `try_send`-only and deliberately not `Clone`: the buffer
 underneath is single-producer, and cloning it across threads corrupts the heap.
 
+## Wakers already know which core to wake
+
+A glommio task's `Waker` carries its owning executor's id, and waking it from
+another thread resolves that executor's sleep notifier and writes its eventfd
+(`task/raw.rs:272`). So an ordinary `Waker` stored in an `Arc<Mutex<..>>` and
+woken from any thread will wake an executor parked in `io_uring_enter`. You do
+not pair a channel with a notifier by hand.
+
+The registration happens at first poll, on whichever executor does the polling
+— the ordinary futures contract — so a `Send` future built on one core and
+polled on another needs no placement step for its wakeups to arrive.
+
+**`ConnectedSender::into_foreign` is not a counter-example**, and reading it as
+one leads to inventing handshakes that nothing needs. What it moves is
+*placement of reactor-owned resources* — the ring registration, buffer
+ownership, the free-space accounting a local reactor was doing — not
+notification. Notification was never the part that needed help.
+
 ## Cancellation does not cross cores
 
 `sync::CancellationToken` is `Rc`-based and `!Send` on purpose: it cancels task
