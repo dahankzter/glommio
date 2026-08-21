@@ -5,8 +5,10 @@
 //! and says the wrong thing: it does not express that exactly one value will
 //! ever be sent, and it cannot hand an unsent value back.
 //!
-//! Like the rest of `channels`, both halves stay on the executor that created
-//! them.
+//! [`oneshot`] keeps both halves on the executor that created them, which is
+//! the right default. [`shared`] is the same channel over
+//! [`Shared`](super::storage::Shared) storage, for the ask-and-reply idiom
+//! across cores.
 //!
 //! # Examples
 //!
@@ -21,21 +23,27 @@
 //! });
 //! ```
 
-use crate::{error::ResourceType, wakers::WakerList, GlommioError};
+use crate::{
+    channels::storage::{Local, Shared, Storage, StorageExt},
+    error::ResourceType,
+    wakers::WakerList,
+    GlommioError,
+};
 use std::{
-    cell::RefCell,
+    fmt,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
-    rc::Rc,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
     task::{Context, Poll},
 };
 
+/// The channel's state, reachable from both halves.
+///
+/// Public only because it names the storage in [`Sender`] and [`Receiver`]'s
+/// default type parameter. It has no callable surface.
+#[doc(hidden)]
 #[derive(Debug)]
-struct Inner<T> {
+pub struct State<T> {
     value: Option<T>,
     /// Holds the receiver's waker while it is suspended. A `WakerList` rather
     /// than an `Option<Waker>` so that taking it yields an obligation to wake
@@ -47,130 +55,71 @@ struct Inner<T> {
     receiver_gone: bool,
 }
 
+impl<T> State<T> {
+    fn new() -> Self {
+        State {
+            value: None,
+            waker: WakerList::new(),
+            sender_gone: false,
+            receiver_gone: false,
+        }
+    }
+}
+
 /// Sends the single value. Consumed by [`send`](Sender::send).
-#[derive(Debug)]
-pub struct Sender<T> {
-    inner: Rc<RefCell<Inner<T>>>,
+pub struct Sender<T, S: Storage<State<T>> = Local<State<T>>> {
+    inner: S,
+    /// `T` appears only inside the storage, and the storage is what decides
+    /// the auto traits. A `fn() -> T` marker satisfies the type parameter
+    /// without adding constraints of its own -- notably it stays `Unpin`
+    /// whatever `T` is, as the `Rc` these were built on used to be.
+    value: PhantomData<fn() -> T>,
 }
 
 /// Resolves to the single value, or to an error if the sender goes away first.
-#[derive(Debug)]
-pub struct Receiver<T> {
-    inner: Rc<RefCell<Inner<T>>>,
+pub struct Receiver<T, S: Storage<State<T>> = Local<State<T>>> {
+    inner: S,
+    /// `T` appears only inside the storage, and the storage is what decides
+    /// the auto traits. A `fn() -> T` marker satisfies the type parameter
+    /// without adding constraints of its own -- notably it stays `Unpin`
+    /// whatever `T` is, as the `Rc` these were built on used to be.
+    value: PhantomData<fn() -> T>,
 }
 
-/// Creates a new one-shot channel, returning its two halves.
-pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
-    let inner = Rc::new(RefCell::new(Inner {
-        value: None,
-        waker: WakerList::new(),
-        sender_gone: false,
-        receiver_gone: false,
-    }));
+/// A [`Sender`] that can be moved to another executor. See [`shared`].
+pub type SharedSender<T> = Sender<T, Shared<State<T>>>;
 
+/// A [`Receiver`] that can be awaited on another executor. See [`shared`].
+pub type SharedReceiver<T> = Receiver<T, Shared<State<T>>>;
+
+fn pair<T, S: Storage<State<T>>>(inner: S) -> (Sender<T, S>, Receiver<T, S>) {
     (
         Sender {
             inner: inner.clone(),
+            value: PhantomData,
         },
-        Receiver { inner },
+        Receiver {
+            inner,
+            value: PhantomData,
+        },
     )
 }
 
-impl<T> Sender<T> {
-    /// Sends the value, waking the receiver if it is already waiting.
-    ///
-    /// # Errors
-    ///
-    /// If the receiver has been dropped the value has nowhere to go, so it is
-    /// handed back inside [`GlommioError::Closed`] rather than dropped
-    /// silently.
-    pub fn send(self, value: T) -> Result<(), GlommioError<T>> {
-        let mut inner = self.inner.borrow_mut();
-        if inner.receiver_gone {
-            return Err(GlommioError::Closed(ResourceType::Channel(value)));
-        }
-
-        inner.value = Some(value);
-        let pending = inner.waker.take();
-        drop(inner);
-        pending.wake();
-        Ok(())
-    }
-
-    /// Returns whether the receiver has gone away, so a caller holding an
-    /// expensive value can skip producing it.
-    pub fn is_closed(&self) -> bool {
-        self.inner.borrow().receiver_gone
-    }
-}
-
-impl<T> Drop for Sender<T> {
-    fn drop(&mut self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.sender_gone = true;
-        let pending = inner.waker.take();
-        drop(inner);
-        pending.wake();
-    }
-}
-
-impl<T> Future for Receiver<T> {
-    type Output = Result<T, GlommioError<()>>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self.inner.borrow_mut();
-
-        if let Some(value) = inner.value.take() {
-            return Poll::Ready(Ok(value));
-        }
-
-        if inner.sender_gone {
-            return Poll::Ready(Err(GlommioError::Closed(ResourceType::Channel(()))));
-        }
-
-        inner.waker.push(cx.waker().clone());
-        Poll::Pending
-    }
-}
-
-impl<T> Drop for Receiver<T> {
-    fn drop(&mut self) {
-        self.inner.borrow_mut().receiver_gone = true;
-    }
-}
-
-/// State shared by a [`SharedSender`] and [`SharedReceiver`].
+/// Creates a new one-shot channel, returning its two halves.
 ///
-/// Reachable from both halves directly, rather than one holding a reference to
-/// the other: once a sender is gone nothing could ever fill this, so the
-/// receiver must be able to read "closed" out of state it owns. Same reasoning
-/// as [`ForeignCancellation`](crate::sync::ForeignCancellation).
-#[derive(Debug)]
-struct SharedInner<T> {
-    value: Mutex<Option<T>>,
-    waker: Mutex<crate::wakers::WakerList>,
-    sender_gone: AtomicBool,
-    receiver_gone: AtomicBool,
-}
-
-/// Sends the single value, from anywhere.
-#[derive(Debug)]
-pub struct SharedSender<T> {
-    inner: Arc<SharedInner<T>>,
-}
-
-/// Resolves to the single value, on whichever executor polls it.
-#[derive(Debug)]
-pub struct SharedReceiver<T> {
-    inner: Arc<SharedInner<T>>,
+/// Both halves stay on the executor that created them. For a pair that can
+/// cross cores, see [`shared`].
+pub fn oneshot<T>() -> (Sender<T>, Receiver<T>) {
+    pair(Local::new(State::new()))
 }
 
 /// Creates a one-shot channel whose halves can be sent between executors.
 ///
-/// [`oneshot`] is `Rc`-based and stays on one core, which is the right default.
-/// This one is for the ask-and-reply idiom across cores: the sender travels to
-/// the service that will answer, the receiver is awaited where the question was
-/// asked.
+/// The same channel as [`oneshot`], over storage that crosses cores: the
+/// sender travels to the service that will answer, the receiver is awaited
+/// where the question was asked. Nothing needs wiring up for the wake to
+/// arrive -- a glommio waker carries its own executor's identity, so the
+/// receiver's executor is woken out of the kernel wherever the send happens.
 ///
 /// # Examples
 ///
@@ -188,84 +137,84 @@ pub struct SharedReceiver<T> {
 /// assert_eq!(answer.unwrap(), 42);
 /// ```
 pub fn shared<T: Send>() -> (SharedSender<T>, SharedReceiver<T>) {
-    let inner = Arc::new(SharedInner {
-        value: Mutex::new(None),
-        waker: Mutex::new(crate::wakers::WakerList::new()),
-        sender_gone: AtomicBool::new(false),
-        receiver_gone: AtomicBool::new(false),
-    });
-
-    (
-        SharedSender {
-            inner: inner.clone(),
-        },
-        SharedReceiver { inner },
-    )
+    pair(Shared::new(State::new()))
 }
 
-impl<T: Send> SharedSender<T> {
-    /// Sends the value, waking the receiver wherever it is waiting.
+impl<T, S: Storage<State<T>>> Sender<T, S> {
+    /// Sends the value, waking the receiver if it is already waiting.
     ///
     /// # Errors
     ///
-    /// Hands the value back if the receiver has been dropped.
+    /// If the receiver has been dropped the value has nowhere to go, so it is
+    /// handed back inside [`GlommioError::Closed`] rather than dropped
+    /// silently.
     pub fn send(self, value: T) -> Result<(), GlommioError<T>> {
-        if self.inner.receiver_gone.load(Ordering::Acquire) {
-            return Err(GlommioError::Closed(ResourceType::Channel(value)));
-        }
-
-        *self.inner.value.lock().unwrap() = Some(value);
-
-        // Taken under the lock, woken outside it.
-        let pending = self.inner.waker.lock().unwrap().take();
-        pending.wake();
-        Ok(())
+        self.inner.with_wakes(|state| {
+            let outcome = if state.receiver_gone {
+                Err(GlommioError::Closed(ResourceType::Channel(value)))
+            } else {
+                state.value = Some(value);
+                Ok(())
+            };
+            (outcome, state.waker.take())
+        })
     }
 
-    /// Whether the receiver has gone away, so an expensive answer can be
-    /// skipped rather than computed and thrown away.
+    /// Returns whether the receiver has gone away, so a caller holding an
+    /// expensive value can skip producing it.
     pub fn is_closed(&self) -> bool {
-        self.inner.receiver_gone.load(Ordering::Acquire)
+        self.inner.with(|state| state.receiver_gone)
     }
 }
 
-impl<T> Drop for SharedSender<T> {
+impl<T, S: Storage<State<T>>> Drop for Sender<T, S> {
     fn drop(&mut self) {
-        self.inner.sender_gone.store(true, Ordering::Release);
-        let pending = self.inner.waker.lock().unwrap().take();
-        pending.wake();
+        self.inner
+            .with_waking_all(|state| &mut state.waker, |state| state.sender_gone = true);
     }
 }
 
-impl<T> Future for SharedReceiver<T> {
+impl<T, S: Storage<State<T>>> Future for Receiver<T, S> {
     type Output = Result<T, GlommioError<()>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(value) = self.inner.value.lock().unwrap().take() {
-            return Poll::Ready(Ok(value));
-        }
+        // Taking the value and registering the waker under one lock is what
+        // makes the missed-wakeup race unwriteable: there is no window between
+        // "no value yet" and "and here is where to tell me".
+        self.inner.with(|state| {
+            if let Some(value) = state.value.take() {
+                return Poll::Ready(Ok(value));
+            }
 
-        let mut waker = self.inner.waker.lock().unwrap();
+            if state.sender_gone {
+                return Poll::Ready(Err(GlommioError::Closed(ResourceType::Channel(()))));
+            }
 
-        // Re-checked under the waker lock: a sender may have filled the value
-        // between the read above and here, in which case nobody is left to
-        // wake us.
-        if let Some(value) = self.inner.value.lock().unwrap().take() {
-            return Poll::Ready(Ok(value));
-        }
-
-        if self.inner.sender_gone.load(Ordering::Acquire) {
-            return Poll::Ready(Err(GlommioError::Closed(ResourceType::Channel(()))));
-        }
-
-        waker.push(cx.waker().clone());
-        Poll::Pending
+            state.waker.push(cx.waker().clone());
+            Poll::Pending
+        })
     }
 }
 
-impl<T> Drop for SharedReceiver<T> {
+impl<T, S: Storage<State<T>>> Drop for Receiver<T, S> {
     fn drop(&mut self) {
-        self.inner.receiver_gone.store(true, Ordering::Release);
+        self.inner.with(|state| state.receiver_gone = true);
+    }
+}
+
+impl<T, S: Storage<State<T>> + fmt::Debug> fmt::Debug for Sender<T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<T, S: Storage<State<T>> + fmt::Debug> fmt::Debug for Receiver<T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver")
+            .field("inner", &self.inner)
+            .finish()
     }
 }
 
