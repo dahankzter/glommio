@@ -12,7 +12,9 @@
 //! working around: `Rc<T>` is itself `Clone`, so broadcasting `Rc<T>` gives
 //! refcount-cheap fan-out under the same API.
 //!
-//! Both halves stay on the executor that created them.
+//! [`broadcast`] keeps every half on the executor that created it. [`shared`]
+//! is the same channel over [`Shared`](super::storage::Shared) storage, for
+//! fan-out to receivers on other cores.
 //!
 //! # Examples
 //!
@@ -31,15 +33,19 @@
 //! });
 //! ```
 
-use crate::{error::ResourceType, wakers::WakerList, GlommioError};
+use crate::{
+    channels::storage::{Local, Shared, Storage, StorageExt},
+    error::ResourceType,
+    wakers::{PendingWakes, WakerList},
+    GlommioError,
+};
 use futures_lite::Stream;
 use std::{
-    cell::RefCell,
     collections::VecDeque,
     fmt,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
-    rc::Rc,
     task::{Context, Poll},
 };
 
@@ -92,8 +98,13 @@ impl fmt::Display for TryRecvError {
 
 impl std::error::Error for TryRecvError {}
 
+/// The channel's state, reachable from every half.
+///
+/// Public only because it names the storage in the default type parameters
+/// below. It has no callable surface.
+#[doc(hidden)]
 #[derive(Debug)]
-struct Inner<T> {
+pub struct State<T> {
     /// The retained window, oldest first, never longer than `capacity`.
     ///
     /// A value lives here until it is overwritten rather than until every
@@ -108,32 +119,81 @@ struct Inner<T> {
     receivers: usize,
 }
 
-impl<T> Inner<T> {
-    /// Takes the obligation; the caller wakes it once it has released the
-    /// borrow, so a woken poller does not immediately block on it.
-    fn take_wakers(&mut self) -> crate::wakers::PendingWakes {
-        self.wakers.take()
+impl<T> State<T> {
+    fn new(capacity: usize) -> Self {
+        State {
+            values: VecDeque::with_capacity(capacity),
+            capacity,
+            next_seq: 0,
+            wakers: WakerList::new(),
+            senders: 1,
+            receivers: 1,
+        }
     }
 
     /// The sequence of the oldest value still retained, if any.
     fn oldest(&self) -> Option<u64> {
         self.values.front().map(|(seq, _)| *seq)
     }
+
+    /// Reads the value at `next`, advancing the cursor past it.
+    ///
+    /// The whole read decision under one lock, so that a receiver polling and
+    /// a sender sending cannot interleave into a lost wakeup: the caller finds
+    /// a value, learns it lagged, or registers to be told -- with no window
+    /// between deciding and registering.
+    fn take_next(&mut self, next: &mut u64) -> Result<T, TryRecvError>
+    where
+        T: Clone,
+    {
+        if let Some(oldest) = self.oldest() {
+            if *next < oldest {
+                let missed = oldest - *next;
+                *next = oldest;
+                return Err(TryRecvError::Lagged(missed));
+            }
+        }
+
+        let found = self
+            .values
+            .iter()
+            .find(|(seq, _)| *seq == *next)
+            .map(|(_, value)| value.clone());
+
+        match found {
+            Some(value) => {
+                *next += 1;
+                Ok(value)
+            }
+            None if self.senders == 0 => Err(TryRecvError::Closed),
+            None => Err(TryRecvError::Empty),
+        }
+    }
 }
 
 /// Sends values to every receiver. Clone it to send from more than one place.
-#[derive(Debug)]
-pub struct Sender<T> {
-    inner: Rc<RefCell<Inner<T>>>,
+pub struct Sender<T, S: Storage<State<T>> = Local<State<T>>> {
+    inner: S,
+    /// `T` appears only inside the storage, and the storage is what decides
+    /// the auto traits. A `fn() -> T` marker satisfies the type parameter
+    /// without adding constraints of its own -- notably it stays `Unpin`
+    /// whatever `T` is, as the `Rc` these were built on used to be.
+    value: PhantomData<fn() -> T>,
 }
 
 /// Receives every value sent after it subscribed.
-#[derive(Debug)]
-pub struct Receiver<T> {
-    inner: Rc<RefCell<Inner<T>>>,
+pub struct Receiver<T, S: Storage<State<T>> = Local<State<T>>> {
+    inner: S,
     /// The sequence this receiver wants next.
     next: u64,
+    value: PhantomData<fn() -> T>,
 }
+
+/// A [`Sender`] that can be moved to another executor. See [`shared`].
+pub type SharedSender<T> = Sender<T, Shared<State<T>>>;
+
+/// A [`Receiver`] that can be moved to another executor. See [`shared`].
+pub type SharedReceiver<T> = Receiver<T, Shared<State<T>>>;
 
 /// Creates a broadcast channel retaining at most `capacity` values.
 ///
@@ -142,29 +202,66 @@ pub struct Receiver<T> {
 /// Panics if `capacity` is zero: a channel that can retain nothing would
 /// report every value as lagged.
 pub fn broadcast<T: Clone>(capacity: usize) -> (Sender<T>, Receiver<T>) {
+    pair(Local::new(State::new(check(capacity))))
+}
+
+/// Creates a broadcast channel whose halves can be sent between executors.
+///
+/// The same channel as [`broadcast`], over storage that crosses cores.
+/// Nothing needs wiring up for the wake to arrive -- a glommio waker carries
+/// its own executor's identity, so a receiver parked in the kernel is woken
+/// wherever the send happens.
+///
+/// Every receiver takes the same lock to read, so this suits control-plane
+/// fan-out -- a checkpoint decision, a route becoming ready, a shutdown --
+/// rather than a per-message data path. For that, give each core its own
+/// channel and fan out with [`channel_mesh`](super::channel_mesh).
+///
+/// # Panics
+///
+/// As [`broadcast`], if `capacity` is zero.
+///
+/// # Examples
+///
+/// ```
+/// use glommio::{channels::broadcast::shared, LocalExecutorBuilder, Placement};
+///
+/// let (sender, mut receiver) = shared(16);
+///
+/// let listener = LocalExecutorBuilder::new(Placement::Unbound)
+///     .spawn(move || async move { receiver.recv().await.unwrap() })
+///     .unwrap();
+///
+/// sender.send(1).unwrap();
+/// assert_eq!(listener.join().unwrap(), 1);
+/// ```
+pub fn shared<T: Clone + Send>(capacity: usize) -> (SharedSender<T>, SharedReceiver<T>) {
+    pair(Shared::new(State::new(check(capacity))))
+}
+
+fn check(capacity: usize) -> usize {
     assert!(
         capacity > 0,
         "a broadcast channel needs room for at least one value"
     );
+    capacity
+}
 
-    let inner = Rc::new(RefCell::new(Inner {
-        values: VecDeque::with_capacity(capacity),
-        capacity,
-        next_seq: 0,
-        wakers: WakerList::new(),
-        senders: 1,
-        receivers: 1,
-    }));
-
+fn pair<T, S: Storage<State<T>>>(inner: S) -> (Sender<T, S>, Receiver<T, S>) {
     (
         Sender {
             inner: inner.clone(),
+            value: PhantomData,
         },
-        Receiver { inner, next: 0 },
+        Receiver {
+            inner,
+            next: 0,
+            value: PhantomData,
+        },
     )
 }
 
-impl<T: Clone> Sender<T> {
+impl<T: Clone, S: Storage<State<T>>> Sender<T, S> {
     /// Sends a value to every receiver, dropping the oldest retained value if
     /// the channel is full.
     ///
@@ -175,123 +272,122 @@ impl<T: Clone> Sender<T> {
     /// With no receivers left the value has nowhere to go, so it is handed
     /// back inside [`GlommioError::Closed`] rather than dropped silently.
     pub fn send(&self, value: T) -> Result<usize, GlommioError<T>> {
-        let mut inner = self.inner.borrow_mut();
-        if inner.receivers == 0 {
-            return Err(GlommioError::Closed(ResourceType::Channel(value)));
-        }
+        self.inner.with_wakes(|state| {
+            let outcome = if state.receivers == 0 {
+                Err(GlommioError::Closed(ResourceType::Channel(value)))
+            } else {
+                if state.values.len() == state.capacity {
+                    state.values.pop_front();
+                }
 
-        if inner.values.len() == inner.capacity {
-            inner.values.pop_front();
-        }
-
-        let seq = inner.next_seq;
-        inner.next_seq += 1;
-        inner.values.push_back((seq, value));
-
-        let reached = inner.receivers;
-        let pending = inner.take_wakers();
-        drop(inner);
-        pending.wake();
-        Ok(reached)
+                let seq = state.next_seq;
+                state.next_seq += 1;
+                state.values.push_back((seq, value));
+                Ok(state.receivers)
+            };
+            (outcome, state.wakers.take())
+        })
     }
 
     /// Creates a receiver that will see values sent from now on, and none of
     /// those sent before.
-    pub fn subscribe(&self) -> Receiver<T> {
-        let mut inner = self.inner.borrow_mut();
-        inner.receivers += 1;
-        let next = inner.next_seq;
-        drop(inner);
+    pub fn subscribe(&self) -> Receiver<T, S> {
+        let next = self.inner.with(|state| {
+            state.receivers += 1;
+            state.next_seq
+        });
 
         Receiver {
             inner: self.inner.clone(),
             next,
+            value: PhantomData,
         }
     }
 
     /// How many receivers are listening.
     pub fn receiver_count(&self) -> usize {
-        self.inner.borrow().receivers
+        self.inner.with(|state| state.receivers)
     }
 }
 
-impl<T> Clone for Sender<T> {
+impl<T, S: Storage<State<T>>> Clone for Sender<T, S> {
     fn clone(&self) -> Self {
-        self.inner.borrow_mut().senders += 1;
+        self.inner.with(|state| state.senders += 1);
         Sender {
             inner: self.inner.clone(),
+            value: PhantomData,
         }
     }
 }
 
-impl<T> Drop for Sender<T> {
+impl<T, S: Storage<State<T>>> Drop for Sender<T, S> {
     fn drop(&mut self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.senders -= 1;
-        if inner.senders == 0 {
-            let pending = inner.take_wakers();
-            drop(inner);
-            pending.wake();
-        }
+        self.inner.with_wakes(|state| {
+            state.senders -= 1;
+            // Only the last one closes the channel; until then there is
+            // nothing new to tell anybody.
+            let pending = if state.senders == 0 {
+                state.wakers.take()
+            } else {
+                PendingWakes::none()
+            };
+            ((), pending)
+        });
     }
 }
 
-impl<T: Clone> Receiver<T> {
+impl<T: Clone, S: Storage<State<T>>> Receiver<T, S> {
     /// Waits for the next value.
     ///
     /// Returns [`RecvError::Lagged`] if values this receiver had not read were
     /// overwritten; the cursor then sits on the oldest retained value, so the
     /// next call resumes from there.
-    pub fn recv(&mut self) -> Recv<'_, T> {
+    pub fn recv(&mut self) -> Recv<'_, T, S> {
         Recv { receiver: self }
     }
 
     /// Takes the next value if one is waiting, without suspending.
     pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        let inner = self.inner.borrow();
+        let next = &mut self.next;
+        self.inner.with(|state| state.take_next(next))
+    }
 
-        if let Some(oldest) = inner.oldest() {
-            if self.next < oldest {
-                let missed = oldest - self.next;
-                self.next = oldest;
-                return Err(TryRecvError::Lagged(missed));
+    /// Reads the next value, or registers `waker` to be told when there is
+    /// one -- both under a single lock.
+    ///
+    /// Deciding and registering separately would leave a window for a sender
+    /// to fill the channel and wake nobody, which on a shared channel means
+    /// two cores and a real lost wakeup rather than a theoretical one.
+    fn poll_recv(&mut self, waker: &Context<'_>) -> Poll<Result<T, TryRecvError>> {
+        let next = &mut self.next;
+        self.inner.with(|state| match state.take_next(next) {
+            Err(TryRecvError::Empty) => {
+                state.wakers.push(waker.waker().clone());
+                Poll::Pending
             }
-        }
-
-        let found = inner
-            .values
-            .iter()
-            .find(|(seq, _)| *seq == self.next)
-            .map(|(_, value)| value.clone());
-
-        match found {
-            Some(value) => {
-                self.next += 1;
-                Ok(value)
-            }
-            None if inner.senders == 0 => Err(TryRecvError::Closed),
-            None => Err(TryRecvError::Empty),
-        }
+            outcome => Poll::Ready(outcome),
+        })
     }
 }
 
-impl<T> Clone for Receiver<T> {
+impl<T, S: Storage<State<T>>> Clone for Receiver<T, S> {
     fn clone(&self) -> Self {
-        self.inner.borrow_mut().receivers += 1;
+        self.inner.with(|state| state.receivers += 1);
         Receiver {
             inner: self.inner.clone(),
             next: self.next,
+            value: PhantomData,
         }
     }
 }
 
-impl<T> Drop for Receiver<T> {
+impl<T, S: Storage<State<T>>> Drop for Receiver<T, S> {
     fn drop(&mut self) {
-        self.inner.borrow_mut().receivers -= 1;
+        self.inner.with(|state| state.receivers -= 1);
     }
 }
 
-impl<T: Clone> Stream for Receiver<T> {
+impl<T: Clone, S: Storage<State<T>>> Stream for Receiver<T, S> {
     type Item = Result<T, RecvError>;
 
     /// Yields `Err(RecvError::Lagged(n))` rather than skipping quietly, and
@@ -300,51 +396,136 @@ impl<T: Clone> Stream for Receiver<T> {
     /// A lagging receiver is a fact its consumer usually wants to know -- a
     /// stream that hid it would turn a detectable gap into a silent one.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        match this.try_recv() {
-            Ok(value) => Poll::Ready(Some(Ok(value))),
-            Err(TryRecvError::Lagged(missed)) => Poll::Ready(Some(Err(RecvError::Lagged(missed)))),
-            Err(TryRecvError::Closed) => Poll::Ready(None),
-            Err(TryRecvError::Empty) => {
-                this.inner.borrow_mut().wakers.push(cx.waker().clone());
-                Poll::Pending
+        match self.get_mut().poll_recv(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(value)) => Poll::Ready(Some(Ok(value))),
+            Poll::Ready(Err(TryRecvError::Lagged(missed))) => {
+                Poll::Ready(Some(Err(RecvError::Lagged(missed))))
             }
+            Poll::Ready(Err(TryRecvError::Closed)) => Poll::Ready(None),
+            Poll::Ready(Err(TryRecvError::Empty)) => unreachable!("poll_recv suspends instead"),
         }
     }
 }
 
 /// The future returned by [`Receiver::recv`].
 #[derive(Debug)]
-pub struct Recv<'a, T> {
-    receiver: &'a mut Receiver<T>,
+pub struct Recv<'a, T, S: Storage<State<T>> = Local<State<T>>> {
+    receiver: &'a mut Receiver<T, S>,
 }
 
-impl<T: Clone> Future for Recv<'_, T> {
+impl<T: Clone, S: Storage<State<T>>> Future for Recv<'_, T, S> {
     type Output = Result<T, RecvError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        match this.receiver.try_recv() {
-            Ok(value) => Poll::Ready(Ok(value)),
-            Err(TryRecvError::Lagged(missed)) => Poll::Ready(Err(RecvError::Lagged(missed))),
-            Err(TryRecvError::Closed) => Poll::Ready(Err(RecvError::Closed)),
-            Err(TryRecvError::Empty) => {
-                this.receiver
-                    .inner
-                    .borrow_mut()
-                    .wakers
-                    .push(cx.waker().clone());
-                Poll::Pending
+        match self.get_mut().receiver.poll_recv(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
+            Poll::Ready(Err(TryRecvError::Lagged(missed))) => {
+                Poll::Ready(Err(RecvError::Lagged(missed)))
             }
+            Poll::Ready(Err(TryRecvError::Closed)) => Poll::Ready(Err(RecvError::Closed)),
+            Poll::Ready(Err(TryRecvError::Empty)) => unreachable!("poll_recv suspends instead"),
         }
+    }
+}
+
+impl<T, S: Storage<State<T>> + fmt::Debug> fmt::Debug for Sender<T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sender")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<T, S: Storage<State<T>> + fmt::Debug> fmt::Debug for Receiver<T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Receiver")
+            .field("inner", &self.inner)
+            .field("next", &self.next)
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shared_value_reaches_receivers_on_other_cores() {
+        let (sender, mut first) = shared::<u32>(16);
+        let mut second = sender.subscribe();
+
+        let one = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move { first.recv().await })
+            .unwrap();
+        let two = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .spawn(move || async move { second.recv().await })
+            .unwrap();
+
+        // Both receivers are on other cores; this thread is the sender. They
+        // may not have subscribed to the value yet -- they will still see it,
+        // because it is retained rather than delivered.
+        sender.send(4).unwrap();
+
+        assert_eq!(one.join().unwrap().unwrap(), 4);
+        assert_eq!(two.join().unwrap().unwrap(), 4);
+    }
+
+    #[test]
+    fn a_parked_shared_receiver_is_woken_by_a_send() {
+        let (sender, mut receiver) = shared::<u32>(16);
+
+        let publisher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let sent_at = std::time::Instant::now();
+            sender.send(1).unwrap();
+            sent_at
+        });
+
+        let woken_at = crate::LocalExecutor::default().run(async move {
+            receiver.recv().await.unwrap();
+            std::time::Instant::now()
+        });
+
+        let sent_at = publisher.join().unwrap();
+        let delay = woken_at.duration_since(sent_at);
+        assert!(
+            delay < Duration::from_millis(100),
+            "a parked executor took {delay:?} to see the value: it was not woken"
+        );
+    }
+
+    #[test]
+    fn a_shared_receiver_that_falls_behind_is_told_so() {
+        let (sender, mut receiver) = shared::<u32>(2);
+
+        std::thread::spawn(move || {
+            for value in 0..5 {
+                sender.send(value).unwrap();
+            }
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Lagged(3)));
+        assert_eq!(receiver.try_recv().unwrap(), 3);
+    }
+
+    #[test]
+    fn dropping_every_shared_sender_closes_the_receiver() {
+        let (sender, mut receiver) = shared::<u32>(4);
+        let second = sender.clone();
+
+        std::thread::spawn(move || {
+            drop(sender);
+            std::thread::sleep(Duration::from_millis(20));
+            drop(second);
+        });
+
+        let outcome = crate::LocalExecutor::default().run(async move { receiver.recv().await });
+        assert_eq!(outcome, Err(RecvError::Closed));
+    }
     use crate::{timer::Timer, LocalExecutor};
     use std::{cell::RefCell, rc::Rc, time::Duration};
 
