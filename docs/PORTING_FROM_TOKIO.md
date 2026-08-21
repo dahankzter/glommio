@@ -82,15 +82,46 @@ one leads to inventing handshakes that nothing needs. What it moves is
 ownership, the free-space accounting a local reactor was doing — not
 notification. Notification was never the part that needed help.
 
+## `!Send` channels are the default, and each one has a `Send` twin
+
+Every tokio channel is `Send`, so a porting reader reaches for one and finds
+`broadcast::Receiver` will not cross a thread. That is deliberate -- the
+default keeps a per-core channel per-core, and moving one is a compile error
+rather than a convention -- but it is not the whole story: each of
+`broadcast`, `watch` and `oneshot` has a `shared()` constructor giving the same
+channel over storage that crosses cores.
+
+| per-core | crosses cores |
+|---|---|
+| `broadcast::broadcast(cap)` | `broadcast::shared(cap)` |
+| `watch::watch(initial)` | `watch::shared(initial)` |
+| `oneshot::oneshot()` | `oneshot::shared()` |
+
+They are the same implementation, instantiated over `Arc<Mutex<_>>` instead of
+`Rc<RefCell<_>>`, so semantics -- `Lagged(n)`, close rules, skip-to-latest --
+are identical, and `Send`-ness follows from the storage rather than an
+`unsafe impl`.
+
+Two differences worth knowing. `watch`'s `borrow()`, which hands out a
+`Ref<'_, T>`, exists on the local channel only; the shared one has
+`with_current(|v| ..)` and `get()`, because a borrow outliving the call needs
+the value to stay put. And every receiver on a shared channel reads through one
+mutex, which suits control-plane fan-out -- a shutdown, a config change, a
+route becoming ready -- rather than a per-message data path. For that, give
+each core its own channel and fan out with `channels::channel_mesh`.
+
 ## Cancellation does not cross cores
 
 `sync::CancellationToken` is `Rc`-based and `!Send` on purpose: it cancels task
 trees within one executor. A control plane on one core cannot hold a token that
 cancels work on another.
 
-Until a first-class shape exists, the working pattern is: send a `Send` signal
-across (a `oneshot`, or `shared_channel`), and on the far core have a small
-detached task cancel a *local* token when it fires.
+`foreign_child()` is the first-class shape: it hands out a `Send + Sync`
+`ForeignCancellation` that another core can `attach()` to a local token, and
+which is cancelled both when the parent cancels and when the parent is dropped.
+Otherwise the pattern is the same as any cross-core signal: send one (a
+`oneshot::shared`, a `watch::shared`) and cancel a *local* token when it
+fires.
 
 ## `timeout` exists twice
 

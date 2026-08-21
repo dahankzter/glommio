@@ -118,6 +118,32 @@ Two measurements, both against the existing tests as a baseline: the local
 `RefCell` borrow; and the shared path under N-core contention, to have the
 number rather than a hand-wave.
 
+## Measured
+
+Taken on this machine, 200k rounds per figure, three runs, `--release`. The
+local numbers are the same file run against `821761c`, the revision before the
+seam.
+
+| | before | after |
+|---|---|---|
+| local broadcast send+recv | 11.9 ns | 10.4 ns |
+| local watch send+borrow | 3.0 ns | 4.1 ns |
+| local oneshot create+send+recv | 15.8 ns | 17.5 ns |
+
+So it is not free, and the prediction that it would vanish under inlining was
+wrong: `watch` send costs about 1 ns more, `oneshot` about 1.7 ns, and
+`broadcast` about 1.5 ns *less* -- the last because its poll path now decides
+and registers under one lock instead of taking two. Marking the seam `#[inline]`
+was tried and moved nothing outside the noise, so it is not there.
+
+A nanosecond on a 3 ns operation is a third of it, and worth saying plainly
+rather than rounding to "free". It buys deleting one hand-written state machine
+and not writing two more.
+
+The shared path, same machine: 26 ns/op uncontended, and about 16 ns per send
+with 2, 4 and 8 receivers each on their own executor. Reproduce with
+`cargo run --release --example channel_storage_cost`.
+
 ## Testing
 
 Every existing test in all three modules must pass **unchanged**. That is the
