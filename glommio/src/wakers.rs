@@ -71,6 +71,12 @@ impl WakerList {
 pub(crate) struct PendingWakes(Vec<Waker>);
 
 impl PendingWakes {
+    /// An obligation to nobody, for a path that changed nothing anyone is
+    /// waiting on.
+    pub(crate) const fn none() -> Self {
+        PendingWakes(Vec::new())
+    }
+
     /// Wakes every waker, discharging the obligation.
     pub(crate) fn wake(mut self) {
         for waker in std::mem::take(&mut self.0) {
