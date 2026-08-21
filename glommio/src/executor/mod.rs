@@ -447,7 +447,7 @@ impl<T: Send + 'static> ExecutorJoinHandle<T> {
     pub fn join(self) -> Result<T> {
         match self.0.join() {
             Err(err) => Err(GlommioError::BuilderError(BuilderErrorKind::ThreadPanic(
-                err,
+                crate::error::panic_message(err),
             ))),
             Ok(Err(err)) => Err(err),
             Ok(Ok(res)) => Ok(res),
@@ -1087,7 +1087,9 @@ impl<T> PoolThreadHandles<T> {
                     // returns an immediate `Err` if any thread fails to spawn, so
                     // `PoolThreadHandles` would never be created
                     Ok(err @ Err(_)) => err,
-                    Err(e) => Err(GlommioError::BuilderError(BuilderErrorKind::ThreadPanic(e))),
+                    Err(e) => Err(GlommioError::BuilderError(BuilderErrorKind::ThreadPanic(
+                        crate::error::panic_message(e),
+                    ))),
                 }
             })
             .collect::<Vec<_>>()

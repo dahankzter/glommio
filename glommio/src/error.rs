@@ -137,9 +137,33 @@ pub enum BuilderErrorKind {
     },
     /// Error type returned by
     /// [`PoolThreadHandles::join_all`](crate::PoolThreadHandles::join_all)
-    /// for threads that panicked.  The contained error is forwarded from
-    /// [`JoinHandle`](std::thread::JoinHandle).
-    ThreadPanic(Box<dyn std::any::Any + Send>),
+    /// for threads that panicked, carrying what the panic said.
+    ///
+    /// This used to hold the `Box<dyn Any + Send>` that
+    /// [`JoinHandle`](std::thread::JoinHandle) hands back. That box is not
+    /// `Sync`, which made every `GlommioError` -- including the
+    /// `GlommioError<()>` returned by every file and socket operation -- not
+    /// `Sync` either, and so unusable with `anyhow`, which requires
+    /// `Send + Sync + 'static`. Nothing ever read the payload: `Display`
+    /// printed "thread panicked" and dropped it.
+    ///
+    /// The message is extracted at the point the panic is caught, which is
+    /// both `Sync` and strictly more informative than what it replaced.
+    ThreadPanic(String),
+}
+
+/// Turns a panic payload into something worth printing.
+///
+/// `panic!` produces a `&'static str` or a `String` in essentially every real
+/// case; anything else is a payload nobody can render anyway.
+pub(crate) fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "thread panicked".to_string(),
+        },
+    }
 }
 
 impl fmt::Display for BuilderErrorKind {
@@ -156,7 +180,7 @@ impl fmt::Display for BuilderErrorKind {
                 f,
                 "requested {minimum} shards but a minimum of {shards} is required"
             ),
-            Self::ThreadPanic(_) => write!(f, "thread panicked"),
+            Self::ThreadPanic(message) => write!(f, "thread panicked: {message}"),
         }
     }
 }
@@ -549,6 +573,31 @@ mod test {
     use std::{io, panic::panic_any};
 
     use super::*;
+
+    /// `anyhow::Error` requires `Send + Sync + 'static`, so a type that is not
+    /// `Sync` cannot be `?`'d into it -- which is most of Rust's error handling.
+    #[test]
+    fn errors_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<GlommioError<()>>();
+        assert_send_sync::<GlommioError<usize>>();
+        assert_send_sync::<BuilderErrorKind>();
+    }
+
+    #[test]
+    fn a_thread_panic_reports_what_the_panic_said() {
+        // The payload used to be a `Box<dyn Any + Send>` that nothing read: it
+        // cost every user `Sync`, and `Display` printed "thread panicked".
+        let handle = std::thread::spawn(|| panic!("the sky is falling"));
+        let payload = handle.join().unwrap_err();
+
+        let err = BuilderErrorKind::ThreadPanic(panic_message(payload));
+        assert!(
+            err.to_string().contains("the sky is falling"),
+            "the panic message should reach Display, got {err}"
+        );
+    }
 
     #[test]
     #[should_panic(

@@ -859,17 +859,21 @@ pub(crate) mod test_utils {
     pub(crate) fn make_test_directories(test_name: &str) -> std::vec::Vec<TestDirectory> {
         let mut vec = Vec::new();
 
-        // Glommio currently only supports NVMe-backed volumes formatted with XFS or
-        // EXT4. We therefore let the user decide what directory glommio should
-        // use to host the unit tests in. For more information regarding this
-        // limitation, see the README
+        // *Poll* io -- IORING_SETUP_IOPOLL -- needs an NVMe-backed volume on XFS
+        // or EXT4, so the user picks the directory those tests run in.
+        //
+        // This is narrower than it used to be. `DmaFile` itself only needs
+        // O_DIRECT, which tmpfs has supported since Linux 6.1, so ordinary DMA
+        // file tests run anywhere on a modern kernel. Only the poll-io subset
+        // needs the real device.
         match std::env::var("GLOMMIO_TEST_POLLIO_ROOTDIR") {
             Err(_) => {
                 eprintln!(
-                    "Glommio currently only supports NVMe-backed volumes formatted with XFS or \
-                     EXT4. To run poll io-related tests, please set GLOMMIO_TEST_POLLIO_ROOTDIR \
-                     to a NVMe-backed directory path in your environment.\nPoll io tests will not \
-                     run."
+                    "Poll io (IORING_SETUP_IOPOLL) needs an NVMe-backed volume formatted with XFS \
+                     or EXT4. Set GLOMMIO_TEST_POLLIO_ROOTDIR to such a path to run those tests; \
+                     they will be skipped otherwise.\nNote this applies to poll io only: DmaFile \
+                     needs O_DIRECT, which tmpfs supports from Linux 6.1, so plain DMA tests run \
+                     anywhere recent."
                 );
             }
             Ok(path) => {
