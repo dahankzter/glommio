@@ -146,6 +146,44 @@ presumably chosen for a reason. Measure first, in this order:
 4. Check `rush_dispatch`. `stream.rs` has two commented-out calls with a note
    referring to issue #458 — someone has already been here.
 
+## Vectored writes: measured, and fixed (2026-08-24)
+
+`TcpStream` did not override `poll_write_vectored`, so it inherited the
+futures-io default, which writes **only the first slice**. A server sending a
+response as status line, headers and body therefore paid three `send` calls,
+and with `TCP_NODELAY` set -- which a latency-sensitive server does set -- put
+up to three segments on the wire for one response.
+
+`glommio/examples/writev_ladder.rs`, 100k responses, loopback, `OutSegs` from
+`/proc/net/snmp` (host-wide, so it counts the drain server's ACKs too -- the
+ratio is the signal, not the absolute):
+
+| 13-byte body | per response | segments |
+|---|---:|---:|
+| three `write_all` calls | 6,760 ns | 5.50 |
+| one `write_vectored` | **1,782 ns** | **1.88** |
+| concatenate, then one `write_all` | 1,988 ns | 1.86 |
+
+| 64 KiB body | per response | segments |
+|---|---:|---:|
+| three `write_all` calls | 9,287 ns | 6.61 |
+| one `write_vectored` | **6,726 ns** | 3.00 |
+| concatenate, then one `write_all` | 7,906 ns | 3.00 |
+
+**Three writes to one is worth 3.8x on a small response**, and the segment
+count drops by the same factor -- which is the part that matters off loopback,
+where a packet costs a wire traversal rather than a memcpy.
+
+**Vectoring versus concatenating is a wash on small bodies** (inside run-to-run
+noise) and worth ~1,180 ns on a 64 KiB body, which is a 64 KiB copy at memory
+bandwidth. That is the honest size of that particular win: it is the copy, and
+it scales with the body.
+
+An earlier estimate in conversation put the saving at ~2 µs by multiplying a
+per-send ping-pong figure by three. That was wrong in both directions -- it
+overstated the syscall component and ignored the segment count, which is the
+larger effect.
+
 ## What this does not cover
 
 Loopback only, one connection, 64-byte messages, TCP only. Not covered: real
