@@ -320,6 +320,16 @@
 //! });
 //! ```
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
+// Hygiene, and a partial guard against publishing something no consumer can
+// reach. Only partial, and the limit is worth knowing: this lint did *not*
+// catch `RxBuf`, which sat unexported in a private module for years, because
+// the re-exported `Buffered` has it as a supertrait and that makes rustc
+// consider it reachable -- reachable in the type graph, unnameable in
+// practice. The guard that catches that, and the `OwnedRxBuf` case of a
+// public type with no public constructor, is an integration test: those
+// compile as separate crates and so see what a consumer sees. See
+// `tests/public_api_is_usable.rs`.
+#![deny(unreachable_pub)]
 #![cfg_attr(doc, deny(rustdoc::broken_intra_doc_links))]
 #![cfg_attr(all(nightly, feature = "native-tls"), feature(thread_local))]
 

@@ -38,7 +38,7 @@ pub(crate) enum LatchState {
 
 impl Latch {
     /// Create a new `Latch` with given count.
-    pub fn new(count: usize) -> Self {
+    pub(crate) fn new(count: usize) -> Self {
         let state = if 0 < count {
             LatchState::Pending
         } else {
@@ -67,7 +67,7 @@ impl Latch {
     /// counter to 0 with this method (or checking its value with
     /// `count_down(0)`) is indicative that the state is either `Ready` or
     /// `Canceled`, other data may not yet be synchronized with other threads.
-    pub fn count_down(&self, n: usize) -> Result<usize, usize> {
+    pub(crate) fn count_down(&self, n: usize) -> Result<usize, usize> {
         #[allow(clippy::unnecessary_lazy_evaluations)]
         self.update(LatchState::Ready, |v| (v >= n).then(|| v - n))
     }
@@ -77,7 +77,7 @@ impl Latch {
     /// Otherwise, it returns an `Err` with the `LatchState`.
     ///
     /// The method does not synchronize with other threads.
-    pub fn cancel(&self) -> Result<usize, LatchState> {
+    pub(crate) fn cancel(&self) -> Result<usize, LatchState> {
         self.update(LatchState::Canceled, |v| (v != 0).then_some(0))
             .map_err(|_| self.wait())
     }
@@ -85,7 +85,7 @@ impl Latch {
     /// Wait for `Ready` or `Canceled`.  Synchronizes with other threads via an
     /// internal `Mutex`.
     #[must_use = "check if latch was canceled"]
-    pub fn wait(&self) -> LatchState {
+    pub(crate) fn wait(&self) -> LatchState {
         *self
             .inner
             .cv
@@ -96,7 +96,7 @@ impl Latch {
     /// Decrement the counter by one and wait for `Ready` or `Canceled`.
     /// Synchronizes with other threads via an internal `Mutex`.
     #[must_use = "check if latch was canceled"]
-    pub fn arrive_and_wait(&self) -> LatchState {
+    pub(crate) fn arrive_and_wait(&self) -> LatchState {
         self.count_down(1).ok();
         self.wait()
     }

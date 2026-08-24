@@ -2134,7 +2134,7 @@ impl Reactor {
         }
     }
 
-    pub fn io_stats(&self) -> IoStats {
+    pub(crate) fn io_stats(&self) -> IoStats {
         IoStats::new(
             std::mem::take(&mut self.main_ring.borrow_mut().stats),
             std::mem::take(&mut self.latency_ring.borrow_mut().stats),

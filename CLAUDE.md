@@ -657,6 +657,31 @@ gh pr create --repo glommio/glommio --base main
 git fetch upstream && git merge upstream/main
 ```
 
+## Public API: prove it from outside
+
+Twice in two releases this fork published API that could not be used by a
+dependent crate, and neither was visible from inside:
+
+- **`RxBuf`** was `pub` in a private module and never re-exported, so no
+  foreign type could implement it and `buffered_with<B: Buffered>` had exactly
+  one possible argument. `#![deny(unreachable_pub)]` does **not** catch this:
+  the re-exported `Buffered` has `RxBuf` as a supertrait, which makes rustc
+  consider it reachable.
+- **`OwnedRxBuf`** was re-exported with a `pub(crate)` constructor and no
+  accessor, so the trait method handing it out could never return `Some`. No
+  lint catches a reachable type that cannot be constructed.
+
+From inside the crate every module is in scope and every constructor is
+visible, so unit tests cannot see either bug. **An integration test in
+`glommio/tests/` compiles as a separate crate and sees exactly what a consumer
+sees.**
+
+So: **new public API gets an integration test that drives it** — construct the
+type, implement the trait, call the function. `tests/public_api_is_usable.rs`
+and `tests/rx_buf_is_implementable.rs` are the pattern. The test does not have
+to check correctness, which is the unit tests' job; it has to prove the thing
+can be reached and driven at all.
+
 ## Code Style
 
 - **ALWAYS run `make fmt` before committing** - prevents CI warnings

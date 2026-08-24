@@ -68,7 +68,7 @@ mod syscall {
     }
 
     /// Returns `true` if the `sys_membarrier` call is available.
-    pub fn is_supported() -> bool {
+    pub(crate) fn is_supported() -> bool {
         // Queries which membarrier commands are supported. Checks if private expedited
         // membarrier is supported.
         let ret = sys_membarrier(membarrier_cmd::MEMBARRIER_CMD_QUERY);
@@ -89,7 +89,7 @@ mod syscall {
 
     /// Executes a heavy `sys_membarrier`-based barrier.
     #[inline]
-    pub fn barrier() {
+    pub(crate) fn barrier() {
         fatal_assert!(sys_membarrier(membarrier_cmd::MEMBARRIER_CMD_PRIVATE_EXPEDITED) >= 0);
     }
 }
@@ -186,13 +186,13 @@ mod mprotect {
     }
 
     /// Returns `true` if the `mprotect`-based trick is supported.
-    pub fn is_supported() -> bool {
+    pub(crate) fn is_supported() -> bool {
         cfg!(target_arch = "x86") || cfg!(target_arch = "x86_64")
     }
 
     /// Executes a heavy `mprotect`-based barrier.
     #[inline]
-    pub fn barrier() {
+    pub(crate) fn barrier() {
         BARRIER.barrier();
     }
 }

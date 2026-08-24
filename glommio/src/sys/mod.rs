@@ -35,7 +35,7 @@ macro_rules! syscall {
 const FS_XFLAG_EXTSIZE: u32 = 0x00000800;
 
 #[repr(C, packed)]
-pub struct Fsxattr {
+pub(crate) struct Fsxattr {
     fsx_xflags: u32,
     fsx_extsize: u32,
     fsx_nextents: u32,
@@ -518,7 +518,7 @@ pub struct StatxTimestamp {
 ///
 /// Lived in the vendored `iou` wrapper; it is a dozen lines and glommio is the
 /// only consumer, so it moves here rather than being taken from a crate.
-pub struct SockAddrStorage {
+pub(crate) struct SockAddrStorage {
     storage: std::mem::MaybeUninit<nix::sys::socket::sockaddr_storage>,
     len: libc::socklen_t,
 }
@@ -532,7 +532,7 @@ impl fmt::Debug for SockAddrStorage {
 }
 
 impl SockAddrStorage {
-    pub fn uninit() -> Self {
+    pub(crate) fn uninit() -> Self {
         SockAddrStorage {
             storage: std::mem::MaybeUninit::uninit(),
             len: std::mem::size_of::<nix::sys::socket::sockaddr_storage>() as libc::socklen_t,
@@ -621,7 +621,7 @@ impl TryFrom<Duration> for TimeSpec64 {
 }
 
 impl TimeSpec64 {
-    pub const MAX: TimeSpec64 = TimeSpec64 {
+    pub(crate) const MAX: TimeSpec64 = TimeSpec64 {
         raw: KernelTimespec {
             tv_sec: i64::MAX,
             tv_nsec: 999_999_999,

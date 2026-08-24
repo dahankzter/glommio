@@ -97,7 +97,7 @@ pub(crate) enum EnqueuedStatus {
 }
 
 #[derive(Clone)]
-pub struct EnqueuedSource {
+pub(crate) struct EnqueuedSource {
     pub(crate) id: SourceId,
     pub(crate) queue: ReactorQueue,
     pub(crate) status: EnqueuedStatus,

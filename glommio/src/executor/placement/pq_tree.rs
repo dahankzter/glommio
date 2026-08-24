@@ -127,7 +127,7 @@ where
     }
 }
 
-pub mod marker {
+pub(crate) mod marker {
     use super::Node;
     use std::cmp::Ordering;
 

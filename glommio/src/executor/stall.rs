@@ -308,7 +308,7 @@ mod test {
     };
 
     #[derive(Debug)]
-    pub struct TestStallDetection {
+    pub(crate) struct TestStallDetection {
         executor: usize,
     }
 

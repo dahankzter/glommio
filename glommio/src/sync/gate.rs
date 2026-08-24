@@ -118,7 +118,7 @@ struct GateInner {
 }
 
 impl GateInner {
-    pub fn try_enter(&self) -> bool {
+    pub(crate) fn try_enter(&self) -> bool {
         let open = self.is_open();
         if open {
             self.count.set(self.count.get() + 1);
@@ -126,7 +126,7 @@ impl GateInner {
         open
     }
 
-    pub fn enter(&self) -> Result<(), GlommioError<()>> {
+    pub(crate) fn enter(&self) -> Result<(), GlommioError<()>> {
         if !self.try_enter() {
             Err(GlommioError::Closed(ResourceType::Gate))
         } else {
@@ -134,7 +134,7 @@ impl GateInner {
         }
     }
 
-    pub fn leave(&self) {
+    pub(crate) fn leave(&self) {
         self.count.set(self.count.get() - 1);
         if self.count.get() == 0 && !self.is_open() {
             self.notify_closed()
@@ -151,7 +151,7 @@ impl GateInner {
         Ok(())
     }
 
-    pub fn close(&self) -> impl Future<Output = Result<(), GlommioError<()>>> {
+    pub(crate) fn close(&self) -> impl Future<Output = Result<(), GlommioError<()>>> {
         match self.state.replace(State::Closed) {
             State::Open => {
                 if self.count.get() != 0 {
@@ -186,15 +186,15 @@ impl GateInner {
         }
     }
 
-    pub fn is_open(&self) -> bool {
+    pub(crate) fn is_open(&self) -> bool {
         matches!(*self.state.borrow(), State::Open)
     }
 
-    pub fn is_closed(&self) -> bool {
+    pub(crate) fn is_closed(&self) -> bool {
         matches!(*self.state.borrow(), State::Closed)
     }
 
-    pub fn notify_closed(&self) {
+    pub(crate) fn notify_closed(&self) {
         if let State::Closing(senders) = self.state.replace(State::Closed) {
             for sender in senders {
                 let _ = sender.try_send(true);

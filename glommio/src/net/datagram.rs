@@ -21,7 +21,7 @@ const DEFAULT_BUFFER_SIZE: usize = 8192;
 type Result<T> = crate::Result<T, ()>;
 
 #[derive(Debug)]
-pub struct GlommioDatagram<S: AsRawFd + FromRawFd + From<socket2::Socket>> {
+pub(crate) struct GlommioDatagram<S: AsRawFd + FromRawFd + From<socket2::Socket>> {
     pub(crate) reactor: Weak<Reactor>,
     pub(crate) socket: S,
 

@@ -124,7 +124,7 @@ fn get_cache_domain_id(sysfs_path: &Path, cpu: usize) -> Option<usize> {
 /// Request the machine topology.  Only CPUs that are currently `online`
 /// according to `/sys/devices/system/cpu/online` are provided;  `sysfs` is
 /// always at `/sys` per: https://www.kernel.org/doc/html/latest/admin-guide/sysfs-rules.html
-pub fn get_machine_topology_unsorted() -> io::Result<Vec<CpuLocation>> {
+pub(crate) fn get_machine_topology_unsorted() -> io::Result<Vec<CpuLocation>> {
     let sysfs_path = Path::new("/sys/devices/system");
     let mut cpus_online = HashSet::new();
     for cpu in ListIterator::from_path(&sysfs_path.join("cpu/online"))? {
@@ -246,7 +246,7 @@ fn get_core_id(
 pub(crate) mod test_helpers {
     use super::{CpuLocation, HashMap};
 
-    pub fn check_topolgy(mut topology: Vec<CpuLocation>) {
+    pub(crate) fn check_topolgy(mut topology: Vec<CpuLocation>) {
         // Check that we don't have a system where any hardware component has an id that
         // is not unique system-wide (e.g. both numa node 0 and 1 have a core
         // with id 0); this precondition is assumed throughout
@@ -320,12 +320,17 @@ pub(crate) mod test_helpers {
     /// A CPU on a machine that reports no cache topology, so the cache domain
     /// degenerates to the package. Existing tests use this, and their passing
     /// is what shows the new level changes nothing on such machines.
-    pub fn cpu_loc(numa_node: usize, package: usize, core: usize, cpu: usize) -> CpuLocation {
+    pub(crate) fn cpu_loc(
+        numa_node: usize,
+        package: usize,
+        core: usize,
+        cpu: usize,
+    ) -> CpuLocation {
         cpu_loc_cache(numa_node, package, package, core, cpu)
     }
 
     /// A CPU on a machine with several cache domains per package.
-    pub fn cpu_loc_cache(
+    pub(crate) fn cpu_loc_cache(
         numa_node: usize,
         package: usize,
         cache_domain: usize,

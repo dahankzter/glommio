@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 /// Field ordering optimized for cache locality:
 /// - Hot field (wheel) is accessed on every timer operation
 /// - Warm field (id_to_expiry) is accessed on insert/remove and duration checks
-pub struct ReactorTimers {
+pub(crate) struct ReactorTimers {
     /// The underlying staged wheel (HOT: accessed every timer operation)
     wheel: StagedWheel,
 
@@ -39,7 +39,7 @@ pub struct ReactorTimers {
 }
 
 impl ReactorTimers {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             wheel: StagedWheel::new(),
             id_to_expiry: AHashMap::new(),
@@ -50,7 +50,7 @@ impl ReactorTimers {
     ///
     /// The returned ID provides direct access to the timer's location
     /// in the wheel, avoiding HashMap lookups on removal.
-    pub fn insert(&mut self, expires_at: Instant, waker: Waker) -> TimerId {
+    pub(crate) fn insert(&mut self, expires_at: Instant, waker: Waker) -> TimerId {
         // Insert into the wheel and get its internal ID
         let internal_id = self.wheel.insert(expires_at, waker);
 
@@ -65,7 +65,7 @@ impl ReactorTimers {
     /// Remove a timer by ID (O(1) operation, no hashing)
     ///
     /// Returns true if the timer was found and removed
-    pub fn remove(&mut self, id: TimerId) -> bool {
+    pub(crate) fn remove(&mut self, id: TimerId) -> bool {
         let internal_id = id.index() as u64;
 
         // Remove from expiry tracking
@@ -76,7 +76,7 @@ impl ReactorTimers {
     }
 
     /// Check if a timer exists by ID
-    pub fn exists(&self, id: TimerId) -> bool {
+    pub(crate) fn exists(&self, id: TimerId) -> bool {
         let internal_id = id.index() as u64;
         self.id_to_expiry.contains_key(&internal_id)
     }
@@ -90,7 +90,7 @@ impl ReactorTimers {
     /// This method collects all expired wakers BEFORE calling wake() to avoid
     /// re-entrancy panics. If a waker tries to insert/remove timers during
     /// wake(), it won't conflict with our mutable borrow.
-    pub fn process_timers(&mut self) -> (Option<Duration>, usize) {
+    pub(crate) fn process_timers(&mut self) -> (Option<Duration>, usize) {
         let now = Instant::now();
 
         // Advance the wheel to current time
@@ -122,13 +122,13 @@ impl ReactorTimers {
 
     /// Get the number of active timers
     #[allow(dead_code)]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.id_to_expiry.len()
     }
 
     /// Check if there are no active timers
     #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.id_to_expiry.is_empty()
     }
 }

@@ -66,7 +66,7 @@ use tracing::trace;
 mod latch;
 mod multitask;
 mod placement;
-pub mod stall;
+pub(crate) mod stall;
 
 pub(crate) const DEFAULT_EXECUTOR_NAME: &str = "unnamed";
 pub(crate) const DEFAULT_PREEMPT_TIMER: Duration = Duration::from_millis(100);
@@ -1173,7 +1173,7 @@ pub(crate) fn maybe_activate(tq: Rc<RefCell<TaskQueue>>) {
     };
 }
 
-pub struct LocalExecutorConfig {
+pub(crate) struct LocalExecutorConfig {
     pub io_memory: usize,
     pub ring_depth: usize,
     pub preempt_timer: Duration,

@@ -248,7 +248,7 @@ struct WaiterAdapter {
 }
 
 impl WaiterAdapter {
-    pub const NEW: Self = WaiterAdapter {
+    pub(crate) const NEW: Self = WaiterAdapter {
         pointers_ops: WaiterPointerOps,
         link_ops: LinkOps,
     };
