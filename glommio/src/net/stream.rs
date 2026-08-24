@@ -50,13 +50,37 @@ impl OwnedRxBuf {
 
 /// Root trait for socket stream receive buffer
 pub trait RxBuf {
+    /// Moves up to `buf.len()` buffered bytes out, and forgets them.
     fn read(&mut self, buf: &mut [u8]) -> usize;
+
+    /// Copies up to `buf.len()` buffered bytes out, leaving them buffered.
     fn peek(&self, buf: &mut [u8]) -> usize;
+
+    /// Whether anything is buffered and unread.
+    ///
+    /// Must not claim otherwise while a read is outstanding: it is what
+    /// decides whether the stream reads again or hands over what it has.
     fn is_empty(&self) -> bool;
+
+    /// Everything buffered and unread, without consuming it.
     fn as_bytes(&self) -> &[u8];
+
+    /// Forgets the first `amt` buffered bytes.
     fn consume(&mut self, amt: usize);
+
+    /// How much this buffer can hold. A read larger than this bypasses the
+    /// buffer and goes straight to the socket.
     fn buffer_size(&self) -> usize;
+
+    /// Records that the socket delivered `result` bytes into
+    /// [`unfilled`](Self::unfilled).
     fn handle_result(&mut self, result: usize);
+
+    /// Where the next read should land: the free space after whatever is
+    /// still buffered.
+    ///
+    /// Called *before* the read completes, so an implementation must not
+    /// treat this space as holding data -- see [`is_empty`](Self::is_empty).
     fn unfilled(&mut self) -> &mut [u8];
 
     /// Lends the whole buffer to the kernel for a completion-based read.
