@@ -184,6 +184,60 @@ per-send ping-pong figure by three. That was wrong in both directions -- it
 overstated the syscall component and ignored the segment count, which is the
 larger effect.
 
+## Accept: multishot measured and rejected (2026-08-24)
+
+`accept` speculates like the read path: `yolo_accept` calls `accept` and only
+falls back to an io_uring `Accept` on `EAGAIN`. So under churn the ring is not
+involved, and multishot accept would be replacing a syscall rather than adding
+one. Whether that is a win is a measurement, and it went three rounds before
+giving a trustworthy answer.
+
+`glommio/examples/accept_ladder.rs`, 10,240 connections, per connection:
+
+| rung | wall | **cpu** |
+|---|---:|---:|
+| toggle `O_NONBLOCK` per accept (what glommio did) | 17,023 ns | 1,652 ns |
+| listener non-blocking once | 7,538 ns | 1,326 ns |
+| multishot accept, zero syscalls per connection | 6,492 ns | **1,823 ns** |
+
+**Multishot accept costs more CPU than the plain syscall it would replace.**
+The CQE drain and the kernel enters that go with it are not cheaper than one
+non-blocking `accept`. There is no case here for the reactor surgery multishot
+would need — a `Source` that survives its own completion — and this closes the
+"accept throughput under churn" item [scaling.md](scaling.md) left open.
+
+### Two ways the measurement lied first
+
+**The wall column is not the answer.** Wall clock is bounded by the connecting
+thread, so every rung finishes at the client's pace no matter what the server
+spends. Only `CLOCK_THREAD_CPUTIME_ID` on the accepting thread separates them.
+
+**Timing only the drain loop credited multishot with 3 ns per connection.**
+With multishot armed the kernel accepts as connections *arrive*, so the work
+happens before the timed section starts. Timing the whole round — fill and
+drain — puts it back on the measured path. A rung that looks 500x better than
+the next one is a bug in the probe, not a result.
+
+And the toggle rung's wall figure is inflated for a third reason: it spins on
+`EAGAIN` at four syscalls a turn where the others spin at one. That inflation
+is exactly why the in-situ number below matters more than the ladder.
+
+### What was kept
+
+The per-accept `O_NONBLOCK` toggle is gone: listeners are put in non-blocking
+mode when they are constructed, so `yolo_accept` is one syscall rather than
+four (`F_GETFL`, `F_SETFL`, `accept`, `F_SETFL`).
+
+In isolation that is worth ~326 ns of CPU per accept. **Inside glommio it is
+not measurable**: the accept loop costs 1,838 ns of CPU per connection before
+and 1,805 ns after, with the runs overlapping. It is kept because it is
+strictly less work and removes three syscalls, not because a number moved.
+
+It does buy an invariant: a listener that reaches `yolo_accept` in blocking
+mode would park the whole executor inside `accept`. All three construction
+sites set the flag, and a `debug_assert` fails loudly rather than hanging if a
+fourth ever appears.
+
 ## What this does not cover
 
 Loopback only, one connection, 64-byte messages, TCP only. Not covered: real

@@ -96,6 +96,8 @@ impl UnixListener {
 
         sk.bind(&addr)?;
         sk.listen(128)?;
+        // See `TcpListener::bind`: `yolo_accept` requires this.
+        sk.set_nonblocking(true)?;
         let listener = sk.into();
 
         Ok(UnixListener {

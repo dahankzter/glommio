@@ -88,6 +88,10 @@ impl FromRawFd for TcpListener {
     /// Convert an already bound and listening RawFd into a TcpListener
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
         let sk = Socket::from_raw_fd(fd);
+        // Same invariant as `bind`: an accept on a blocking listener parks the
+        // executor. A caller handing us their own fd does not know that.
+        sk.set_nonblocking(true)
+            .expect("failed to put the listener in non-blocking mode");
         let listener = sk.into();
 
         TcpListener {
@@ -135,6 +139,9 @@ impl TcpListener {
         sk.set_reuse_port(true)?;
         sk.bind(&addr)?;
         sk.listen(1024)?;
+        // `yolo_accept` depends on this: a blocking listener would park the
+        // executor inside `accept` instead of returning `EAGAIN`.
+        sk.set_nonblocking(true)?;
         let listener = sk.into();
 
         Ok(TcpListener {

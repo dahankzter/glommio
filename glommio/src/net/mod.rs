@@ -15,16 +15,21 @@ use std::{
 };
 
 fn yolo_accept(fd: BorrowedFd<'_>) -> Option<io::Result<RawFd>> {
-    let flags =
-        nix::fcntl::OFlag::from_bits(nix::fcntl::fcntl(fd, nix::fcntl::F_GETFL).unwrap()).unwrap();
-    nix::fcntl::fcntl(
-        fd,
-        nix::fcntl::F_SETFL(flags | nix::fcntl::OFlag::O_NONBLOCK),
-    )
-    .unwrap();
-    let r = sys::accept_syscall(fd.as_raw_fd());
-    nix::fcntl::fcntl(fd, nix::fcntl::F_SETFL(flags)).unwrap();
-    match r {
+    // Listeners are put in non-blocking mode when they are created, so this
+    // returns `EAGAIN` rather than blocking the executor when the backlog is
+    // empty. It used to flip the flag on and back around every call, which
+    // cost two extra `fcntl` syscalls per accepted connection and measured at
+    // more than half the end-to-end cost of accepting one.
+    debug_assert!(
+        {
+            let flags = nix::fcntl::fcntl(fd, nix::fcntl::F_GETFL).unwrap();
+            nix::fcntl::OFlag::from_bits_truncate(flags).contains(nix::fcntl::OFlag::O_NONBLOCK)
+        },
+        "a listener reached accept in blocking mode: whoever built it skipped \
+         set_nonblocking, and this call would park the whole executor"
+    );
+
+    match sys::accept_syscall(fd.as_raw_fd()) {
         Ok(x) => Some(Ok(x)),
         Err(err) => match err.kind() {
             io::ErrorKind::WouldBlock => None,
