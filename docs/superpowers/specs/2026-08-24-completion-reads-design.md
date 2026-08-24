@@ -52,8 +52,10 @@ pub trait RxBuf {
     /// keeps this implementation on the readiness path.
     fn take_kernel_buffer(&mut self) -> Option<OwnedRxBuf> { None }
 
-    /// Takes it back with what the kernel wrote into it.
-    fn restore_kernel_buffer(&mut self, buffer: OwnedRxBuf, read: usize);
+    /// Takes it back, empty. How much the kernel wrote arrives separately
+    /// through `handle_result`, the same call the readiness path uses, so
+    /// one place advances the cursor rather than two that must agree.
+    fn restore_kernel_buffer(&mut self, buffer: OwnedRxBuf);
 }
 ```
 
@@ -99,12 +101,33 @@ New, and each has to fail if the mechanism is removed:
    alive. Under Miri-less testing the proof is that the buffer is not freed
    before the CQE: assert the source outlives the stream. This is the test
    that would catch the whole design being wrong.
-2. **A partially filled buffer reads back correctly** — `restore` must apply
-   the kernel's byte count, not the buffer length.
+2. **A partially filled buffer reads back correctly** — the byte count comes
+   from `handle_result`, so a full buffer must not be reported.
 3. **The heuristic flips both ways**, asserted through observed syscall
    behaviour rather than by reading the flag.
 4. **Streaming does not regress**: a large transfer over a buffered stream,
    measured, not asserted.
+
+## Measured
+
+Same probe, buffered path, CPU per message:
+
+| | before | after |
+|---|---:|---:|
+| 256 connections, readers parked before data arrives | 1,247 ns | **1,023 ns** (−18%) |
+| streaming, one connection, data always waiting | 3,861 ns/64KiB | 3,795 ns/64KiB |
+| unbuffered path (untouched) | 1,227 ns | 1,228 ns |
+
+The streaming figure is the one that had to *not* move, and it did not: the
+heuristic keeps that path on the syscall.
+
+**The first version of this measurement was wrong**, in a way worth recording.
+The ladder's glommio rung read 256 connections in a loop from one task, so by
+the time it reached connection 200 the data had long arrived, the speculation
+succeeded, and the rung measured the easy case -- it reported the change as a
+50% *regression*. One task per connection, all parked before the writer
+speaks, is the shape the hand-written rungs use, and the comparison only means
+anything when both sides sit in the same regime.
 
 ## Risks
 

@@ -21,6 +21,33 @@ use std::{
 
 type Result<T> = crate::Result<T, ()>;
 
+/// A receive buffer on loan to the kernel.
+///
+/// A completion-based read needs its buffer to stay alive until the
+/// completion arrives, which may be after the future that started the read is
+/// dropped. So the buffer is handed over rather than borrowed: it lives in the
+/// `Source`, which the reactor keeps until the kernel is done with it.
+///
+/// There is nothing to do with one of these except give it back.
+#[derive(Debug)]
+pub struct OwnedRxBuf {
+    memory: Vec<u8>,
+}
+
+impl OwnedRxBuf {
+    pub(crate) fn new(memory: Vec<u8>) -> Self {
+        OwnedRxBuf { memory }
+    }
+
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.memory.as_mut_ptr()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.memory.len()
+    }
+}
+
 /// Root trait for socket stream receive buffer
 pub trait RxBuf {
     fn read(&mut self, buf: &mut [u8]) -> usize;
@@ -31,6 +58,37 @@ pub trait RxBuf {
     fn buffer_size(&self) -> usize;
     fn handle_result(&mut self, result: usize);
     fn unfilled(&mut self) -> &mut [u8];
+
+    /// Lends the whole buffer to the kernel for a completion-based read.
+    ///
+    /// Returning `None` -- the default -- keeps this implementation on the
+    /// readiness path, where the kernel is told when to read rather than
+    /// asked to. Implementations that return `Some` must also implement
+    /// [`restore_kernel_buffer`](Self::restore_kernel_buffer).
+    ///
+    /// Only ever called when the buffer is empty, so an implementation may
+    /// hand over its whole capacity and reset its cursors.
+    fn take_kernel_buffer(&mut self) -> Option<OwnedRxBuf> {
+        None
+    }
+
+    /// Takes the buffer back, empty.
+    ///
+    /// How many bytes the kernel wrote arrives separately, through
+    /// [`handle_result`](Self::handle_result) -- the same call the readiness
+    /// path uses -- so there is one place that advances the cursor rather than
+    /// two that must agree.
+    ///
+    /// Unreachable unless [`take_kernel_buffer`](Self::take_kernel_buffer) was
+    /// overridden to hand one out, which is why the default says so rather
+    /// than silently dropping the buffer.
+    fn restore_kernel_buffer(&mut self, buffer: OwnedRxBuf) {
+        let _ = buffer;
+        unreachable!(
+            "restore_kernel_buffer called on an RxBuf that never lends its buffer out: \
+             take_kernel_buffer and restore_kernel_buffer must be implemented together"
+        )
+    }
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +210,24 @@ impl RxBuf for Preallocated {
         }
         &mut self.buf[self.tail..]
     }
+
+    fn take_kernel_buffer(&mut self) -> Option<OwnedRxBuf> {
+        debug_assert!(
+            self.is_empty(),
+            "lending a buffer that still holds unread bytes would lose them"
+        );
+        // Lent whole and from the start: the caller only asks when empty, so
+        // there is nothing to preserve and the cursors reset.
+        self.head = 0;
+        self.tail = 0;
+        Some(OwnedRxBuf::new(std::mem::take(&mut self.buf)))
+    }
+
+    fn restore_kernel_buffer(&mut self, buffer: OwnedRxBuf) {
+        self.buf = buffer.memory;
+        self.head = 0;
+        self.tail = 0;
+    }
 }
 
 #[derive(Debug)]
@@ -255,6 +331,14 @@ impl<S: AsRawFd> NonBufferedStream<S> {
             _ => unreachable!(),
         }
         Ok(sz)
+    }
+
+    /// One non-blocking `recv`, and no fallback if it comes up empty.
+    ///
+    /// `None` means the socket had nothing, and the caller decides what to do
+    /// about it -- register readiness, or hand the read to the kernel.
+    pub(crate) fn poll_read_speculative(&mut self, buf: &mut [u8]) -> Option<io::Result<usize>> {
+        super::yolo_recv(self.stream.as_raw_fd(), buf)
     }
 
     pub(crate) fn poll_read(
@@ -385,6 +469,16 @@ pub(crate) struct GlommioStream<S, B> {
     stream: NonBufferedStream<S>,
     rx_buf: B,
     rx_done: Cell<bool>,
+    /// A completion-based read with the receive buffer lent to the kernel.
+    rx_source: Option<Source>,
+    /// Whether to try a plain `recv` before asking the kernel to do the read.
+    ///
+    /// A streaming reader almost always has data waiting, and for it one
+    /// syscall beats an SQE and a CQE. A connection that goes quiet between
+    /// messages has none, and for it the speculation is a wasted `EAGAIN` on
+    /// every single message. Rather than pick, this follows: set when a
+    /// speculative read pays off, cleared when it does not.
+    speculate: Cell<bool>,
 }
 
 impl<S> From<socket2::Socket> for GlommioStream<S, NonBuffered>
@@ -406,6 +500,8 @@ where
             stream,
             rx_buf: NonBuffered,
             rx_done: Cell::new(false),
+            rx_source: None,
+            speculate: Cell::new(true),
         }
     }
 }
@@ -432,6 +528,8 @@ impl<S> GlommioStream<S, NonBuffered> {
             stream: self.stream,
             rx_buf,
             rx_done: self.rx_done,
+            rx_source: self.rx_source,
+            speculate: self.speculate,
         }
     }
 }
@@ -481,12 +579,61 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
     }
 
     fn poll_replenish_buffer(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
-        let result = poll_err!(ready!(self.stream.poll_read(cx, self.rx_buf.unfilled())));
+        let result = poll_err!(ready!(self.poll_fill(cx)));
         self.rx_buf.handle_result(result);
         if result == 0 {
             self.rx_done.set(true);
         }
         Poll::Ready(Ok(result))
+    }
+
+    /// Fills the receive buffer, by whichever of the two mechanisms suits.
+    ///
+    /// The completion read is only reachable here, on the buffered path,
+    /// because it hands the buffer to the kernel for longer than a single
+    /// poll -- which is sound exactly when glommio owns that buffer.
+    fn poll_fill(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
+        if let Some(source) = self.rx_source.as_ref() {
+            let Some(result) = source.result() else {
+                source.add_waiter_many(cx.waker().clone());
+                return Poll::Pending;
+            };
+
+            // Reclaim the buffer before anything else can go wrong with the
+            // result, or it is gone for the life of the stream.
+            let source = self.rx_source.take().unwrap();
+            match source.extract_source_type() {
+                SourceType::SockRecvInto(Some(buffer)) => {
+                    self.rx_buf.restore_kernel_buffer(buffer);
+                }
+                _ => unreachable!("a completion read came back without its buffer"),
+            }
+
+            // A read that filled the buffer suggests the peer has more to
+            // say, which makes speculating next time likely to pay.
+            self.speculate
+                .set(matches!(&result, Ok(read) if *read == self.rx_buf.buffer_size()));
+
+            return Poll::Ready(result);
+        }
+
+        if self.speculate.get() {
+            match self.stream.poll_read_speculative(self.rx_buf.unfilled()) {
+                Some(result) => return Poll::Ready(result),
+                None => self.speculate.set(false),
+            }
+        }
+
+        match self.rx_buf.take_kernel_buffer() {
+            Some(buffer) => {
+                let reactor = self.stream.reactor.upgrade().unwrap();
+                self.rx_source = Some(reactor.recv_into(self.stream.stream.as_raw_fd(), buffer));
+                self.poll_fill(cx)
+            }
+            // An `RxBuf` that will not lend its buffer stays on the readiness
+            // path, which is the whole point of the method being defaulted.
+            None => self.stream.poll_read(cx, self.rx_buf.unfilled()),
+        }
     }
 
     pub(crate) fn poll_write(&mut self, cx: &Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
@@ -540,7 +687,13 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
 
 impl<S: AsRawFd, B: Buffered> GlommioStream<S, B> {
     pub(crate) fn poll_fill_buf(&mut self, cx: &Context<'_>) -> Poll<io::Result<&[u8]>> {
-        if self.rx_buf.is_empty() {
+        // `rx_done` is checked here for the same reason `poll_read` checks it:
+        // once the peer is gone there is nothing to wait for, and asking again
+        // must not suspend. On the readiness path that happened to hold
+        // anyway, because `recv` at EOF returns 0 immediately on every call --
+        // a completion read returns `Pending` first, and `poll_fill_buf` is
+        // required to stay ready once it has been ready.
+        if self.rx_buf.is_empty() && !self.rx_done.get() {
             poll_err!(ready!(self.poll_replenish_buffer(cx)));
         }
         Poll::Ready(Ok(self.rx_buf.as_bytes()))

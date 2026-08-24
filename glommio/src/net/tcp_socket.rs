@@ -884,6 +884,77 @@ mod tests {
     }
 
     #[test]
+    fn a_buffered_read_completes_when_data_arrives_later() {
+        // The speculative `recv` fails here by construction -- nothing has
+        // been sent when the reader starts -- so this exercises the
+        // completion read, where the buffer is lent to the kernel across a
+        // suspension.
+        test_executor!(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let reader = crate::spawn_local(async move {
+                let mut stream = listener.accept().await.unwrap().buffered();
+                let mut buf = [0u8; 16];
+                let read = stream.read(&mut buf).await.unwrap();
+                buf[..read].to_vec()
+            })
+            .detach();
+
+            let mut writer = TcpStream::connect(addr).await.unwrap();
+            // Long enough that the reader is certainly suspended on the
+            // completion, rather than racing it.
+            Timer::new(Duration::from_millis(50)).await;
+            writer.write_all(b"late").await.unwrap();
+
+            assert_eq!(reader.await.unwrap(), b"late".to_vec());
+        });
+    }
+
+    #[test]
+    fn dropping_a_stream_with_a_read_in_flight_is_safe() {
+        // The buffer belongs to the kernel until the completion arrives, so
+        // dropping the stream must not take it back. Repeated, because a
+        // use-after-free here would be a race rather than a certainty.
+        test_executor!(async move {
+            for _ in 0..50 {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                let reader = crate::spawn_local(async move {
+                    let mut stream = listener.accept().await.unwrap().buffered();
+                    let mut buf = [0u8; 16];
+                    // Started, then abandoned: the future is dropped with the
+                    // read outstanding, and the stream with it.
+                    let _ = futures_lite::future::poll_once(stream.read(&mut buf)).await;
+                })
+                .detach();
+
+                let mut writer = TcpStream::connect(addr).await.unwrap();
+                reader.await.unwrap();
+
+                // The peer writes into what the kernel still owns.
+                let _ = writer.write_all(b"after the drop").await;
+            }
+
+            // Still alive, still working.
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let echo = crate::spawn_local(async move {
+                let mut stream = listener.accept().await.unwrap().buffered();
+                let mut buf = [0u8; 8];
+                let read = stream.read(&mut buf).await.unwrap();
+                buf[..read].to_vec()
+            })
+            .detach();
+
+            let mut writer = TcpStream::connect(addr).await.unwrap();
+            writer.write_all(b"alive").await.unwrap();
+            assert_eq!(echo.await.unwrap(), b"alive".to_vec());
+        });
+    }
+
+    #[test]
     fn write_vectored_writes_every_slice() {
         // An HTTP response is a status line, headers and a body: three
         // buffers the caller does not want to concatenate. Without a

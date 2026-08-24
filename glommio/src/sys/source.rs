@@ -35,6 +35,14 @@ pub(crate) enum SourceType {
     PollAdd,
     SockSend(DmaBuffer),
     SockRecv(Option<DmaBuffer>),
+    /// A read straight into a buffer the caller lent us.
+    ///
+    /// Unlike [`SockRecv`](SourceType::SockRecv), which allocates a
+    /// `DmaBuffer` and copies out of it afterwards, this carries the
+    /// destination itself -- so the kernel writes where the data is wanted and
+    /// there is no copy. The buffer stays here until the completion arrives,
+    /// which is what makes it sound to drop the stream mid-read.
+    SockRecvInto(Option<crate::net::OwnedRxBuf>),
     SockRecvMsg(
         Option<DmaBuffer>,
         libc::iovec,
