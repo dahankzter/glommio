@@ -238,6 +238,70 @@ mode would park the whole executor inside `accept`. All three construction
 sites set the flag, and a `debug_assert` fails loudly rather than hanging if a
 fourth ever appears.
 
+## Reads at 256 connections: the ring wins after all (2026-08-24)
+
+[synthesis.md](synthesis.md) measured the readiness design at **−34 ns**
+against completion-based io_uring and concluded that switching reads to `Recv`
+would gain nothing. That result was explicitly scoped to **one connection at
+queue depth 1**, and [monoio-gap.md](monoio-gap.md) listed the untested regime
+as the reason it was not a rebuttal: *"monoio's benchmark uses many concurrent
+connections, which is exactly where five SQEs and five kernel enters per round
+trip versus two would compound."*
+
+That regime has now been measured, and it does compound.
+
+`glommio/examples/recv_ladder.rs`: 256 connections, one message each per
+round, **data arriving after the read is posted** -- a server waiting on many
+sockets, not a ping-pong. Server pinned to cpu 0, client to cpu 4, five warm-up
+rounds discarded. CPU per message, stable to ~1% across runs:
+
+| rung | cpu/message |
+|---|---:|
+| readiness: `recv`, `PollAdd`, `recv` (glommio's shape, by hand) | 1,097 ns |
+| single-shot `Recv` (1 SQE + 1 CQE) | **783 ns** (−29%) |
+| multishot `Recv` + provided buffer ring (0 syscalls) | **631 ns** (−42%) |
+| glommio itself | 1,166 ns |
+
+**Both completion-based rungs beat the readiness path at this shape**, and the
+ordering is the reverse of the depth-1 result. Nothing about the earlier
+measurement was wrong; it answered a different question. The two together say
+the design choice is *workload-dependent*, which is a more useful statement
+than either alone:
+
+- **one connection, always-ready data**: speculation wins, because the syscall
+  returns immediately and the ring costs an SQE and a CQE for nothing.
+- **many connections, data that has not arrived**: the ring wins, because the
+  speculation is a wasted `recv` returning `EAGAIN` before the poll, and then
+  a second `recv` after it. Two syscalls to move one message becomes zero.
+
+glommio costs only 69 ns over its own hand-written design here, against
+~2,000 ns at depth 1 -- the per-blocking-operation overhead amortises across
+256 concurrent reads exactly as [scaling.md](scaling.md) predicted. **So the
+remaining gap is the mechanism, not the executor**, which is the first time
+that has been true in this investigation.
+
+### What multishot actually buys over single-shot
+
+Only 152 ns of the 466 ns. Two thirds of the win is available from
+**single-shot `Recv`**, which needs no buffer rings, no `IORING_CQE_F_MORE`
+handling, no `ENOBUFS` re-arm path, and no kernel newer than 5.6. That
+reshapes the work into two stages rather than one leap:
+
+**Stage A — completion reads on the buffered path.** `Recv` into a buffer the
+stream owns. The constraint is not performance but lifetime: `poll_read` hands
+out a `&mut [u8]` valid for one call, and the kernel needs the buffer until
+the CQE arrives, so a completion read is only sound where glommio owns the
+buffer -- which is exactly what `RxBuf`/`Preallocated` already provide, and
+what a caller wanting zero-copy parsing wants anyway.
+
+**Stage B — multishot plus a provided buffer ring.** Needs a `Source` that
+survives its own completion (`process_one_event` consumes it unconditionally
+today), a buffer ring per reactor, `ENOBUFS` disarm handling, and kernel 6.0
+with a probe and fallback. The extra 152 ns has to pay for all of that.
+
+Stage A is the better first move and Stage B should be judged on its own
+numbers afterwards, not on the 42% headline that includes Stage A's share.
+
 ## What this does not cover
 
 Loopback only, one connection, 64-byte messages, TCP only. Not covered: real
