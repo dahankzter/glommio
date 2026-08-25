@@ -130,6 +130,7 @@ mod dma_file_stream;
 mod glommio_file;
 mod immutable_file;
 mod open_options;
+mod pollable_fd;
 mod read_result;
 mod sched;
 mod stat;
@@ -170,6 +171,7 @@ pub use self::{
     },
     immutable_file::{ImmutableFile, ImmutableFileBuilder, ImmutableFilePreSealSink},
     open_options::OpenOptions,
+    pollable_fd::{PollState, PollableFd},
     read_result::ReadResult,
     stat::Stat,
 };
