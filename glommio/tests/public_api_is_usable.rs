@@ -126,3 +126,35 @@ fn a_buffered_stream_is_reachable_from_outside() {
         assert_eq!(reader.await.unwrap(), b"buffered".to_vec());
     });
 }
+
+#[test]
+fn every_address_shape_still_compiles() {
+    // The resolver replaced std's `ToSocketAddrs` with glommio's own, so the
+    // shapes callers actually pass have to keep working from outside the
+    // crate. This test is about compiling, not connecting.
+    use std::net::{IpAddr, Ipv4Addr};
+
+    LocalExecutor::default().run(async {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+        let owned = format!("127.0.0.1:{port}");
+
+        // Each of these is a shape std::net::ToSocketAddrs accepts.
+        assert!(TcpStream::connect(addr).await.is_ok());
+        assert!(TcpStream::connect(owned.as_str()).await.is_ok());
+        assert!(TcpStream::connect(owned.clone()).await.is_ok());
+        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_ok());
+        assert!(TcpStream::connect((String::from("127.0.0.1"), port))
+            .await
+            .is_ok());
+        assert!(TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+            .await
+            .is_ok());
+        assert!(TcpStream::connect(&[addr][..]).await.is_ok());
+        assert!(TcpStream::connect(vec![addr]).await.is_ok());
+        // A borrow of a non-'static String: the shape that rules out simply
+        // bounding the parameter Send + 'static and handing it to the pool.
+        assert!(TcpStream::connect(&owned).await.is_ok());
+    });
+}

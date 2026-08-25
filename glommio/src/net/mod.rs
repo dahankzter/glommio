@@ -157,11 +157,13 @@ fn yolo_sendmsg(
 }
 
 mod datagram;
+mod resolve;
 mod stream;
 mod tcp_socket;
 mod udp_socket;
 mod unix;
 pub use self::{
+    resolve::{Resolution, ToSocketAddrs},
     stream::{Buffered, OwnedRxBuf, Preallocated, RxBuf},
     tcp_socket::{tls_record, AcceptedTcpStream, TcpListener, TcpStream},
     udp_socket::UdpSocket,

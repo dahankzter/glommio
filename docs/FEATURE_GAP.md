@@ -12,7 +12,7 @@ server on this runtime need that it cannot get?**
 One entry below is a live bug, three are real gaps, and a long tail is
 correctly absent.
 
-## 1. `connect` resolves DNS on the reactor thread — and panics on failure
+## 1. ~~`connect` resolves DNS on the reactor thread~~ — fixed 2026-08-25
 
 ```rust
 // net/tcp_socket.rs:489
@@ -36,11 +36,24 @@ yields no addresses, where every other failure on this path is a `Result`.
 `TcpListener::bind` (`:127`) resolves the same way. It matters less — binding
 happens at startup — but it is the same call.
 
-**Fix:** resolve through `spawn_blocking`, which this crate already has, and
-return an error rather than unwrapping. Small, and it is a bug rather than a
-feature. Note a literal `"127.0.0.1:8080"` never reaches the resolver, since
-std parses it first — so this hurts exactly the programs that connect by name,
-and never shows up in a benchmark that dials an IP.
+**Fixed.** Resolution now goes through `spawn_blocking`, and an address that
+resolves to nothing is an error rather than a panic.
+
+It could not be done with std's trait: moving the address to the pool needs it
+`Send + 'static`, and `connect(&host_string)` is neither. So `glommio::net`
+has its own sealed `ToSocketAddrs` that hands back **owned** data first —
+addresses when it already has them, a `String` when a lookup is genuinely
+needed. Same shapes callers already pass, same call sites, and only a real
+hostname crosses to the pool. tokio solves it the same way and for the same
+reason.
+
+The two `bind` calls are not `async` and so cannot reach the pool. They
+resolve inline, which is defensible for a once-at-startup call, and no longer
+panic on a resolver error.
+
+Note a literal `"127.0.0.1:8080"` never reaches the resolver, since std parses
+it first — so this hurt exactly the programs that connect by name, and never
+showed up in a benchmark that dials an IP.
 
 ## 2. No signals, so no graceful shutdown
 
@@ -105,7 +118,7 @@ Lower priority than the three above, and worth measuring against how much
 
 ## Recommended order
 
-1. **The DNS fix.** It is a bug, it is small, and it stalls a whole core.
+1. ~~**The DNS fix.**~~ Done.
 2. **A public readiness API for a foreign fd.** Smallest effort per unit of
    unlocked capability; the internals already exist.
 3. **Signals via `signalfd`.** The one thing every deployed server needs and

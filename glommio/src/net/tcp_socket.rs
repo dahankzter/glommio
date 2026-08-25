@@ -5,6 +5,7 @@
 //
 use super::stream::GlommioStream;
 use crate::{
+    net::ToSocketAddrs,
     net::{
         stream::{Buffered, NonBuffered, Preallocated, RxBuf},
         yolo_accept,
@@ -25,7 +26,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     cell::RefCell,
     io::{self, IoSlice},
-    net::{self, Shutdown, SocketAddr, ToSocketAddrs},
+    net::{self, Shutdown, SocketAddr},
     os::{
         fd::AsFd,
         unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
@@ -123,11 +124,11 @@ impl TcpListener {
     /// });
     /// ```
     pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<TcpListener> {
-        let addr = addr
-            .to_socket_addrs()
-            .unwrap()
-            .next()
-            .ok_or_else(|| io::Error::other("empty address"))?;
+        // Not `async`, so the lookup cannot go to the blocking pool. Binding
+        // happens once at startup rather than per connection, so a stall here
+        // holds up nothing that is already running -- but it must not panic,
+        // which it used to on both a resolver error and an empty result.
+        let addr = super::resolve::resolve_blocking(addr)?[0];
 
         let domain = if addr.is_ipv6() {
             Domain::IPV6
@@ -486,7 +487,7 @@ impl TcpStream {
     /// })
     /// ```
     pub async fn connect<A: ToSocketAddrs>(addr: A) -> Result<TcpStream> {
-        let addr = addr.to_socket_addrs()?.next().unwrap();
+        let addr = super::resolve::resolve(addr).await?[0];
         let socket = make_tcp_socket(&addr)?;
         let reactor = crate::executor().reactor();
         let source = reactor.connect(socket.as_raw_fd(), SockaddrStorage::from(addr));
@@ -529,7 +530,7 @@ impl TcpStream {
             .into());
         }
 
-        let addr = addr.to_socket_addrs()?.next().unwrap();
+        let addr = super::resolve::resolve(addr).await?[0];
         let socket = make_tcp_socket(&addr)?;
         let reactor = crate::executor().reactor();
         let source =

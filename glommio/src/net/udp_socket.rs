@@ -3,12 +3,12 @@
 //
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2020 Datadog, Inc.
 //
-use super::datagram::GlommioDatagram;
+use super::{datagram::GlommioDatagram, ToSocketAddrs};
 use nix::sys::socket::{SockaddrLike, SockaddrStorage};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     io,
-    net::{self, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs},
+    net::{self, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     os::unix::io::{AsRawFd, FromRawFd, RawFd},
     time::Duration,
 };
@@ -80,11 +80,9 @@ impl UdpSocket {
     /// });
     /// ```
     pub fn bind<A: ToSocketAddrs>(addr: A) -> Result<UdpSocket> {
-        let addr = addr
-            .to_socket_addrs()
-            .unwrap()
-            .next()
-            .ok_or_else(|| io::Error::other("empty address"))?;
+        // See `TcpListener::bind`: not async, so resolved inline, but no
+        // longer able to panic on a resolver error.
+        let addr = super::resolve::resolve_blocking(addr)?[0];
 
         let domain = if addr.is_ipv6() {
             Domain::IPV6
@@ -135,7 +133,7 @@ impl UdpSocket {
     /// [`send`]: UdpSocket::send
     /// [`recv`]: UdpSocket::recv
     pub async fn connect<A: ToSocketAddrs>(&self, addr: A) -> Result<()> {
-        let iter = addr.to_socket_addrs()?;
+        let iter = super::resolve::resolve(addr).await?.into_iter();
         let mut err = io::Error::other("No Valid addresses");
         for addr in iter {
             let reactor = self.socket.reactor.upgrade().unwrap();
@@ -624,11 +622,7 @@ impl UdpSocket {
     ///
     /// [`ToSocketAddrs`]: https://doc.rust-lang.org/stable/std/net/trait.ToSocketAddrs.html
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A) -> Result<usize> {
-        let addr = addr
-            .to_socket_addrs()
-            .unwrap()
-            .next()
-            .ok_or_else(|| io::Error::other("empty address"))?;
+        let addr = super::resolve::resolve(addr).await?[0];
 
         let sockaddr = SockaddrStorage::from(addr);
         self.socket.send_to(buf, sockaddr).await.map_err(Into::into)
