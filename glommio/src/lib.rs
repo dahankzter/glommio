@@ -504,6 +504,7 @@ pub mod future;
 pub mod io;
 pub mod net;
 mod shares;
+pub mod signal;
 pub mod sync;
 pub mod timer;
 mod wakers;
