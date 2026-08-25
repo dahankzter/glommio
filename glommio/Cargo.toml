@@ -24,8 +24,16 @@ debugging = []
 macros    = ["dep:glommio-macros"]
 
 # Unstable features based on nightly
-native-tls = []
-nightly    = ["native-tls"]
+#
+# `native-thread-local` selects the nightly `#[thread_local]` attribute for
+# executor-local storage instead of `scoped_tls`. The "tls" here is thread
+# local storage, and never Transport Layer Security -- glommio has no TLS of
+# its own. The old name collided with the well-known `native-tls` crate and
+# was read as an empty TLS placeholder more than once, so it survives only as
+# an alias.
+native-thread-local = []
+native-tls          = ["native-thread-local"]
+nightly             = ["native-thread-local"]
 
 [dependencies]
 ahash                 = "0.8"

@@ -331,7 +331,7 @@
 // `tests/public_api_is_usable.rs`.
 #![deny(unreachable_pub)]
 #![cfg_attr(doc, deny(rustdoc::broken_intra_doc_links))]
-#![cfg_attr(all(nightly, feature = "native-tls"), feature(thread_local))]
+#![cfg_attr(all(nightly, feature = "native-thread-local"), feature(thread_local))]
 
 #[macro_use]
 extern crate nix;

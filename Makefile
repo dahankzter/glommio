@@ -307,7 +307,7 @@ check:
 # fortnight of red CI because it looked at none of them.
 ci-only:
 	@echo "→ Checks that only CI used to run..."
-	@echo "  --all-features (compiles the debugging and native-tls paths)"
+	@echo "  --all-features (compiles the debugging and native-thread-local paths)"
 	@$(call run_cargo,clippy --workspace --all-targets --all-features -- -D warnings)
 	@echo "  Cargo.toml ordering"
 	@if command -v cargo-sort >/dev/null 2>&1; then \
