@@ -209,7 +209,23 @@ impl<T: BufferHalf> Future for Connector<T> {
             }
             // usize::MAX (the disconnected) always has a placeholder notifier that never
             // returns its fd. So if the other side disconnected it will unblock us here
-            id => Poll::Ready(sys::get_sleep_notifier_for(id).unwrap()),
+            id => Poll::Ready(sys::get_sleep_notifier_for(id).unwrap_or_else(|| {
+                // The peer registered this id and then its executor went
+                // away. Those two are not ordered against each other -- the
+                // executor drops its notifier on its own schedule, while the
+                // id stays in the buffer until the peer's half is dropped --
+                // so the surviving side can land here holding an id whose
+                // notifier is already gone. Unwrapping it panicked, roughly
+                // one full-suite run in five.
+                //
+                // An executor that no longer exists cannot be woken and
+                // cannot send, which is what being disconnected means. Say so
+                // in the buffer as well, or this side would go on to wait
+                // forever for a peer that cannot arrive.
+                self.buffer.disconnect_peer();
+                sys::get_sleep_notifier_for(usize::MAX)
+                    .expect("the disconnected notifier is a static and always exists")
+            })),
         }
     }
 }
@@ -1137,6 +1153,53 @@ mod foreign_tests {
     use super::*;
     use crate::{LocalExecutorBuilder, Placement};
     use futures_lite::StreamExt;
+
+    #[test]
+    fn a_peer_whose_executor_is_gone_reads_as_disconnected() {
+        // The race this stands in for: a peer connects, registering its
+        // executor id in the buffer, and then that executor is destroyed. The
+        // id and the notifier are not dropped together -- the executor drops
+        // its notifier on its own schedule while the id sits in the buffer
+        // until the peer's half is dropped -- so the surviving side can look
+        // up an id whose notifier has already gone. It panicked on the
+        // `unwrap`, about one full-suite run in five.
+        //
+        // Reproducing the window itself is timing; the state it produces is
+        // not. An id no executor ever registered resolves to `None` from
+        // `get_sleep_notifier_for` exactly as a dropped one does, so
+        // connecting against it exercises the same path deterministically.
+        const NEVER_REGISTERED: usize = usize::MAX - 4096;
+
+        crate::LocalExecutor::default().run(async {
+            let (sender, receiver) = new_bounded::<u32>(4);
+
+            // Stand in for the departed peer: its id is in the buffer, and
+            // there is no notifier behind it.
+            assert!(
+                sys::get_sleep_notifier_for(NEVER_REGISTERED).is_none(),
+                "this id must have no notifier, or the test proves nothing"
+            );
+            sender
+                .state
+                .as_ref()
+                .unwrap()
+                .buffer
+                .connect(NEVER_REGISTERED);
+
+            let receiver = receiver.connect().await;
+
+            assert!(
+                receiver.state.buffer.producer_disconnected(),
+                "a peer that cannot be woken has to read as disconnected, or \
+                 this side waits forever for something that cannot arrive"
+            );
+            assert_eq!(
+                receiver.recv().await,
+                None,
+                "reads must end rather than hang"
+            );
+        });
+    }
 
     #[test]
     fn a_foreign_thread_can_send_into_an_executor() {
