@@ -107,6 +107,56 @@ pub(crate) fn sendmsg_iov_syscall(
     syscall!(sendmsg(fd, &hdr as *const libc::msghdr, flags)).map(|x| x as usize)
 }
 
+/// A `recvmsg` with room for the kernel to report a TLS record type.
+///
+/// On a socket with kernel TLS enabled, a record that is not application data
+/// -- an alert, or a TLS 1.3 key update -- can only be read with a control
+/// buffer to carry its type. A plain `recv` with such a record at the head of
+/// the queue fails with `EIO` instead, which is what makes this necessary
+/// rather than merely nicer.
+///
+/// Returns the bytes read and the record type, which is `None` when the
+/// socket has no kernel TLS on it and the kernel therefore says nothing.
+pub(crate) fn recvmsg_record_syscall(
+    fd: RawFd,
+    buf: *mut u8,
+    len: usize,
+    flags: i32,
+) -> io::Result<(usize, Option<u8>)> {
+    let mut iov = libc::iovec {
+        iov_base: buf as *mut libc::c_void,
+        iov_len: len,
+    };
+
+    // One byte of payload, in the alignment the kernel expects.
+    let mut control = [0u8; 64];
+    debug_assert!(control.len() as u32 >= unsafe { libc::CMSG_SPACE(1) });
+
+    let mut hdr = unsafe { std::mem::zeroed::<libc::msghdr>() };
+    hdr.msg_iov = &mut iov as *mut libc::iovec;
+    hdr.msg_iovlen = 1;
+    hdr.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+    hdr.msg_controllen = control.len() as _;
+
+    let read = syscall!(recvmsg(fd, &mut hdr as *mut libc::msghdr, flags))? as usize;
+
+    // SAFETY: `hdr` was filled in by the kernel, which sets `msg_controllen`
+    // to what it actually wrote, and the cmsg macros walk only that much.
+    let mut record_type = None;
+    unsafe {
+        let mut cmsg = libc::CMSG_FIRSTHDR(&hdr);
+        while !cmsg.is_null() {
+            if (*cmsg).cmsg_level == libc::SOL_TLS && (*cmsg).cmsg_type == libc::TLS_GET_RECORD_TYPE
+            {
+                record_type = Some(*libc::CMSG_DATA(cmsg));
+            }
+            cmsg = libc::CMSG_NXTHDR(&hdr, cmsg);
+        }
+    }
+
+    Ok((read, record_type))
+}
+
 pub(crate) fn recv_syscall(fd: RawFd, buf: *mut u8, len: usize, flags: i32) -> io::Result<usize> {
     syscall!(recv(fd, buf as _, len, flags)).map(|x| x as usize)
 }

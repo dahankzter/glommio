@@ -63,6 +63,22 @@ fn yolo_peek(fd: RawFd, buf: &mut [u8]) -> Option<io::Result<usize>> {
     }
 }
 
+/// The record-aware counterpart of [`yolo_recv`].
+fn yolo_recv_record(fd: RawFd, buf: &mut [u8]) -> Option<io::Result<(usize, Option<u8>)>> {
+    match sys::recvmsg_record_syscall(
+        fd,
+        buf.as_mut_ptr(),
+        buf.len(),
+        MsgFlags::MSG_DONTWAIT.bits(),
+    ) {
+        Ok(x) => Some(Ok(x)),
+        Err(err) => match err.kind() {
+            io::ErrorKind::WouldBlock => None,
+            _ => Some(Err(err)),
+        },
+    }
+}
+
 fn yolo_recv(fd: RawFd, buf: &mut [u8]) -> Option<io::Result<usize>> {
     match sys::recv_syscall(
         fd,
@@ -147,7 +163,7 @@ mod udp_socket;
 mod unix;
 pub use self::{
     stream::{Buffered, OwnedRxBuf, Preallocated, RxBuf},
-    tcp_socket::{AcceptedTcpStream, TcpListener, TcpStream},
+    tcp_socket::{tls_record, AcceptedTcpStream, TcpListener, TcpStream},
     udp_socket::UdpSocket,
     unix::{AcceptedUnixStream, UnixDatagram, UnixListener, UnixStream},
 };

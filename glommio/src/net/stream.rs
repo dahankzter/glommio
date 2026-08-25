@@ -399,6 +399,64 @@ impl<S: AsRawFd> NonBufferedStream<S> {
         super::yolo_recv(self.stream.as_raw_fd(), buf)
     }
 
+    /// Reads one TLS record, reporting the type the kernel attached to it.
+    ///
+    /// Same speculate-then-register shape as [`poll_read`](Self::poll_read),
+    /// with `recvmsg` in place of `recv` so a control record arrives as a
+    /// record rather than as `EIO`.
+    pub(crate) fn poll_recv_record(
+        &mut self,
+        cx: &Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, Option<u8>)>> {
+        let no_pending_poll = self
+            .source_rx
+            .as_ref()
+            .map(|src| src.result().is_some())
+            .unwrap_or(true);
+
+        if no_pending_poll {
+            if let Some(result) = super::yolo_recv_record(self.stream.as_raw_fd(), buf) {
+                let reactor = self.reactor.upgrade().unwrap();
+                self.source_rx.take();
+                self.read_timeout.cancel_timer(reactor.as_ref());
+                return Poll::Ready(result);
+            }
+        }
+
+        match self.poll_read_ready(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            // Readable now: take the record without going round again.
+            Poll::Ready(Ok(())) => match super::yolo_recv_record(self.stream.as_raw_fd(), buf) {
+                Some(result) => Poll::Ready(result),
+                None => Poll::Pending,
+            },
+        }
+    }
+
+    /// Registers interest in the socket becoming readable.
+    fn poll_read_ready(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+        let reactor = self.reactor.upgrade().unwrap();
+        let reactor = reactor.as_ref();
+        poll_err!(self.read_timeout.check(reactor));
+
+        let no_pending_poll = self
+            .source_rx
+            .as_ref()
+            .map(|src| src.result().is_some())
+            .unwrap_or(true);
+
+        if no_pending_poll {
+            self.source_rx = Some(reactor.poll_read_ready(self.stream.as_raw_fd()));
+        }
+
+        let source = self.source_rx.as_ref().unwrap();
+        source.add_waiter_single(cx.waker());
+        self.read_timeout.maybe_set_timer(reactor, cx.waker());
+        Poll::Pending
+    }
+
     pub(crate) fn poll_read(
         &mut self,
         cx: &Context<'_>,
@@ -704,6 +762,14 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         self.stream.poll_write_vectored(cx, bufs)
+    }
+
+    pub(crate) fn poll_recv_record(
+        &mut self,
+        cx: &Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<(usize, Option<u8>)>> {
+        self.stream.poll_recv_record(cx, buf)
     }
 
     pub(crate) fn poll_flush(&self, _cx: &Context<'_>) -> Poll<io::Result<()>> {

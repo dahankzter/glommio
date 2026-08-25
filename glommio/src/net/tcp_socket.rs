@@ -778,6 +778,83 @@ impl<B: Buffered + Unpin> AsyncBufRead for TcpStream<B> {
     }
 }
 
+/// TLS record types, as the kernel reports them on a socket with kernel TLS
+/// enabled.
+///
+/// Only [`APPLICATION_DATA`](tls_record::APPLICATION_DATA) carries payload a
+/// reader wants; the rest have to be handed back to whatever ran the
+/// handshake. A TLS 1.3 key update arrives as
+/// [`HANDSHAKE`](tls_record::HANDSHAKE), and ignoring it breaks the
+/// connection a few records later.
+pub mod tls_record {
+    /// `change_cipher_spec`.
+    pub const CHANGE_CIPHER_SPEC: u8 = 20;
+    /// `alert` -- including `close_notify`.
+    pub const ALERT: u8 = 21;
+    /// `handshake`, which post-handshake means a TLS 1.3 key update.
+    pub const HANDSHAKE: u8 = 22;
+    /// `application_data`: the bytes an ordinary read would have returned.
+    pub const APPLICATION_DATA: u8 = 23;
+}
+
+impl<B: RxBuf + Unpin> TcpStream<B> {
+    /// Reads one TLS record from a socket with kernel TLS enabled, together
+    /// with the record type the kernel attached to it.
+    ///
+    /// glommio does no TLS itself. This exists because kernel TLS makes an
+    /// ordinary read insufficient: once `TLS_RX` is installed, a record that
+    /// is not application data can only be read with room for the kernel to
+    /// report its type, and a plain [`read`](futures_lite::io::AsyncReadExt)
+    /// with such a record at the head of the queue **fails with `EIO`**. A
+    /// TLS 1.3 key update is such a record, so a long-lived connection that
+    /// only ever calls `read` will eventually see a spurious I/O error and no
+    /// way to find out what it was.
+    ///
+    /// The record type is `None` when the socket has no kernel TLS on it, in
+    /// which case this is an ordinary read.
+    ///
+    /// This bypasses the receive buffer of a [`buffered`](Self::buffered)
+    /// stream, so do not mix the two on one connection.
+    ///
+    /// # The rest of kernel TLS is the caller's
+    ///
+    /// Enabling it -- `TCP_ULP`, then `TLS_TX`/`TLS_RX` with the keys a
+    /// handshake produced -- happens on the raw descriptor, which
+    /// [`AsRawFd`] hands over. The [`ktls`](https://docs.rs/ktls) crate does
+    /// that against rustls and is the sane way in.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use glommio::{net::{TcpStream, tls_record}, LocalExecutor};
+    /// # let ex = LocalExecutor::default();
+    /// # ex.run(async {
+    /// let mut stream = TcpStream::connect("127.0.0.1:443").await.unwrap();
+    /// // ... enable kernel TLS on stream.as_raw_fd() ...
+    /// let mut buf = [0u8; 4096];
+    /// match stream.recv_tls_record(&mut buf).await.unwrap() {
+    ///     (read, Some(tls_record::APPLICATION_DATA)) => { /* payload */ }
+    ///     (read, Some(tls_record::HANDSHAKE)) => { /* feed it back to rustls */ }
+    ///     (read, other) => { /* alert, or a plain socket */ }
+    /// }
+    /// # });
+    /// ```
+    pub async fn recv_tls_record(&mut self, buf: &mut [u8]) -> Result<(usize, Option<u8>)> {
+        poll_fn(|cx| self.poll_recv_tls_record(cx, buf)).await
+    }
+
+    /// Poll version of [`recv_tls_record`](Self::recv_tls_record).
+    pub fn poll_recv_tls_record(
+        &mut self,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<Result<(usize, Option<u8>)>> {
+        self.stream
+            .poll_recv_record(cx, buf)
+            .map(|result| result.map_err(Into::into))
+    }
+}
+
 impl<B: RxBuf + Unpin> AsyncRead for TcpStream<B> {
     fn poll_read(
         mut self: Pin<&mut Self>,
