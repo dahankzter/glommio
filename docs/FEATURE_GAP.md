@@ -55,7 +55,7 @@ Note a literal `"127.0.0.1:8080"` never reaches the resolver, since std parses
 it first — so this hurt exactly the programs that connect by name, and never
 showed up in a benchmark that dials an IP.
 
-## 2. No signals, so no graceful shutdown
+## 2. ~~No signals, so no graceful shutdown~~ — fixed 2026-08-25
 
 There is no equivalent of `tokio::signal`. A server that must drain on
 `SIGTERM` — every server that runs anywhere — has to roll its own, and the
@@ -66,11 +66,15 @@ The runtime already uses signals internally: the stall detector raises
 `SIGUSR1`. So a signal story has to coexist with that, which is an argument for
 glommio owning it rather than each consumer improvising.
 
-The shape that fits: `signalfd` is a pollable descriptor, so signals become an
-ordinary readable fd on the reactor with no handler-context restrictions —
-and, with `Placement`, a deliberate choice of which core receives them.
+**Fixed** as `glommio::signal`, built on the readiness API below: `signalfd`
+is a pollable descriptor, so signals arrive as ordinary readable events on a
+chosen core with no handler-context restrictions. What could not be fixed and
+is documented instead: signals must be blocked before `signalfd` sees them,
+the mask is per thread and inherited across spawn (so `block()` belongs in
+`main`), and one signal goes to one descriptor, so a pool fans out through a
+shared channel rather than each core watching.
 
-## 3. No way to await readiness on a foreign descriptor
+## 3. ~~No way to await readiness on a foreign descriptor~~ — fixed 2026-08-25
 
 tokio has `AsyncFd`; glommio has `poll_read_ready`/`poll_write_ready` on the
 reactor and both are crate-private. So a caller cannot integrate anything that
@@ -81,12 +85,14 @@ This is the difference between a runtime an ecosystem can be built on and one
 that only supports what it ships. It is also nearly free: the machinery exists
 and is exercised on every socket read.
 
-The workaround today is to wrap a foreign fd in a `TcpStream` via
-`FromRawFd`, which works because the readiness path only cares that the
-descriptor is pollable — and which is a lie in the type system that will
-eventually be believed by something.
+**Fixed** as `glommio::io::PollableFd`, which registers through the same
+`IORING_OP_POLL_ADD` the sockets use. `glommio::signal` is its first consumer,
+which is reasonable evidence the shape is right.
 
-## 4. No task-local storage
+Readiness here is one-shot rather than edge-triggered, so there is no
+`clear_ready` dance and no guard type; each wait registers afresh.
+
+## 4. ~~No task-local storage~~ — fixed 2026-08-25
 
 `thread_local!` is *almost* right here — tasks never migrate between cores —
 but it is shared by every task on the core, so a request id stored there is
@@ -94,14 +100,23 @@ visible to the wrong request. Anything carrying per-request context through a
 call stack (tracing spans, request ids, deadlines) wants task-scoped storage
 and there is none.
 
-Lower priority than the three above, and worth measuring against how much
-`thread_local!` plus explicit passing already covers.
+**Fixed** as `glommio::task_local!`, a future combinator rather than a change
+to the task structures: the value is swapped in around each poll of the scoped
+future and taken out again, so nothing is allocated per task. Reading one
+costs a thread-local access.
+
+A task-local is deliberately *not* inherited by a task spawned inside the
+scope — the child is a separate task and the value would otherwise outlive
+the future it belongs to.
 
 ## The long tail, and why it is fine
 
 | tokio | glommio | verdict |
 |---|---|---|
 | `Notify` | — | buildable on `Semaphore`; everyone builds it, so it may be worth shipping |
+| `task_local!` | present since 2026-08-25 | — |
+| `AsyncFd` | `io::PollableFd` | — |
+| `signal` | `signal::Signals` | — |
 | `Barrier` | — | rare in per-core designs |
 | `JoinSet` | — | `FuturesUnordered` covers it |
 | `mpsc`/`oneshot`/`broadcast`/`watch` | `local_channel`, `shared_channel`, `oneshot`, `broadcast`, `watch` | present, and each now has a cross-core form |
@@ -118,12 +133,10 @@ Lower priority than the three above, and worth measuring against how much
 
 ## Recommended order
 
-1. ~~**The DNS fix.**~~ Done.
-2. **A public readiness API for a foreign fd.** Smallest effort per unit of
-   unlocked capability; the internals already exist.
-3. **Signals via `signalfd`.** The one thing every deployed server needs and
-   cannot currently get.
-4. Task-locals, `Notify`, async `read_dir` — only if a real consumer asks.
+1. ~~The DNS fix.~~ Done.
+2. ~~A public readiness API for a foreign fd.~~ Done.
+3. ~~Signals via `signalfd`.~~ Done.
+4. `Notify` and async `read_dir` — still only if a real consumer asks.
 
 The first two are worth doing without waiting for anyone to ask. The rest
 should follow evidence, which is how the rest of this fork's decisions have

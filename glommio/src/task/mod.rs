@@ -56,11 +56,16 @@ mod lifecycle_tests;
 pub(crate) mod raw;
 pub(crate) mod state;
 pub(crate) mod task_impl;
+mod task_local;
 mod tests;
 pub(crate) mod utils;
 pub(crate) mod waker_fn;
 
-pub use crate::task::{join_handle::JoinHandle, task_impl::Task};
+pub use crate::task::{
+    join_handle::JoinHandle,
+    task_impl::Task,
+    task_local::{AccessError, LocalKey, TaskLocalFuture},
+};
 
 /// Mark context for task operations
 #[macro_export]
