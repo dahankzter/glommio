@@ -197,3 +197,41 @@ fn types_appearing_in_public_signatures_can_be_named() {
         item
     }
 }
+
+/// `send_file` must be callable, and `SpliceSource` nameable, from outside.
+/// A trait that cannot be named is a trait whose method cannot be discussed
+/// in a downstream signature.
+#[test]
+fn send_file_and_splice_source_are_reachable() {
+    use glommio::io::{BufferedFile, SpliceSource};
+
+    // Nameable in a signature is the property under test.
+    fn alignment_of<F: SpliceSource>(f: &F) -> u64 {
+        f.splice_offset_alignment()
+    }
+
+    glommio::LocalExecutor::default().run(async {
+        let mut path = std::env::temp_dir();
+        path.push(format!("glommio-public-send-file-{}", std::process::id()));
+        std::fs::write(&path, b"reachable").unwrap();
+
+        let file = BufferedFile::open(&path).await.unwrap();
+        assert_eq!(alignment_of(&file), 1);
+
+        let listener = glommio::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted =
+            glommio::spawn_local(async move { listener.accept().await.unwrap() }).detach();
+        let mut writer = glommio::net::TcpStream::connect(addr).await.unwrap();
+        let _reader = accepted.await.unwrap();
+
+        let sent = writer
+            .send_file(&file, 0, b"reachable".len())
+            .await
+            .unwrap();
+        assert_eq!(sent, b"reachable".len());
+
+        file.close().await.unwrap();
+        std::fs::remove_file(&path).ok();
+    });
+}

@@ -109,6 +109,30 @@ A task-local is deliberately *not* inherited by a task spawned inside the
 scope — the child is a separate task and the value would otherwise outlive
 the future it belongs to.
 
+## 5. ~~No zero-copy file-to-socket send~~ — fixed 2026-08-26
+
+tokio has `TcpStream::from_std` plus `AsyncFd` and, on Linux, crates built on
+`sendfile`/`splice` for this; glommio had nothing, so serving a file meant a
+read into a buffer followed by a write, copying through userspace twice for
+every byte.
+
+**Fixed** as `TcpStream::send_file`, built on `IORING_OP_SPLICE` through a
+pipe (a direct file-to-socket splice is not a kernel-supported pairing; the
+pipe is the intermediate `splice` needs). It takes any `SpliceSource`, sealed
+and implemented for `BufferedFile` and `DmaFile` — a `DmaFile`'s `O_DIRECT`
+alignment requirement on the splice offset is checked up front rather than
+surfacing as a bare kernel `EINVAL`.
+
+Two things remain out of reach through the same door:
+
+- `UnixStream::send_file` — the socket-side plumbing `send_file` needs exists
+  only on `TcpStream` today; nothing about `splice` is TCP-specific, so this
+  is wiring, not design.
+- `SpliceSource for ImmutableFile` — deferred deliberately. `ImmutableFile`
+  holds a `DmaStreamReaderBuilder` and a size rather than a `DmaFile`, and
+  exposes no `AsRawFd`, so there is no descriptor to hand `splice` without
+  first changing what the type holds.
+
 ## The long tail, and why it is fine
 
 | tokio | glommio | verdict |

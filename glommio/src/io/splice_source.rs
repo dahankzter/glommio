@@ -16,8 +16,9 @@ mod sealed {
 /// passing through this process.
 ///
 /// Implemented for [`BufferedFile`] and [`DmaFile`]. It is sealed: the two
-/// methods below are an internal contract with `TcpStream::send_file`, not
-/// an extension point.
+/// methods below are an internal contract with
+/// [`TcpStream::send_file`](crate::net::TcpStream::send_file), not an
+/// extension point.
 pub trait SpliceSource: sealed::Sealed {
     /// The descriptor to splice from.
     fn splice_fd(&self) -> RawFd;

@@ -913,6 +913,20 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
     /// unlike the short-on-EOF case, the error carries no byte count, so the
     /// caller only knows the socket may hold a partial write.
     ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use glommio::{io::BufferedFile, net::TcpStream, LocalExecutor};
+    /// # let ex = LocalExecutor::default();
+    /// # ex.run(async {
+    /// let file = BufferedFile::open("index.html").await.unwrap();
+    /// let size = file.file_size().await.unwrap() as usize;
+    /// let mut stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+    /// let sent = stream.send_file(&file, 0, size).await.unwrap();
+    /// assert_eq!(sent, size);
+    /// # });
+    /// ```
+    ///
     /// # Alignment
     ///
     /// A [`DmaFile`](crate::io::DmaFile) is opened `O_DIRECT`, which requires
