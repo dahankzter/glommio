@@ -15,6 +15,243 @@ glommio = { package = "glommio-ng", version = "0.10" }
 in automatically by the default `macros` feature. You do not depend on it
 directly.
 
+## 0.11.5 — 2026-08-26
+
+Two crash fixes and five capabilities. Lead with the fixes: anyone running
+shared channels under load has been hitting a panic, and anyone connecting by
+hostname has been stalling a whole core per connection.
+
+### Fixed
+
+- **A shared channel no longer panics when its peer's executor is gone.**
+  Connecting resolved the peer's executor id to its sleep notifier and
+  unwrapped the result — but the two are not dropped together: an executor
+  drops its notifier on its own schedule, while its id stays in the buffer
+  until the peer's channel half is dropped. So the surviving side could hold
+  an id whose notifier had already gone. About one full-suite run in five,
+  which is why it read as a flake rather than as a bug.
+
+  An executor that no longer exists can neither be woken nor send, which is
+  what disconnected means, so the peer is now marked disconnected as well as
+  resolved to a placeholder notifier. Marking it is not optional: the
+  placeholder alone stops the panic and leaves this side waiting forever for a
+  peer that cannot arrive, trading a crash for a hang.
+
+- **`TcpStream::connect` no longer resolves DNS on the executor thread.** It
+  called `to_socket_addrs` inline; on a hostname that is `getaddrinfo`, which
+  blocks — and on a thread-per-core runtime it blocks every task on that core,
+  for single-digit milliseconds warm and seconds when a resolver is
+  unreachable. glommio's own stall detector reported it as a stalled task
+  queue.
+
+  std's trait could not carry the fix: moving the address to the blocking pool
+  needs it `Send + 'static`, and `connect(&host_string)` is neither. So
+  `glommio::net` now has its own sealed `ToSocketAddrs` that hands back owned
+  data before anything blocking happens — addresses when it already has them,
+  a `String` when a lookup is genuinely needed. The shapes callers pass are
+  unchanged, including the borrow of a local `String`, and only a real
+  hostname crosses to the pool. A literal address never reaches the resolver,
+  which is why this never showed up in a benchmark that dials an IP.
+
+  The same line turned an address resolving to nothing into a panic, on a path
+  where every other failure is a `Result`. The two `bind` calls are not async
+  and still resolve inline, which is defensible once at startup, but they no
+  longer panic on a resolver error.
+
+### Added
+
+- **`io::PollableFd`** — await readiness on a descriptor glommio did not
+  create. Everything glommio owns already goes through the reactor; an inotify
+  watch, a timerfd, a device node or a C library's descriptor had no way in,
+  because `poll_read_ready` and `poll_write_ready` are crate-private. That is
+  the difference between a runtime an ecosystem can build on and one that
+  supports only what it ships.
+
+  It registers through the same `IORING_OP_POLL_ADD` the socket paths use, so
+  a foreign descriptor parks the executor in the kernel alongside everything
+  else. It owns what it is given, so the descriptor cannot be closed while a
+  registration is outstanding, and hands it back through `into_inner`.
+
+  Readiness here is not edge-triggered: each call registers a fresh one-shot
+  poll, so there is no readiness state to clear and no guard to return. The
+  `AsyncFd`/`clear_ready` dance epoll forces on tokio has no counterpart here,
+  which is worth saying out loud because its absence looks like an omission.
+
+- **`signal::Signals`** — signals as readable events on the reactor, so a
+  server can drain on `SIGTERM`. A signal handler is a bad fit twice over: it
+  runs on whichever thread the kernel picks, and almost nothing in a per-core
+  runtime is safe to touch from there. signalfd avoids both — signals become a
+  readable descriptor, that descriptor goes on the reactor through
+  `PollableFd`, and the code that reacts is ordinary async code on a core the
+  caller chose.
+
+  Two properties of signals do not go away and are documented rather than
+  papered over. They must be blocked before signalfd can see them, and the
+  mask is per thread and inherited across spawn — so `block()` belongs in
+  `main` before any executor exists; `Signals::new` blocking its own thread is
+  enough for one executor and not for a pool. And a signal goes to one
+  signalfd, so two executors watching `SIGTERM` race for it; fan out with a
+  shared channel or a `ForeignCancellation`.
+
+- **`task_local!`** — storage scoped to a task rather than to a core.
+  `thread_local!` is almost right on a runtime whose tasks never migrate, and
+  wrong in the one way that matters: every task on a core shares the slot, so
+  a request id written there is visible to the next request and to everything
+  running between the two.
+
+  A task-local is set around each poll of the future it is scoped to and taken
+  out again afterwards, so two tasks interleaving on one core each read their
+  own. That makes it a future combinator rather than a change to the task
+  structures: nothing is allocated per task, the task header is untouched, and
+  reading one costs a thread-local access. Deliberately not inherited by a
+  task spawned inside the scope — the child is a separate task, and a value
+  that followed it would outlive the future it belongs to.
+
+- **`TcpStream::recv_tls_record`** and **`net::tls_record`** — read one record
+  off a socket with kernel TLS enabled and report the type the kernel attached
+  to it. glommio does no TLS and should not. What it has to get right is that
+  a record which is *not* application data can be read at all: once `TLS_RX`
+  is installed, the kernel refuses a plain `recv` with such a record at the
+  head of the queue and returns `EIO`. A TLS 1.3 key update is such a record,
+  so a long-lived kTLS connection that only ever calls `read` eventually fails
+  with an opaque I/O error that looks like a runtime bug rather than a key
+  update.
+
+  The record type is `None` on a socket without kernel TLS, so the call is an
+  ordinary read there and a caller need not know which it has. Enabling kernel
+  TLS stays the caller's business — `TCP_ULP` and the keys a handshake
+  produced, on the descriptor `AsRawFd` already hands over; the `ktls` crate
+  does that against rustls. This is only the part that cannot be done from
+  outside, because it is glommio's read path that turns a control record into
+  `EIO`.
+
+- **Six types callers met and could not name** are exported: `NonBuffered`,
+  the default receive buffer of `TcpStream` and `UnixStream`; `Tick`, what
+  `Interval::tick` returns; `CpuSetGenerator` and `CpuIter`, which come back
+  from `Placement::generate_cpu_set`; and `ReadManyArgs` with
+  `ScheduledSource`, the item type of the stream `read_many` returns. Each was
+  usable inline and impossible to store, wrap, or implement a trait for.
+
+  Found by diffing rustdoc's output against every `pub` the source declares —
+  470 declared, 177 reachable — because `#![deny(unreachable_pub)]` does not
+  catch this class: a public impl or a re-exported supertrait keeps rustc
+  quiet while the type stays unnameable. That is the same mechanism that hid
+  `RxBuf` for years.
+
+  `Statx` went the other way. It was the argument of a public `From` impl
+  while staying unnameable, so no caller could ever invoke the conversion, and
+  exporting the raw kernel structure would commit this crate to its twenty
+  fields forever, for nobody. The conversion is a crate-private constructor
+  now.
+
+### Changed
+
+- **The `native-tls` feature is now `native-thread-local`.** It selects the
+  nightly `#[thread_local]` attribute for executor-local storage instead of
+  `scoped_tls`. The "tls" was always thread-local storage and never Transport
+  Layer Security, but it collides with the well-known `native-tls` crate and
+  has now been read as an empty TLS placeholder more than once — reasonably,
+  since the feature has no dependencies and glommio has no TLS of its own.
+  `native-tls` remains as an alias that enables it, so no existing build
+  breaks and nobody has to migrate.
+
+## 0.11.4 — 2026-08-24
+
+> These notes and those for 0.11.1 through 0.11.3 were written retroactively
+> on 2026-08-26. Those four versions shipped without entries; what follows was
+> reconstructed from the commits published before each version's crates.io
+> timestamp.
+
+### Fixed
+
+- **`OwnedRxBuf` can be constructed and unwrapped.** It shipped public in
+  0.11.2 with a `pub(crate)` constructor and no accessor, so a foreign `RxBuf`
+  could neither hand its buffer over nor take it back: `take_kernel_buffer`
+  could not return `Some`, and the completion read path was in practice
+  reserved for `Preallocated`. The 0.11.2 notes said external implementations
+  keep the readiness path "until they opt in" — there was no way to opt in.
+  `new` and `into_vec` fix that.
+
+  `new` panics on an empty vector rather than accepting it. The kernel fills
+  `memory[..len]`, so a vector with capacity and no length lends it nowhere to
+  write, and the resulting zero-byte read is indistinguishable from the peer
+  hanging up — a healthy connection would silently appear closed.
+  `Vec::with_capacity(n)` is exactly how that mistake gets written, so it is
+  refused where it is made rather than one layer down.
+
+### Added
+
+- An integration test that drives the public API from outside the crate, plus
+  `deny(unreachable_pub)` as hygiene, narrowing 36 internal items to
+  `pub(crate)`. Two releases in a row shipped API a dependent crate could not
+  use and no unit test could see, because from inside every module is in scope
+  and every constructor visible.
+
+## 0.11.3 — 2026-08-24
+
+### Fixed
+
+- **`RxBuf` is exported, so `buffered_with` can be satisfied at all.** It
+  takes any `B: Buffered`, and `Buffered` requires `RxBuf` — but `RxBuf` lived
+  in a private module and was never re-exported, so no type outside this crate
+  could implement it. The generic parameter was real and its only possible
+  argument was `Preallocated`. That also made `OwnedRxBuf`, added in 0.11.2,
+  useless to the callers it exists for: the trait whose methods hand it out
+  could not be named.
+
+  Its methods are documented now that they are public, including the two rules
+  an implementation has to know: `is_empty` must not claim to hold bytes that
+  have not arrived, and `unfilled` is called before the read completes.
+  Getting that pair wrong hands the caller uninitialised space instead of
+  data.
+
+## 0.11.2 — 2026-08-24
+
+### Changed
+
+- **Buffered reads go through the ring.** The buffered read path now hands its
+  receive buffer to the kernel and takes it back filled, rather than polling
+  for readiness and then reading. Only the buffered path can do this, and the
+  reason is lifetime rather than speed: `poll_read` receives a borrowed slice
+  good for one call while the kernel needs the buffer until the completion
+  arrives. Where glommio owns the buffer it can lend it. **The unbuffered path
+  keeps the readiness design permanently** — that split is not a stage.
+
+  Buffered reads at 256 connections, every reader parked before data arrives:
+  1,247ns of CPU per message to 1,023ns. Streaming, where the data is always
+  waiting and the risk of a regression lives, is unchanged at 3,795ns per
+  64KiB. The unbuffered path does not move.
+
+  Speculation stays, because deleting it would cost the streaming reader one
+  syscall against an SQE and a CQE. A bit per stream follows the workload
+  instead of choosing for it.
+
+### Added
+
+- **`poll_write_vectored` on `TcpStream` and `UnixStream`.** Neither
+  overrode it, so both inherited the futures-io default, which writes only the
+  first slice. A server sending a response as status line, headers and body
+  paid three `send` calls — and with `TCP_NODELAY` set, which a
+  latency-sensitive server does set, put up to three segments on the wire for
+  one response. Measured over 100k loopback responses: 6,760ns to 1,782ns on a
+  small response, with segments per response dropping by the same factor. Off
+  loopback the segment count is the larger effect.
+
+### Performance
+
+- `accept` no longer toggles `O_NONBLOCK` on every call.
+
+## 0.11.1 — 2026-08-21
+
+### Added
+
+- **Cross-core `watch` and `broadcast` channels.** `watch` carries a latest
+  value to observers that only need the current state; `broadcast` fans each
+  message out to every receiver. Both are written over a shared storage seam
+  that `oneshot`'s two separate implementations were folded into, so the
+  local and cross-core variants are one implementation over two storages
+  rather than two codebases.
+
 ## 0.11.0 — 2026-08-21
 
 The first release that asks anything of downstreams. Both changes are
