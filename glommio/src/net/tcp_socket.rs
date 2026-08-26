@@ -932,10 +932,34 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
 
             let mut drained = 0usize;
             while drained < filled {
-                let moved = reactor
+                let moved = match reactor
                     .splice(pipe.reader(), -1, fd_out, (filled - drained) as u32)
                     .collect_rw()
-                    .await?;
+                    .await
+                {
+                    Ok(moved) => moved,
+                    Err(err) if err.raw_os_error() == Some(libc::EAGAIN) => {
+                        // The send buffer is full. Park until the socket is
+                        // writable again rather than spinning: after a
+                        // partial drain by the peer, an immediate retry
+                        // still returns EAGAIN.
+                        reactor.poll_write_ready(fd_out).collect_rw().await?;
+                        continue;
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                if moved == 0 {
+                    // Neither EOF (this is a pipe, not the source file) nor
+                    // EAGAIN (handled above): a zero-length splice here means
+                    // no byte moved and nothing was learned that would make
+                    // the next attempt different, so looping again would
+                    // spin forever instead of making progress.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "splice(pipe -> socket) made no progress",
+                    )
+                    .into());
+                }
                 drained += moved;
             }
 

@@ -6,6 +6,7 @@ use glommio::{
     net::{TcpListener, TcpStream},
     GlommioError, LocalExecutor,
 };
+use std::os::unix::io::AsRawFd;
 
 fn tmp_path(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -263,6 +264,57 @@ fn a_misaligned_offset_on_a_dma_file_is_an_error_not_an_einval() {
         );
 
         file.close().await.unwrap();
+        std::fs::remove_file(&path).ok();
+    });
+}
+
+#[test]
+fn a_slow_reader_does_not_stall_send_file() {
+    // A small send buffer plus a reader that only drains after the send has
+    // begun forces splice(pipe -> socket) to return EAGAIN repeatedly. An
+    // implementation that does not wait for writability hangs here.
+    LocalExecutor::default().run(async {
+        let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
+        let path = seed("backpressure", &payload);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected_len = payload.len();
+
+        let reader = glommio::spawn_local(async move {
+            let mut stream = listener.accept().await.unwrap();
+            let mut got = Vec::new();
+            stream.read_to_end(&mut got).await.unwrap();
+            got
+        })
+        .detach();
+
+        let mut writer = TcpStream::connect(addr).await.unwrap();
+
+        // Squeeze the send buffer so the socket fills almost immediately.
+        let small: libc::c_int = 4096;
+        let ok = unsafe {
+            libc::setsockopt(
+                writer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &small as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(ok, 0, "SO_SNDBUF should be settable");
+
+        let file = BufferedFile::open(&path).await.unwrap();
+        let sent = writer.send_file(&file, 0, expected_len).await.unwrap();
+        file.close().await.unwrap();
+        drop(writer);
+
+        assert_eq!(
+            sent, expected_len,
+            "backpressure must not truncate the send"
+        );
+        assert_eq!(reader.await.unwrap(), payload, "nor corrupt it");
+
         std::fs::remove_file(&path).ok();
     });
 }
