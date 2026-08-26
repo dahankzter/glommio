@@ -4,9 +4,10 @@ use futures_lite::io::AsyncReadExt;
 use glommio::{
     io::{BufferedFile, DmaFile},
     net::{TcpListener, TcpStream},
+    timer::Timer,
     GlommioError, LocalExecutor,
 };
-use std::os::unix::io::AsRawFd;
+use std::{cell::Cell, os::unix::io::AsRawFd, rc::Rc, time::Duration};
 
 fn tmp_path(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
@@ -314,6 +315,140 @@ fn a_slow_reader_does_not_stall_send_file() {
             "backpressure must not truncate the send"
         );
         assert_eq!(reader.await.unwrap(), payload, "nor corrupt it");
+
+        std::fs::remove_file(&path).ok();
+    });
+}
+
+#[test]
+fn a_backpressured_send_does_not_stall_the_executor() {
+    // Blocking slowly is not the same as blocking correctly. A send_file
+    // that suspends its own task while the send buffer is full is fine; one
+    // that stalls the whole single-threaded reactor while it waits would
+    // starve every other task on the executor, and no test up to this point
+    // would notice the difference -- they only check that send_file itself
+    // eventually finishes with the right bytes, which is true either way.
+    //
+    // This proves a neighbour task specifically progresses *during* the
+    // backpressured stretch, not merely before or after it. A task is also
+    // polled once when it is first spawned, so a counter that is merely
+    // nonzero by the end would prove nothing -- this is the same trap
+    // documented in the hostname-resolution fix: asserting a property
+    // "around" an operation that suspends passes whether or not the
+    // operation itself blocks. The discriminator here is sampling strictly
+    // inside a window the reader is guaranteed not to have started draining
+    // yet, so any neighbour progress recorded there could only have
+    // happened while send_file was genuinely parked.
+    LocalExecutor::default().run(async {
+        let payload: Vec<u8> = (0..2 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let path = seed("neighbour", &payload);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected_len = payload.len();
+
+        // The reader does not touch the socket until this elapses, so any
+        // window that ends before it does is entirely inside send_file's
+        // backpressured stretch: the squeezed send buffer fills in low
+        // single-digit milliseconds against a 2 MiB payload, far inside
+        // this margin.
+        let stall = Duration::from_millis(600);
+
+        let reader = glommio::spawn_local(async move {
+            let mut stream = listener.accept().await.unwrap();
+            Timer::new(stall).await;
+            let mut got = Vec::new();
+            stream.read_to_end(&mut got).await.unwrap();
+            got
+        })
+        .detach();
+
+        let mut writer = TcpStream::connect(addr).await.unwrap();
+
+        // Squeeze the send buffer so the socket fills almost immediately.
+        let small: libc::c_int = 4096;
+        let ok = unsafe {
+            libc::setsockopt(
+                writer.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                &small as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(ok, 0, "SO_SNDBUF should be settable");
+
+        let file = BufferedFile::open(&path).await.unwrap();
+
+        let ticks = Rc::new(Cell::new(0u64));
+        let sender_done = Rc::new(Cell::new(false));
+
+        let neighbour = {
+            let ticks = ticks.clone();
+            let sender_done = sender_done.clone();
+            glommio::spawn_local(async move {
+                // Ticks a short timer repeatedly rather than merely
+                // cooperatively yielding: reaching completion requires the
+                // reactor to actually service another task's timer while
+                // send_file's own splice is outstanding, which is exactly
+                // the property in question.
+                while !sender_done.get() {
+                    Timer::new(Duration::from_millis(5)).await;
+                    ticks.set(ticks.get() + 1);
+                }
+            })
+            .detach()
+        };
+
+        let sender = {
+            let sender_done = sender_done.clone();
+            glommio::spawn_local(async move {
+                let sent = writer.send_file(&file, 0, expected_len).await.unwrap();
+                file.close().await.unwrap();
+                drop(writer);
+                sender_done.set(true);
+                sent
+            })
+            .detach()
+        };
+
+        // Sample a 400ms window fully before the reader's stall elapses.
+        Timer::new(Duration::from_millis(50)).await;
+        assert!(
+            !sender_done.get(),
+            "send_file finished before the reader started reading at all; \
+             the buffer squeeze did not produce genuine backpressure here, \
+             so this run cannot measure what it is meant to"
+        );
+        let before = ticks.get();
+
+        Timer::new(Duration::from_millis(450)).await;
+        assert!(
+            !sender_done.get(),
+            "send_file finished before the reader started reading; same \
+             concern as the first checkpoint"
+        );
+        let after = ticks.get();
+
+        let sent = sender.await.unwrap();
+        assert_eq!(sent, expected_len);
+        let got = reader.await.unwrap();
+        assert_eq!(got, payload);
+        neighbour.await;
+
+        let progressed = after - before;
+        // Ticks are spaced 5ms apart over a 400ms window entirely inside
+        // the stall, so an unstarved neighbour should log roughly 80. The
+        // threshold is well below that: it only needs to rule out "the
+        // executor was stalled and the neighbour barely ran at all".
+        assert!(
+            progressed >= 40,
+            "neighbour should have made substantial progress while \
+             send_file was backpressured (expected roughly 80 ticks over \
+             this 400ms window, got {progressed}) -- a low count here would \
+             mean the executor stalls while send_file waits on a full send \
+             buffer, not merely that send_file itself is slow"
+        );
 
         std::fs::remove_file(&path).ok();
     });
