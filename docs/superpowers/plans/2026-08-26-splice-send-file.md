@@ -491,7 +491,9 @@ Add to `glommio/src/net/tcp_socket.rs`. Put it in the same `impl<B: RxBuf + Unpi
         let pipe = Pipe::new()?;
         let reactor = crate::executor().reactor();
         let fd_in = file.splice_fd();
-        let fd_out = self.stream.as_raw_fd();
+        // `GlommioStream` implements `AsRawFd` only for `NonBuffered`, so reach
+        // the socket the way this file's own `AsRawFd` impl does.
+        let fd_out = self.stream.stream().as_raw_fd();
 
         let mut sent = 0usize;
         let mut pos = offset;
