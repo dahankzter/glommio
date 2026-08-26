@@ -881,12 +881,34 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
     /// On a mid-transfer error, the count of bytes already sent is lost --
     /// unlike the short-on-EOF case, the error carries no byte count, so the
     /// caller only knows the socket may hold a partial write.
+    ///
+    /// # Alignment
+    ///
+    /// A [`DmaFile`](crate::io::DmaFile) is opened `O_DIRECT`, which requires
+    /// the splice source offset to be a multiple of the device's logical
+    /// block size. `offset` that does not satisfy this is refused here,
+    /// before anything is submitted, with an error naming both the offset
+    /// and the alignment it needed to satisfy -- rather than reaching the
+    /// kernel and coming back as a bare `EINVAL` with no indication of what
+    /// was wrong or where. A [`BufferedFile`](crate::io::BufferedFile) has no
+    /// such requirement and accepts any offset.
     pub async fn send_file<F: SpliceSource>(
         &mut self,
         file: &F,
         offset: u64,
         len: usize,
     ) -> Result<usize> {
+        let alignment = file.splice_offset_alignment();
+        if alignment > 1 && offset % alignment != 0 {
+            return Err(crate::GlommioError::IoError(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "send_file offset {offset} is not a multiple of {alignment}; a file opened \
+                     O_DIRECT can only be spliced from an aligned offset"
+                ),
+            )));
+        }
+
         let reactor = crate::executor().reactor();
         let pipe = Pipe::new(&reactor)?;
         let fd_in = file.splice_fd();

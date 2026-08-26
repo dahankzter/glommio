@@ -2,13 +2,36 @@
 
 use futures_lite::io::AsyncReadExt;
 use glommio::{
-    io::BufferedFile,
+    io::{BufferedFile, DmaFile},
     net::{TcpListener, TcpStream},
-    LocalExecutor,
+    GlommioError, LocalExecutor,
 };
 
 fn tmp_path(name: &str) -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
+    p.push(format!("glommio-send-file-{}-{}", std::process::id(), name));
+    p
+}
+
+/// A path under the workspace `target/` directory rather than the system
+/// temp directory.
+///
+/// Used only by the misaligned-offset test below -- do not "simplify" that
+/// test back to `tmp_path()`/`std::env::temp_dir()`. `std::env::temp_dir()`
+/// is `/tmp`, which on this machine (and commonly in CI containers) is
+/// `tmpfs`. This does not disable glommio's own alignment check: `DmaFile`
+/// clamps its reported alignment to `.max(512)` regardless of filesystem, so
+/// the check still fires from `/tmp` too. What `tmpfs` breaks is the test's
+/// ability to *prove the check is needed*: `tmpfs` accepts `O_DIRECT` but
+/// does not enforce the offset-alignment requirement at the kernel level, so
+/// an unguarded misaligned splice against a `tmpfs`-backed file simply
+/// succeeds there -- there is no kernel `EINVAL` to distinguish glommio's
+/// error from. `target/` sits on whatever real filesystem backs the
+/// checkout, where an unguarded misaligned splice does fail `EINVAL`, which
+/// is what this test needs in order to tell "refused before submission"
+/// apart from "the kernel rejected it".
+fn dma_tmp_path(name: &str) -> std::path::PathBuf {
+    let mut p: std::path::PathBuf = concat!(env!("CARGO_MANIFEST_DIR"), "/../target").into();
     p.push(format!("glommio-send-file-{}-{}", std::process::id(), name));
     p
 }
@@ -158,6 +181,88 @@ fn sending_from_an_offset_skips_the_prefix() {
             "the offset must select the right window, not just the right length"
         );
 
+        std::fs::remove_file(&path).ok();
+    });
+}
+
+#[test]
+fn a_misaligned_offset_on_a_dma_file_is_an_error_not_an_einval() {
+    LocalExecutor::default().run(async {
+        let path = dma_tmp_path("dma-misaligned");
+        {
+            // Seed through std so the file has contents before O_DIRECT opens it.
+            let payload: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+            std::fs::write(&path, &payload).unwrap();
+        }
+
+        let file = DmaFile::open(&path).await.unwrap();
+        let alignment = file.align_up(1);
+        if alignment <= 1 {
+            eprintln!(
+                "skipping: this filesystem reports no O_DIRECT alignment, so there is \
+                 no misaligned offset to reject here."
+            );
+            file.close().await.unwrap();
+            std::fs::remove_file(&path).ok();
+            return;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted =
+            glommio::spawn_local(async move { listener.accept().await.unwrap() }).detach();
+        let mut writer = TcpStream::connect(addr).await.unwrap();
+        let _reader = accepted.await.unwrap();
+
+        // One byte past an aligned boundary: never valid under O_DIRECT.
+        let misaligned = alignment + 1;
+        let result = writer.send_file(&file, misaligned, 4096).await;
+        let err = result.expect_err("a misaligned offset must be refused, not sent to the kernel");
+        let message = err.to_string();
+        // The message is about *what* the error says: it must name the
+        // offset and the alignment it had to satisfy, which a raw kernel
+        // EINVAL never would.
+        assert!(
+            message.contains(&misaligned.to_string()) && message.contains(&alignment.to_string()),
+            "expected glommio's own alignment error naming offset {misaligned} and \
+             alignment {alignment}, got: {message}"
+        );
+        // `raw_os_error()` is about *where* the error came from: it is
+        // `Some` only when the `io::Error` underneath wraps a raw OS error
+        // code, which is exactly what a kernel-returned EINVAL would be. Our
+        // check builds its error with `io::Error::new(InvalidInput, ..)`,
+        // which carries no OS code, so this is `None` here and would be
+        // `Some(22)` if the offset had instead reached the kernel and come
+        // back EINVAL. This is a structural check -- it survives any future
+        // rewording of the message, unlike a substring match would.
+        assert!(
+            err.raw_os_error().is_none(),
+            "this must be glommio's own pre-submission check, not a raw kernel EINVAL \
+             (raw_os_error = {:?}): {message}",
+            err.raw_os_error()
+        );
+        // And the `ErrorKind` should be the one the check actually
+        // constructs, not whatever `io::Error` maps EINVAL to.
+        match &err {
+            GlommioError::IoError(io_err) => {
+                assert_eq!(
+                    io_err.kind(),
+                    std::io::ErrorKind::InvalidInput,
+                    "expected the check's own InvalidInput, got: {io_err:?}"
+                );
+            }
+            other => panic!("expected GlommioError::IoError, got: {other:?}"),
+        }
+
+        // An aligned offset on the same file still works, so the check is not
+        // simply refusing everything.
+        let ok = writer.send_file(&file, alignment, 4096).await;
+        assert!(
+            ok.is_ok(),
+            "an aligned offset must still be accepted, got: {ok:?}"
+        );
+
+        file.close().await.unwrap();
         std::fs::remove_file(&path).ok();
     });
 }
