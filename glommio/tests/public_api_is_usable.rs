@@ -158,3 +158,42 @@ fn every_address_shape_still_compiles() {
         assert!(TcpStream::connect(&owned).await.is_ok());
     });
 }
+
+#[test]
+fn types_appearing_in_public_signatures_can_be_named() {
+    // Swept 2026-08-26: rustdoc only documents reachable items, so diffing
+    // the docs against what the source declares `pub` finds types a caller
+    // meets but cannot write down. Each of these appeared in a public
+    // signature while being unnameable outside the crate, which makes them
+    // usable inline and impossible to store, wrap or implement traits for.
+    use glommio::{
+        io::{ReadManyArgs, ScheduledSource},
+        net::{NonBuffered, TcpStream},
+        timer::{Interval, Tick},
+        CpuIter, CpuSetGenerator, Placement,
+    };
+
+    // `TcpStream`'s default receive buffer: needed to write the type out in a
+    // struct field or a trait implementation.
+    fn _unbuffered(stream: TcpStream<NonBuffered>) -> TcpStream<NonBuffered> {
+        stream
+    }
+
+    // Returned by `Interval::tick`, so a caller storing the future needs it.
+    fn _tick<'a>(interval: &'a mut Interval) -> Tick<'a> {
+        interval.tick()
+    }
+
+    // Returned by `Placement::generate_cpu_set` and `CpuSetGenerator::next`.
+    fn _placement(placement: Placement) -> glommio::Result<CpuIter, ()> {
+        let mut generator: CpuSetGenerator = placement.generate_cpu_set()?;
+        Ok(generator.next())
+    }
+
+    // Both name the item type of the stream `read_many` returns.
+    fn _read_many_item<V: glommio::io::IoVec + Unpin>(
+        item: (ScheduledSource, ReadManyArgs<V>),
+    ) -> (ScheduledSource, ReadManyArgs<V>) {
+        item
+    }
+}

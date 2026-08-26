@@ -138,6 +138,41 @@ the future it belongs to.
 3. ~~Signals via `signalfd`.~~ Done.
 4. `Notify` and async `read_dir` — still only if a real consumer asks.
 
+## The sweep of the older surface (2026-08-26)
+
+Done, and the method is worth keeping: **rustdoc only documents reachable
+items**, so diffing `target/doc/glommio/all.html` against every `pub` item the
+source declares finds anything a caller meets but cannot write down. 470
+declared, 177 reachable; after discarding methods (which `all.html` does not
+list) and `#[doc(hidden)]`, thirteen candidates remained and six were real:
+
+| type | met by callers as | now |
+|---|---|---|
+| `NonBuffered` | the default receive buffer of `TcpStream`/`UnixStream` | exported |
+| `Tick` | the future `Interval::tick` returns | exported |
+| `CpuSetGenerator` | returned by `Placement::generate_cpu_set` | exported |
+| `CpuIter` | returned by `CpuSetGenerator::next` | exported |
+| `ReadManyArgs`, `ScheduledSource` | the item type of the stream `read_many` returns | exported |
+| `Statx` | argument of a public `From<Statx> for Stat` | impl retired |
+
+Each was usable inline and impossible to store, wrap, or implement a trait for.
+`Statx` went the other way: exporting the raw kernel structure would commit us
+to its twenty fields forever, so the conversion became a crate-private
+constructor instead — and `unreachable_pub` immediately flagged `Statx`, which
+confirms the public `From` impl was what had been holding it reachable.
+
+That is the same mechanism that hid `RxBuf` for years: a public *impl* or
+supertrait keeps rustc from complaining while the type stays unnameable. The
+lint cannot see the difference; the docs diff can.
+
+`TaskDebugger` and `NopSubmitter` also showed up and are fine — they are
+behind the `debugging` and `bench` features, which the doc build does not
+enable.
+
+The remaining unreachable `pub` items are genuinely internal (`Source`,
+`Level`, `Node`, the storage `Sealed` trait) and appear in no public
+signature.
+
 The first two are worth doing without waiting for anyone to ask. The rest
 should follow evidence, which is how the rest of this fork's decisions have
 gone: the arena, multishot accept and the depth-1 read ladder were all

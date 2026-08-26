@@ -405,6 +405,11 @@ impl<U: IoVec + Unpin, S: Stream<Item = (ScheduledSource, U)> + Unpin> Stream
     }
 }
 
+/// One merged read, and the user reads it satisfies.
+///
+/// Appears in the stream [`read_many`](crate::io::DmaFile::read_many)
+/// returns, which is the only reason it is public: naming that stream's item
+/// type requires naming this.
 #[derive(Debug, Clone)]
 pub struct ReadManyArgs<V: IoVec + Unpin> {
     pub(crate) user_reads: VecDeque<V>,

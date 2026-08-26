@@ -529,7 +529,7 @@ pub(crate) enum PollableStatus {
 
 #[derive(Debug, Clone)]
 #[repr(C)]
-pub struct Statx {
+pub(crate) struct Statx {
     pub stx_mask: u32,
     pub stx_blksize: u32,
     pub stx_attributes: u64,
@@ -558,7 +558,7 @@ pub struct Statx {
 
 #[derive(Debug, Clone)]
 #[repr(C)]
-pub struct StatxTimestamp {
+pub(crate) struct StatxTimestamp {
     pub tv_sec: i64,
     pub tv_nsec: u32,
     pub __statx_timestamp_pad1: [i32; 1],

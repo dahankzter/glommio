@@ -443,8 +443,11 @@ impl CpuSet {
 /// via a [`LocalExecutorPoolBuilder`].
 #[derive(Clone, Debug)]
 pub enum CpuIter {
+    /// The executor is not bound to any CPU, so there is nothing to iterate.
     Unbound,
+    /// The executor is bound to exactly one CPU.
     Single(CpuLocation),
+    /// The executor may run on any of these CPUs.
     Multi(Vec<CpuLocation>),
 }
 
@@ -460,6 +463,8 @@ impl CpuIter {
         }
     }
 
+    /// The CPU numbers this executor is bound to, or `None` when it is
+    /// unbound and the scheduler may put it anywhere.
     pub fn cpu_binding(self) -> Option<impl IntoIterator<Item = usize>> {
         match self {
             Self::Unbound => None,
@@ -486,10 +491,17 @@ impl Iterator for CpuIter {
 /// [`Placement`].
 #[derive(Debug)]
 pub enum CpuSetGenerator {
+    /// Every executor runs unbound.
     Unbound,
+    /// Executors run unbound within a restricted set of CPUs.
     Fenced(CpuSet),
+    /// Each executor is placed as far from the others as the machine's
+    /// topology allows, spreading across NUMA nodes and packages first.
     MaxSpread(MaxSpreader),
+    /// Each executor is placed as close to the others as possible, filling
+    /// one core's hyper-threads and one package before moving on.
     MaxPack(MaxPacker),
+    /// Placement given explicitly, one [`CpuSet`] per executor.
     Custom(Vec<CpuSet>),
 }
 
@@ -605,6 +617,11 @@ impl CpuSetGenerator {
     /// A method that generates a [`CpuIter`] according to the provided
     /// [`Placement`] policy. Sequential calls may generate different sets
     /// depending on the [`Placement`].
+    // Not `Iterator::next`, and cannot be: it yields a `CpuIter` rather than
+    // an `Option<Item>`, and it never runs out. The name predates the type
+    // being nameable, and callers could already reach it inline, so renaming
+    // it now would break them for tidiness.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> CpuIter {
         match self {
             Self::Unbound => CpuIter::Unbound,

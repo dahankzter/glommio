@@ -45,7 +45,7 @@ use ahash::AHashMap;
 use futures_lite::pin;
 use latch::{Latch, LatchState};
 use log::warn;
-pub use placement::{CpuSet, Placement, PoolPlacement};
+pub use placement::{CpuIter, CpuSet, CpuSetGenerator, Placement, PoolPlacement};
 use std::{
     cell::RefCell,
     collections::{hash_map::Entry, BinaryHeap},

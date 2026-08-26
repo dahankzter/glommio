@@ -185,6 +185,13 @@ impl<'a> KeyAdapter<'a> for ScheduledSourceAdapter {
     }
 }
 
+/// The result of one I/O the scheduler issued, shared by every read it
+/// satisfies.
+///
+/// Reads that overlap are merged into a single request, so this may be handed
+/// to more than one caller. It appears in the stream
+/// [`read_many`](crate::io::DmaFile::read_many) returns, which is why it is
+/// public.
 #[derive(Debug, Clone)]
 pub struct ScheduledSource {
     inner: Rc<ScheduledSourceInner>,

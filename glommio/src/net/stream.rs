@@ -149,6 +149,12 @@ pub trait RxBuf {
     }
 }
 
+/// The receive buffer of a stream that has none.
+///
+/// The default for [`TcpStream`](crate::net::TcpStream) and
+/// [`UnixStream`](crate::net::UnixStream): reads go straight to the socket.
+/// It is nameable so that `TcpStream<NonBuffered>` can be written out, which
+/// generic code and trait implementations need.
 #[derive(Debug, Default)]
 pub struct NonBuffered;
 

@@ -155,13 +155,13 @@ pub async fn remove<P: AsRef<Path>>(path: P) -> Result<()> {
     Ok(())
 }
 
-pub(crate) use self::sched::{FileScheduler, IoScheduler, ScheduledSource};
+pub(crate) use self::sched::{FileScheduler, IoScheduler};
 pub use self::{
     buffered_file::BufferedFile,
     buffered_file_stream::{
         stdin, StreamReader, StreamReaderBuilder, StreamWriter, StreamWriterBuilder,
     },
-    bulk_io::{IoVec, MergedBufferLimit, ReadAmplificationLimit, ReadManyResult},
+    bulk_io::{IoVec, MergedBufferLimit, ReadAmplificationLimit, ReadManyArgs, ReadManyResult},
     directory::Directory,
     dma_file::{
         AdvisoryLockGuard, CloseResult, DmaFile, OwnedDmaFile, WeakAdvisoryLockGuard, WeakDmaFile,
@@ -173,6 +173,7 @@ pub use self::{
     open_options::OpenOptions,
     pollable_fd::{PollState, PollableFd},
     read_result::ReadResult,
+    sched::ScheduledSource,
     stat::Stat,
 };
 pub use crate::sys::DmaBuffer;

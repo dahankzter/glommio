@@ -252,7 +252,7 @@ impl BufferedFile {
     /// Performs a stat operation on a file to retrieve multiple properties at
     /// once.
     pub async fn stat(&self) -> Result<Stat> {
-        self.file.statx().await.map(Into::into)
+        self.file.statx().await.map(Stat::from_statx)
     }
 
     /// Closes this file.

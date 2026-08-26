@@ -678,7 +678,7 @@ impl DmaFile {
 
     /// Returns the size of the filesystem cluster, in bytes
     pub async fn stat(&self) -> Result<Stat> {
-        self.file.statx().await.map(Into::into)
+        self.file.statx().await.map(Stat::from_statx)
     }
 
     /// Tries to acquire a process-wide advisory shared lock on this file instance. If an exclusive advisory lock is

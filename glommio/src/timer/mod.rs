@@ -15,7 +15,7 @@ pub mod timer_id;
 
 pub(crate) mod reactor_adapter;
 
-pub use interval::{interval, interval_at, Interval, MissedTickBehavior};
+pub use interval::{interval, interval_at, Interval, MissedTickBehavior, Tick};
 use std::{future::Future, time::Duration};
 pub use timer_impl::{Timer, TimerActionOnce, TimerActionRepeat};
 

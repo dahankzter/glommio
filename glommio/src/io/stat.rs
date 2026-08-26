@@ -25,8 +25,16 @@ pub struct Stat {
     pub fs_cluster_size: u32,
 }
 
-impl From<Statx> for Stat {
-    fn from(s: Statx) -> Self {
+impl Stat {
+    /// Built from the kernel's `statx`, which is deliberately not part of
+    /// this crate's API.
+    ///
+    /// This used to be a `From` implementation. That made it public while
+    /// `Statx` stayed unnameable, so nobody outside the crate could call it
+    /// -- a public conversion from a type no caller can obtain. Exporting the
+    /// raw kernel structure to fix that would have committed us to its twenty
+    /// fields forever, for no one's benefit.
+    pub(crate) fn from_statx(s: Statx) -> Self {
         Self {
             file_size: s.stx_size,
             allocated_file_size: s.stx_blocks * 512,
