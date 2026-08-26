@@ -45,8 +45,6 @@ use buddy_alloc::buddy_alloc::{BuddyAlloc, BuddyAllocParam};
 use nix::sys::socket::{MsgFlags, SockFlag};
 use smallvec::SmallVec;
 
-const MSG_ZEROCOPY: i32 = 0x4000000;
-
 #[allow(dead_code)]
 #[derive(Debug)]
 enum UringOpDescriptor {
@@ -492,12 +490,21 @@ where
                     .offset(pos)
                     .build()
             }
-            UringOpDescriptor::SockSend(ptr, len, flags) => opcode::Send::new(fd, ptr, len as u32)
-                .flags(flags | MSG_ZEROCOPY)
-                .build(),
+            // No MSG_ZEROCOPY here, and it must not come back. It needs
+            // SO_ZEROCOPY on the socket to do anything, so it was inert --
+            // but AsRawFd is public, and this crate's own kTLS documentation
+            // tells callers to reach for it and setsockopt. One SO_ZEROCOPY
+            // from a user would have armed it against a send path that frees
+            // its buffer at the send CQE, while the kernel still holds the
+            // pages and reports their release on an error queue nothing
+            // reads. Zero-copy sends need IORING_OP_SEND_ZC, where the
+            // notification is a second CQE on the ring.
+            UringOpDescriptor::SockSend(ptr, len, flags) => {
+                opcode::Send::new(fd, ptr, len as u32).flags(flags).build()
+            }
             UringOpDescriptor::SockSendMsg(hdr, flags) => {
                 opcode::SendMsg::new(fd, hdr as *const libc::msghdr)
-                    .flags((flags | MSG_ZEROCOPY) as u32)
+                    .flags(flags as u32)
                     .build()
             }
             UringOpDescriptor::SockRecvInto(flags) => {
