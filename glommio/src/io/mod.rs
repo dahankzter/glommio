@@ -133,6 +133,7 @@ mod open_options;
 mod pollable_fd;
 mod read_result;
 mod sched;
+mod splice_source;
 mod stat;
 
 use std::path::Path;
@@ -174,6 +175,7 @@ pub use self::{
     pollable_fd::{PollState, PollableFd},
     read_result::ReadResult,
     sched::ScheduledSource,
+    splice_source::SpliceSource,
     stat::Stat,
 };
 pub use crate::sys::DmaBuffer;
