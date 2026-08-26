@@ -1759,7 +1759,7 @@ impl Reactor {
         );
     }
 
-    pub(crate) fn splice(&self, source: &Source, fd_in: RawFd, off_in: i64, len: u32) {
+    pub(crate) fn splice(&self, source: &Source, fd_in: RawFd, off_in: i64, len: u32, flags: u32) {
         let op = UringOpDescriptor::Splice {
             fd_in,
             off_in,
@@ -1767,7 +1767,7 @@ impl Reactor {
             // unseekable, so the output offset is always -1.
             off_out: -1,
             len,
-            flags: 0,
+            flags,
         };
         queue_request_into_ring(
             &mut *self.ring_for_source(source),
@@ -2545,7 +2545,7 @@ mod splice_tests {
 
             let reactor = crate::executor().reactor();
             // off_in is -1: the source is a pipe, which is not seekable.
-            let source = reactor.splice(src_r, -1, dst_w, payload.len() as u32);
+            let source = reactor.splice(src_r, -1, dst_w, payload.len() as u32, 0);
             let moved = source.collect_rw().await.unwrap();
             assert_eq!(moved, payload.len(), "splice should move the whole payload");
 

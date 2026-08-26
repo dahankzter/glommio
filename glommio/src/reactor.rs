@@ -601,9 +601,16 @@ impl Reactor {
         source
     }
 
-    pub(crate) fn splice(&self, fd_in: RawFd, off_in: i64, fd_out: RawFd, len: u32) -> Source {
+    pub(crate) fn splice(
+        &self,
+        fd_in: RawFd,
+        off_in: i64,
+        fd_out: RawFd,
+        len: u32,
+        flags: u32,
+    ) -> Source {
         let source = self.new_source(fd_out, SourceType::Splice, None);
-        self.sys.splice(&source, fd_in, off_in, len);
+        self.sys.splice(&source, fd_in, off_in, len, flags);
         source
     }
 

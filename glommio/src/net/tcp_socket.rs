@@ -802,6 +802,36 @@ pub mod tls_record {
 /// A pipe's capacity, and so the most one splice can move.
 const PIPE_CAPACITY: usize = 65536;
 
+/// Requests that the underlying `splice(2)` fail with `EAGAIN` instead of
+/// blocking when the pipe end of the call cannot move data immediately,
+/// rather than blocking for I/O.
+///
+/// Named here, rather than reaching for `libc::SPLICE_F_NONBLOCK` inline at
+/// the call site, purely for documentation: what follows is the reasoning
+/// for setting it on exactly one of the two splices in `send_file` and not
+/// the other, plus a caveat.
+///
+/// Set only on the pipe -> socket splice, never the file -> pipe one: the
+/// socket is already `O_NONBLOCK` (`TcpStream::connect`/`bind` call
+/// `set_nonblocking(true)`), so this flag is the documented way to make a
+/// full send buffer observable rather than something to block a worker on.
+/// The file -> pipe splice has no such use for it: a regular file has no
+/// meaningful non-blocking semantics, and that pipe is always empty when
+/// written to (it is fully drained before each refill), so there is nothing
+/// to wait on.
+///
+/// Caveat, measured rather than assumed: on this repo's development kernel
+/// (io_uring via a normal, non-`SQPOLL` ring), submitting `IORING_OP_SPLICE`
+/// with this flag set still does not make a full send buffer surface as
+/// `EAGAIN` through the completion -- the kernel's own poll-based retry for
+/// pollable descriptors resolves it before the completion is posted, the
+/// same way it does without the flag. `send_file`'s `EAGAIN` arm below is
+/// therefore correct and matches `splice(2)`'s documented contract, but is
+/// not known to be exercised in this configuration; it is left in as the
+/// documented, portable way to ask for this behavior; see the code review
+/// history for the instrumented investigation.
+const SPLICE_F_NONBLOCK: u32 = libc::SPLICE_F_NONBLOCK;
+
 /// A pipe owned for the duration of one `send_file`.
 ///
 /// Per call rather than pooled, and `O_NONBLOCK` rather than blocking. Both
@@ -922,7 +952,7 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
         while sent < len {
             let want = std::cmp::min(len - sent, PIPE_CAPACITY) as u32;
             let filled = reactor
-                .splice(fd_in, pos as i64, pipe.writer(), want)
+                .splice(fd_in, pos as i64, pipe.writer(), want, 0)
                 .collect_rw()
                 .await?;
             if filled == 0 {
@@ -933,7 +963,13 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
             let mut drained = 0usize;
             while drained < filled {
                 let moved = match reactor
-                    .splice(pipe.reader(), -1, fd_out, (filled - drained) as u32)
+                    .splice(
+                        pipe.reader(),
+                        -1,
+                        fd_out,
+                        (filled - drained) as u32,
+                        SPLICE_F_NONBLOCK,
+                    )
                     .collect_rw()
                     .await
                 {
