@@ -808,33 +808,61 @@ const PIPE_CAPACITY: usize = 65536;
 /// are load-bearing: a blocking pipe makes `splice` into a full pipe block
 /// forever, and a pipe reused across calls could carry one transfer's
 /// leftovers into the next. A pipe that dies with its call cannot do either.
-struct Pipe([RawFd; 2]);
+struct Pipe {
+    fds: [RawFd; 2],
+    reactor: Weak<Reactor>,
+}
 
 impl Pipe {
-    fn new() -> Result<Self> {
+    fn new(reactor: &Rc<Reactor>) -> Result<Self> {
         let mut fds = [0 as RawFd; 2];
         let ok = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
         if ok < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        Ok(Pipe(fds))
+        Ok(Pipe {
+            fds,
+            reactor: Rc::downgrade(reactor),
+        })
     }
 
     fn reader(&self) -> RawFd {
-        self.0[0]
+        self.fds[0]
     }
 
     fn writer(&self) -> RawFd {
-        self.0[1]
+        self.fds[1]
     }
 }
 
 impl Drop for Pipe {
     fn drop(&mut self) {
-        // Closed on every exit path, including a panic or a cancelled future,
-        // so a half-drained pipe is never reachable by anything else.
-        for fd in self.0 {
-            unsafe { libc::close(fd) };
+        // Closed on every exit path, including a panic or a cancelled
+        // future, so a half-drained pipe is never reachable by anything
+        // else -- but not with a raw `libc::close()`. `send_file`'s future
+        // can be dropped while suspended at a `collect_rw().await` on an
+        // in-flight splice against one of these fds (a `select!`, a
+        // timeout, a cancelled task). `Source::drop` only requests an async
+        // cancel for a dispatched op and does not wait for the completion,
+        // so closing here synchronously would free the fd number before the
+        // kernel is done with it -- on this single-threaded reactor, the
+        // very next `open`/`socket`/`pipe` could reuse that number while
+        // the stale splice is still resolving against it.
+        //
+        // `GlommioFile::drop` (glommio/src/io/glommio_file.rs) hits the
+        // identical hazard and solves it the same way: route the close
+        // through the reactor's `async_close`, which queues it as an
+        // ordinary op instead of racing the kernel.
+        if let Some(r) = self.reactor.upgrade() {
+            for fd in self.fds {
+                r.sys.async_close(fd);
+            }
+        } else {
+            // The executor is gone, so there is no reactor left to race
+            // with and no queue to submit to. Best effort.
+            for fd in self.fds {
+                unsafe { libc::close(fd) };
+            }
         }
     }
 }
@@ -850,21 +878,17 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
     /// Returns the number of bytes actually sent, which is short if the file
     /// ends before `len` bytes are available.
     ///
-    /// # Alignment
-    ///
-    /// A [`DmaFile`](crate::io::DmaFile) is open `O_DIRECT`, which requires
-    /// `offset` to be a multiple of the device's logical block size. Passing a
-    /// misaligned offset returns an error rather than reaching the kernel,
-    /// where it would surface as an unexplained `EINVAL`. A
-    /// [`BufferedFile`](crate::io::BufferedFile) accepts any offset.
+    /// On a mid-transfer error, the count of bytes already sent is lost --
+    /// unlike the short-on-EOF case, the error carries no byte count, so the
+    /// caller only knows the socket may hold a partial write.
     pub async fn send_file<F: SpliceSource>(
         &mut self,
         file: &F,
         offset: u64,
         len: usize,
     ) -> Result<usize> {
-        let pipe = Pipe::new()?;
         let reactor = crate::executor().reactor();
+        let pipe = Pipe::new(&reactor)?;
         let fd_in = file.splice_fd();
         // `GlommioStream` implements `AsRawFd` only for `NonBuffered`, so reach
         // the socket the way this file's own `AsRawFd` impl does.
