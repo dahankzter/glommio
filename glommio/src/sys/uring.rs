@@ -62,6 +62,13 @@ enum UringOpDescriptor {
     LinkTimeout(*const crate::sys::KernelTimespec),
     Accept(*mut SockAddrStorage),
     Fallocate(u64, u64, libc::c_int),
+    Splice {
+        fd_in: RawFd,
+        off_in: i64,
+        off_out: i64,
+        len: u32,
+        flags: u32,
+    },
     StatxFd(RawFd, *mut Statx),
     Timeout(*const crate::sys::KernelTimespec, u32),
     TimeoutRemove(u64),
@@ -490,6 +497,15 @@ where
                     .offset(pos)
                     .build()
             }
+            UringOpDescriptor::Splice {
+                fd_in,
+                off_in,
+                off_out,
+                len,
+                flags,
+            } => opcode::Splice::new(types::Fd(fd_in), off_in, fd, off_out, len)
+                .flags(flags)
+                .build(),
             // No MSG_ZEROCOPY here, and it must not come back. It needs
             // SO_ZEROCOPY on the socket to do anything, so it was inert --
             // but AsRawFd is public, and this crate's own kTLS documentation
@@ -1743,6 +1759,24 @@ impl Reactor {
         );
     }
 
+    pub(crate) fn splice(&self, source: &Source, fd_in: RawFd, off_in: i64, len: u32) {
+        let op = UringOpDescriptor::Splice {
+            fd_in,
+            off_in,
+            // Both destinations we splice into -- a pipe and a socket -- are
+            // unseekable, so the output offset is always -1.
+            off_out: -1,
+            len,
+            flags: 0,
+        };
+        queue_request_into_ring(
+            &mut *self.ring_for_source(source),
+            source,
+            op,
+            &mut self.source_map.borrow_mut(),
+        );
+    }
+
     fn enqueue_blocking_request(
         &self,
         source: Pin<Rc<RefCell<InnerSource>>>,
@@ -2478,5 +2512,52 @@ mod tests {
 
         // If the link chain is longer than the io_uring submission queue, we panic
         ring.submit_one_event(&mut queue.submissions);
+    }
+}
+
+#[cfg(test)]
+mod splice_tests {
+    use crate::LocalExecutor;
+    use std::os::unix::io::RawFd;
+
+    fn nonblocking_pipe() -> (RawFd, RawFd) {
+        let mut fds = [0 as RawFd; 2];
+        let ok = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        assert_eq!(ok, 0, "pipe2 failed");
+        (fds[0], fds[1])
+    }
+
+    #[test]
+    fn splice_moves_bytes_between_pipes() {
+        LocalExecutor::default().run(async {
+            let (src_r, src_w) = nonblocking_pipe();
+            let (dst_r, dst_w) = nonblocking_pipe();
+
+            let payload = b"spliced through the ring";
+            let written = unsafe {
+                libc::write(
+                    src_w,
+                    payload.as_ptr() as *const libc::c_void,
+                    payload.len(),
+                )
+            };
+            assert_eq!(written, payload.len() as isize);
+
+            let reactor = crate::executor().reactor();
+            // off_in is -1: the source is a pipe, which is not seekable.
+            let source = reactor.splice(src_r, -1, dst_w, payload.len() as u32);
+            let moved = source.collect_rw().await.unwrap();
+            assert_eq!(moved, payload.len(), "splice should move the whole payload");
+
+            let mut got = vec![0u8; payload.len()];
+            let read =
+                unsafe { libc::read(dst_r, got.as_mut_ptr() as *mut libc::c_void, got.len()) };
+            assert_eq!(read, payload.len() as isize);
+            assert_eq!(&got[..], payload, "bytes must survive the splice intact");
+
+            for fd in [src_r, src_w, dst_r, dst_w] {
+                unsafe { libc::close(fd) };
+            }
+        });
     }
 }

@@ -58,6 +58,9 @@ pub(crate) enum SourceType {
     Open(CString),
     FdataSync,
     Fallocate,
+    /// A splice between two descriptors. Carries nothing: no buffer of ours
+    /// is lent to the kernel, only two descriptors and a length.
+    Splice,
     Truncate,
     Close,
     LinkRings,
