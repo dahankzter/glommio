@@ -5,6 +5,7 @@
 //
 use super::stream::GlommioStream;
 use crate::{
+    io::SpliceSource,
     net::ToSocketAddrs,
     net::{
         stream::{Buffered, NonBuffered, Preallocated, RxBuf},
@@ -798,7 +799,107 @@ pub mod tls_record {
     pub const APPLICATION_DATA: u8 = 23;
 }
 
+/// A pipe's capacity, and so the most one splice can move.
+const PIPE_CAPACITY: usize = 65536;
+
+/// A pipe owned for the duration of one `send_file`.
+///
+/// Per call rather than pooled, and `O_NONBLOCK` rather than blocking. Both
+/// are load-bearing: a blocking pipe makes `splice` into a full pipe block
+/// forever, and a pipe reused across calls could carry one transfer's
+/// leftovers into the next. A pipe that dies with its call cannot do either.
+struct Pipe([RawFd; 2]);
+
+impl Pipe {
+    fn new() -> Result<Self> {
+        let mut fds = [0 as RawFd; 2];
+        let ok = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if ok < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Pipe(fds))
+    }
+
+    fn reader(&self) -> RawFd {
+        self.0[0]
+    }
+
+    fn writer(&self) -> RawFd {
+        self.0[1]
+    }
+}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // Closed on every exit path, including a panic or a cancelled future,
+        // so a half-drained pipe is never reachable by anything else.
+        for fd in self.0 {
+            unsafe { libc::close(fd) };
+        }
+    }
+}
+
 impl<B: RxBuf + Unpin> TcpStream<B> {
+    /// Sends `len` bytes of `file`, starting at `offset`, without the bytes
+    /// entering this process.
+    ///
+    /// The kernel moves page references through a pipe rather than copying
+    /// through a user buffer, so the cost does not scale with the size of the
+    /// payload the way a read-then-write does.
+    ///
+    /// Returns the number of bytes actually sent, which is short if the file
+    /// ends before `len` bytes are available.
+    ///
+    /// # Alignment
+    ///
+    /// A [`DmaFile`](crate::io::DmaFile) is open `O_DIRECT`, which requires
+    /// `offset` to be a multiple of the device's logical block size. Passing a
+    /// misaligned offset returns an error rather than reaching the kernel,
+    /// where it would surface as an unexplained `EINVAL`. A
+    /// [`BufferedFile`](crate::io::BufferedFile) accepts any offset.
+    pub async fn send_file<F: SpliceSource>(
+        &mut self,
+        file: &F,
+        offset: u64,
+        len: usize,
+    ) -> Result<usize> {
+        let pipe = Pipe::new()?;
+        let reactor = crate::executor().reactor();
+        let fd_in = file.splice_fd();
+        // `GlommioStream` implements `AsRawFd` only for `NonBuffered`, so reach
+        // the socket the way this file's own `AsRawFd` impl does.
+        let fd_out = self.stream.stream().as_raw_fd();
+
+        let mut sent = 0usize;
+        let mut pos = offset;
+
+        while sent < len {
+            let want = std::cmp::min(len - sent, PIPE_CAPACITY) as u32;
+            let filled = reactor
+                .splice(fd_in, pos as i64, pipe.writer(), want)
+                .collect_rw()
+                .await?;
+            if filled == 0 {
+                // End of file: nothing more to send.
+                break;
+            }
+
+            let mut drained = 0usize;
+            while drained < filled {
+                let moved = reactor
+                    .splice(pipe.reader(), -1, fd_out, (filled - drained) as u32)
+                    .collect_rw()
+                    .await?;
+                drained += moved;
+            }
+
+            pos += filled as u64;
+            sent += filled;
+        }
+
+        Ok(sent)
+    }
+
     /// Reads one TLS record from a socket with kernel TLS enabled, together
     /// with the record type the kernel attached to it.
     ///
