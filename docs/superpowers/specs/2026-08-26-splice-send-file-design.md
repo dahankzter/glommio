@@ -46,19 +46,44 @@ harmless — it is capped at pipe capacity.
 **Pipe capacity is 65536**, so any transfer larger than that is a loop
 regardless of design.
 
-**Both splices can return `EAGAIN`, and a blocking pipe hangs.** With a
-blocking pipe, `splice(file → pipe)` on a full pipe blocks forever — the first
-probe hung with no output, which is the failure mode this design must
-structurally prevent. With `O_NONBLOCK`: `file → pipe` returns `EAGAIN` when
-the pipe is full, and `pipe → socket` returns `EAGAIN` when the send buffer
-is full. After the peer read 4096 bytes, `pipe → socket` still returned
-`EAGAIN`, so writability must be waited on rather than assumed after a
-partial drain.
+**Both splices can return `EAGAIN`, and a blocking pipe hangs — true of the
+raw syscall, corrected below for the path this design actually uses.** With a
+blocking pipe, `splice(file → pipe)` on a full pipe blocks forever — the
+first probe hung with no output, which is the failure mode this design must
+structurally prevent; that result stands. The `EAGAIN` claim that followed it
+does not, for the path this design ships: it came from a raw `splice(2)`
+syscall probed directly in Python, outside io_uring. With `O_NONBLOCK` on
+that raw path, `file → pipe` returns `EAGAIN` when the pipe is full, and
+`pipe → socket` returns `EAGAIN` when the send buffer is full; after the peer
+read 4096 bytes, `pipe → socket` still returned `EAGAIN` there, so the raw
+syscall's writability genuinely needs to be waited on rather than assumed
+after a partial drain. This is real and true of `splice(2)` itself — it is
+simply the wrong path to have measured, since `send_file` never calls
+`splice(2)` directly.
 
-That last result draws the important distinction: **`file → pipe` `EAGAIN`
-means the pipe is full and is fixed by draining, not by polling.** Regular
-files are always ready; there is nothing to wait for. Only `pipe → socket`
-needs a readiness wait.
+Through this reactor's io_uring, submitted with `SPLICE_F_NONBLOCK` on the
+`pipe → socket` leg, that `EAGAIN` was never observed: the kernel's own
+poll-based retry for pollable descriptors absorbs the wait and posts one
+completion for the full requested length, flag or not. `send_file` still
+carries an `EAGAIN` arm for this leg — `splice(2)` documents `EAGAIN` as a
+permitted return and the io_uring absorption is an implementation detail,
+not a contract — but it is dormant on the kernel and io-uring version this
+was built against (7.2.0, io-uring 0.7.14), confirmed by instrumenting the
+drain loop directly rather than assumed. What *was* verified on the io_uring
+path is the property that actually matters: that a backpressured send
+suspends its own task instead of stalling the executor. That is proven by
+`a_backpressured_send_does_not_stall_the_executor`
+(`glommio/tests/send_file.rs`), which spawns a neighbour task on the same
+executor and shows it keeps making progress throughout a window guaranteed
+to fall inside the send's backpressured stretch, rather than by watching for
+`EAGAIN` on the completion, which does not arrive.
+
+The `file → pipe` distinction from the raw probe still holds structurally
+even though the `EAGAIN` details above changed: **`file → pipe` `EAGAIN`
+would mean the pipe is full and is fixed by draining, not by polling.**
+Regular files are always ready; there is nothing to wait for. Only
+`pipe → socket` needs a readiness wait — provisioned for even though it was
+not observed to be exercised on this configuration.
 
 ## Public API
 

@@ -820,16 +820,12 @@ const PIPE_CAPACITY: usize = 65536;
 /// written to (it is fully drained before each refill), so there is nothing
 /// to wait on.
 ///
-/// Caveat, measured rather than assumed: on this repo's development kernel
-/// (io_uring via a normal, non-`SQPOLL` ring), submitting `IORING_OP_SPLICE`
-/// with this flag set still does not make a full send buffer surface as
-/// `EAGAIN` through the completion -- the kernel's own poll-based retry for
-/// pollable descriptors resolves it before the completion is posted, the
-/// same way it does without the flag. `send_file`'s `EAGAIN` arm below is
-/// therefore correct and matches `splice(2)`'s documented contract, but is
-/// not known to be exercised in this configuration; it is left in as the
-/// documented, portable way to ask for this behavior; see the code review
-/// history for the instrumented investigation.
+/// Paired with the `EAGAIN` arm in the pipe -> socket loop in `send_file`,
+/// below -- do not remove one without the other. This flag is what makes
+/// that arm's error possible in principle; the arm is what the flag exists
+/// to be used by. Measured dormant together on this repo's development
+/// setup (see the arm's own comment for the detail), which is a property of
+/// this kernel and io_uring version, not a reason to drop either half.
 const SPLICE_F_NONBLOCK: u32 = libc::SPLICE_F_NONBLOCK;
 
 /// A pipe owned for the duration of one `send_file`.
@@ -979,6 +975,25 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
                         // writable again rather than spinning: after a
                         // partial drain by the peer, an immediate retry
                         // still returns EAGAIN.
+                        //
+                        // Dormant on this repo's development setup (kernel
+                        // 7.2.0, io-uring crate 0.7.14): this arm was never
+                        // observed to fire in testing, because io_uring's
+                        // own poll-based retry absorbs the wait and posts
+                        // one completion for the full requested length --
+                        // SPLICE_F_NONBLOCK (see its definition above) does
+                        // not change that. It stays because splice(2)
+                        // documents EAGAIN as a permitted return and that
+                        // absorption is an implementation detail, not a
+                        // contract; a future kernel or ring configuration
+                        // could surface it, and without this arm that would
+                        // become a hard mid-transfer error instead of a
+                        // wait. Separately, `a_backpressured_send_does_not_
+                        // stall_the_executor` (glommio/tests/send_file.rs)
+                        // proves the property this arm exists to protect --
+                        // a neighbour task keeps running while send_file is
+                        // backpressured -- so its dormancy costs nothing
+                        // observable today either way.
                         reactor.poll_write_ready(fd_out).collect_rw().await?;
                         continue;
                     }
@@ -990,6 +1005,9 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
                     // no byte moved and nothing was learned that would make
                     // the next attempt different, so looping again would
                     // spin forever instead of making progress.
+                    //
+                    // Defensive, same as the EAGAIN arm above: not observed
+                    // to trigger in testing.
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,
                         "splice(pipe -> socket) made no progress",
