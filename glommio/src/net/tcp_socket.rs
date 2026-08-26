@@ -802,30 +802,35 @@ pub mod tls_record {
 /// A pipe's capacity, and so the most one splice can move.
 const PIPE_CAPACITY: usize = 65536;
 
-/// Requests that the underlying `splice(2)` fail with `EAGAIN` instead of
-/// blocking when the pipe end of the call cannot move data immediately,
-/// rather than blocking for I/O.
+/// Requests that `splice(2)` fail with `EAGAIN` instead of blocking when
+/// the *pipe* end of the call cannot move data immediately.
 ///
 /// Named here, rather than reaching for `libc::SPLICE_F_NONBLOCK` inline at
 /// the call site, purely for documentation: what follows is the reasoning
 /// for setting it on exactly one of the two splices in `send_file` and not
-/// the other, plus a caveat.
+/// the other, plus a note on what it actually did.
 ///
-/// Set only on the pipe -> socket splice, never the file -> pipe one: the
-/// socket is already `O_NONBLOCK` (`TcpStream::connect`/`bind` call
-/// `set_nonblocking(true)`), so this flag is the documented way to make a
-/// full send buffer observable rather than something to block a worker on.
-/// The file -> pipe splice has no such use for it: a regular file has no
-/// meaningful non-blocking semantics, and that pipe is always empty when
-/// written to (it is fully drained before each refill), so there is nothing
-/// to wait on.
+/// Per `splice(2)`, this flag governs the *pipe* side of the call; the
+/// other descriptor still blocks unless it independently carries
+/// `O_NONBLOCK`. Set only on the pipe -> socket splice, never the
+/// file -> pipe one -- not because of the socket (which is `O_NONBLOCK`
+/// regardless via `set_nonblocking(true)`, and which this flag does not
+/// govern), but because a regular file has no meaningful non-blocking
+/// semantics to request, and the file -> pipe pipe is always empty when
+/// written to (fully drained before each refill), so there is nothing to
+/// wait on there either way.
 ///
-/// Paired with the `EAGAIN` arm in the pipe -> socket loop in `send_file`,
-/// below -- do not remove one without the other. This flag is what makes
-/// that arm's error possible in principle; the arm is what the flag exists
-/// to be used by. Measured dormant together on this repo's development
-/// setup (see the arm's own comment for the detail), which is a property of
-/// this kernel and io_uring version, not a reason to drop either half.
+/// The pipe here (`Pipe::new`, below) is already opened `O_NONBLOCK` via
+/// `pipe2`, so setting this flag is largely redundant with a property the
+/// pipe fd already carries -- it is the explicit, in-SQE request for
+/// something the fd flag already implies. That redundancy is the simplest
+/// available explanation for why setting it was measured to change nothing
+/// observable (see the `EAGAIN` arm's comment, below, for what was
+/// measured). It is kept because it is the semantically correct request per
+/// `splice(2)`, not because the `EAGAIN` arm depends on it: a kernel that
+/// surfaces `EAGAIN` on this call does so whether or not this flag is set,
+/// since `O_NONBLOCK` on the pipe already asks for exactly that on the side
+/// the flag actually controls.
 const SPLICE_F_NONBLOCK: u32 = libc::SPLICE_F_NONBLOCK;
 
 /// A pipe owned for the duration of one `send_file`.
@@ -978,22 +983,35 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
                         //
                         // Dormant on this repo's development setup (kernel
                         // 7.2.0, io-uring crate 0.7.14): this arm was never
-                        // observed to fire in testing, because io_uring's
-                        // own poll-based retry absorbs the wait and posts
-                        // one completion for the full requested length --
-                        // SPLICE_F_NONBLOCK (see its definition above) does
-                        // not change that. It stays because splice(2)
-                        // documents EAGAIN as a permitted return and that
-                        // absorption is an implementation detail, not a
-                        // contract; a future kernel or ring configuration
-                        // could surface it, and without this arm that would
-                        // become a hard mid-transfer error instead of a
-                        // wait. Separately, `a_backpressured_send_does_not_
-                        // stall_the_executor` (glommio/tests/send_file.rs)
-                        // proves the property this arm exists to protect --
-                        // a neighbour task keeps running while send_file is
-                        // backpressured -- so its dormancy costs nothing
-                        // observable today either way.
+                        // observed to fire in testing, with SPLICE_F_NONBLOCK
+                        // set (see its definition above) or without it --
+                        // every splice completed with the full requested
+                        // length in one shot, never a short count or an
+                        // EAGAIN error, even against a genuinely stalled
+                        // peer that measurably backpressured the transfer.
+                        // Measured, not verified against kernel source: why
+                        // is a hypothesis, and there are two candidates.
+                        // Either io_uring's poll-based retry for pollable
+                        // descriptors resolves the wait before posting a
+                        // completion, in which case this arm could still
+                        // fire under a different kernel or ring mode; or
+                        // IORING_OP_SPLICE punts to an io-wq worker where
+                        // -EAGAIN is purely an internal retry signal that
+                        // never becomes a CQE, in which case this arm is
+                        // unreachable by construction for this op rather
+                        // than incidentally dormant. This arm stays either
+                        // way because splice(2) documents EAGAIN as a
+                        // permitted return and both candidate mechanisms are
+                        // implementation details, not a contract; without
+                        // this arm a future kernel's EAGAIN would become a
+                        // hard mid-transfer error instead of a wait.
+                        // Separately, and regardless of which of the above
+                        // is true, `a_backpressured_send_does_not_stall_the_
+                        // executor` (glommio/tests/send_file.rs) proves the
+                        // property this arm exists to protect -- a
+                        // neighbour task keeps running while send_file is
+                        // backpressured -- so this arm's dormancy costs
+                        // nothing observable today either way.
                         reactor.poll_write_ready(fd_out).collect_rw().await?;
                         continue;
                     }

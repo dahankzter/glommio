@@ -62,14 +62,22 @@ simply the wrong path to have measured, since `send_file` never calls
 `splice(2)` directly.
 
 Through this reactor's io_uring, submitted with `SPLICE_F_NONBLOCK` on the
-`pipe → socket` leg, that `EAGAIN` was never observed: the kernel's own
-poll-based retry for pollable descriptors absorbs the wait and posts one
-completion for the full requested length, flag or not. `send_file` still
-carries an `EAGAIN` arm for this leg — `splice(2)` documents `EAGAIN` as a
-permitted return and the io_uring absorption is an implementation detail,
-not a contract — but it is dormant on the kernel and io-uring version this
-was built against (7.2.0, io-uring 0.7.14), confirmed by instrumenting the
-drain loop directly rather than assumed. What *was* verified on the io_uring
+`pipe → socket` leg, that `EAGAIN` was never observed: every splice
+completed with the full requested length in one shot, flag or not, never a
+short count or an `EAGAIN` error, even against a genuinely stalled peer that
+measurably backpressured the transfer. That much is measured directly, by
+instrumenting the drain loop. *Why* is not verified against kernel source
+and is stated here as a hypothesis, with two candidates: either io_uring's
+poll-based retry for pollable descriptors resolves the wait before posting a
+completion, in which case a different kernel or ring mode could still
+surface `EAGAIN`; or `IORING_OP_SPLICE` punts to an io-wq worker where
+`-EAGAIN` is purely an internal retry signal that never becomes a CQE, in
+which case this path is unreachable by construction for this op rather than
+incidentally dormant. `send_file` still carries an `EAGAIN` arm for this leg
+regardless of which candidate is true — `splice(2)` documents `EAGAIN` as a
+permitted return and both candidates are implementation details, not a
+contract — but it is dormant on the kernel and io-uring version this was
+built against (7.2.0, io-uring 0.7.14). What *was* verified on the io_uring
 path is the property that actually matters: that a backpressured send
 suspends its own task instead of stalling the executor. That is proven by
 `a_backpressured_send_does_not_stall_the_executor`

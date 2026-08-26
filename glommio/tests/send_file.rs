@@ -272,8 +272,15 @@ fn a_misaligned_offset_on_a_dma_file_is_an_error_not_an_einval() {
 #[test]
 fn a_slow_reader_does_not_stall_send_file() {
     // A small send buffer plus a reader that only drains after the send has
-    // begun forces splice(pipe -> socket) to return EAGAIN repeatedly. An
-    // implementation that does not wait for writability hangs here.
+    // begun genuinely backpressures the transfer (see
+    // `a_backpressured_send_does_not_stall_the_executor` below for proof the
+    // executor itself stays responsive during that stretch). This test
+    // covers a different property: that the backpressured transfer still
+    // arrives complete and byte-for-byte correct, with neither truncation
+    // nor corruption. It does not exercise, and makes no claim about,
+    // splice(pipe -> socket) returning EAGAIN or any writability wait --
+    // see the EAGAIN arm's own comment in tcp_socket.rs for what is and is
+    // not known about that path.
     LocalExecutor::default().run(async {
         let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 251) as u8).collect();
         let path = seed("backpressure", &payload);
@@ -412,7 +419,10 @@ fn a_backpressured_send_does_not_stall_the_executor() {
             .detach()
         };
 
-        // Sample a 400ms window fully before the reader's stall elapses.
+        // Sample a window fully before the reader's stall elapses: the
+        // first checkpoint is at t=50ms, the second at t=50+450=500ms, so the
+        // measured window between them is 450ms, not the 400ms the two
+        // Timer durations might suggest at a glance.
         Timer::new(Duration::from_millis(50)).await;
         assert!(
             !sender_done.get(),
@@ -437,15 +447,16 @@ fn a_backpressured_send_does_not_stall_the_executor() {
         neighbour.await;
 
         let progressed = after - before;
-        // Ticks are spaced 5ms apart over a 400ms window entirely inside
-        // the stall, so an unstarved neighbour should log roughly 80. The
-        // threshold is well below that: it only needs to rule out "the
-        // executor was stalled and the neighbour barely ran at all".
+        // Ticks are spaced 5ms apart over the 450ms window between the two
+        // checkpoints (t=50ms to t=500ms), entirely inside the stall, so an
+        // unstarved neighbour should log roughly 90. The threshold is well
+        // below that: it only needs to rule out "the executor was stalled
+        // and the neighbour barely ran at all".
         assert!(
             progressed >= 40,
             "neighbour should have made substantial progress while \
-             send_file was backpressured (expected roughly 80 ticks over \
-             this 400ms window, got {progressed}) -- a low count here would \
+             send_file was backpressured (expected roughly 90 ticks over \
+             this 450ms window, got {progressed}) -- a low count here would \
              mean the executor stalls while send_file waits on a full send \
              buffer, not merely that send_file itself is slow"
         );
