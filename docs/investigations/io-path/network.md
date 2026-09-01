@@ -391,6 +391,39 @@ pipe-load or less.
 the only one left, and the chunking overhead swamps it. This is the worst
 group for splicing and the one where a caller is likeliest to reach for it.
 
+### This does not contradict nginx
+
+The received wisdom is that `sendfile` is a large win, and the tables above
+look like a refutation. They are not, because the wisdom is about
+`sendfile(2)` and what is measured here is not `sendfile(2)`.
+
+**io_uring has no sendfile opcode.** Checked against io-uring 0.7.14's
+`opcode.rs`: there is `Send`, `SendMsg`, `SendZc`, `SendBundle`,
+`MsgRingSendFd` and `Splice` -- and no `SendFile`. `sendfile(2)` is a single
+syscall that moves file to socket directly, looping inside the kernel with no
+intermediate and no fixed chunk. `send_file` here is `splice` file -> pipe ->
+socket, two ring operations per 64 KiB, through a pipe that exists only
+because splice refuses that pairing directly. The mechanism the wisdom
+describes is not available on the ring; this is the nearest thing that is.
+
+**The baseline also moved.** The classic comparison is against blocking
+`read()` plus `write()`: a syscall and a pair of context switches per chunk on
+each side, plus the copies. `sendfile` deletes nearly all of it. The baseline
+here is io_uring `read_at` plus `write_all` -- already one SQE each, already
+asynchronous, no syscall per operation. io_uring had already deleted the part
+`sendfile` deletes, so the only prize left for splicing is the copies
+themselves.
+
+**And copies got cheap while per-operation overhead did not.** The marginal
+cost of copying 64 KiB through userspace twice measures at ~3.2 us here. A
+punt to an `iou-wrk` worker plus the park and wake around it costs more than
+that. On the hardware the wisdom was formed on, the copy dominated everything;
+that ratio has inverted.
+
+Finally, this is loopback and the meter is CPU. On a real 40 or 100 GbE NIC
+at line rate, copy bandwidth competes for the memory bus and the calculus
+moves back toward zero-copy. Nothing here measures that case.
+
 ### What this means for the feature
 
 `send_file` stays. It is correct, it is tested, and it is the only way to
@@ -405,11 +438,44 @@ The honest recommendation, now in the doc comment: reach for `send_file` when
 the file is not in page cache and the payload is at most one pipe-load; prefer
 `read_at` plus `write_all` otherwise.
 
-**The one lever worth pulling before revisiting this** is `F_SETPIPE_SZ`. At
-1 MiB of pipe the chunk count for an 8 MiB payload drops from 128 to 8, and
-per-chunk cost is where the whole deficit lives. That is a measurement, not a
-prediction -- nothing here shows a bigger pipe stays as cheap per chunk. It is
-the first thing to try, not a promised fix.
+### What to try next, in order
+
+The measured number is a floor for the technique, not its ceiling: two of the
+levers that would move it most were deferred out of the design before any of
+this was measured. Nothing below is a promised fix -- each is a hypothesis
+with a cheap test.
+
+1. **`F_SETPIPE_SZ`.** The whole deficit lives in per-chunk cost, and the
+   chunk is the pipe. At 1 MiB of pipe an 8 MiB payload is 8 chunks instead of
+   128. Nothing here shows a bigger pipe stays as cheap *per chunk*, which is
+   exactly what the test would establish. Cheapest lever, largest expected
+   move, do it first.
+
+2. **`IOSQE_IO_LINK` across the two splices.** Today the file -> pipe splice
+   completes, comes back to the executor, and only then is pipe -> socket
+   submitted: two round trips per chunk. Linking them submits both at once.
+   Halves the round trips without touching the chunk size, and composes with
+   (1) rather than competing.
+
+3. **A reactor pipe pool.** Removes a `pipe2` and two reactor-routed closes
+   per call, and removes the descriptor budget documented on `send_file`. The
+   per-call pipe is currently load-bearing for correctness -- a reused pipe
+   could carry one transfer's leftovers into the next -- so a pool has to
+   prove it drains, which is the real cost of this one.
+
+4. **A direct `sendfile(2)` probe.** Blocking `sendfile(2)` against blocking
+   `read` + `write` against this ring path, same file, same socket. Settles
+   whether the pipe is the entire gap or whether the premise does not survive
+   an io_uring baseline at all. This is the measurement that tells you whether
+   1 through 3 are worth doing.
+
+5. **`UnixStream::send_file`** and **`SpliceSource for ImmutableFile`.** Reach,
+   not speed; both are recorded in [FEATURE_GAP.md](../../FEATURE_GAP.md).
+   `UnixStream` is wiring. `ImmutableFile` needs the type to hold a `DmaFile`
+   rather than a reader builder, so it is a change to what the type is.
+
+Do 4 before 1 through 3 if the question is "should this exist"; do 1 first if
+the question is "make it faster".
 
 ## What this does not cover
 

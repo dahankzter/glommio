@@ -952,6 +952,16 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
     /// `write_all` otherwise. The numbers and the mechanism are in
     /// `docs/investigations/io-path/network.md`.
     ///
+    /// # Descriptors
+    ///
+    /// Each call opens its own pipe -- two file descriptors -- and closes it
+    /// through the reactor rather than synchronously, so a descriptor is
+    /// released a little after the call that owned it returns. There is no
+    /// pipe pool. Serving many files concurrently therefore reaches
+    /// `RLIMIT_NOFILE` sooner than the number of concurrent sends alone
+    /// would suggest: budget two descriptors per in-flight `send_file`, plus
+    /// slack for closes still in flight.
+    ///
     /// # Alignment
     ///
     /// A [`DmaFile`](crate::io::DmaFile) is opened `O_DIRECT`, which requires
