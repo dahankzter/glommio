@@ -302,6 +302,115 @@ with a probe and fallback. The extra 152 ns has to pay for all of that.
 Stage A is the better first move and Stage B should be judged on its own
 numbers afterwards, not on the 42% headline that includes Stage A's share.
 
+## send_file: zero copies cost more CPU than the copies (2026-09-01)
+
+`TcpStream::send_file` splices file -> pipe -> socket on the ring, so the
+payload never enters the process. The feature was built without claiming a
+speedup, and `glommio/examples/send_file_ladder.rs` was written to find the
+size at which it overtakes a plain `read_at` followed by `write_all`.
+
+**There is no such size on the warm path.** Splicing loses at every payload
+from 1 KiB to 8 MiB, and by the widest margin at the sizes it was expected to
+win.
+
+Measured on a Ryzen Threadripper PRO 9975WX, kernel 7.2.2, file on XFS over
+NVMe, server and client pinned to separate cores, three passes, medians below
+(run-to-run spread was under 5% on every row except `read + write_all` at
+8 MiB, which spanned 380-433 us). `cpu` is `CLOCK_THREAD_CPUTIME_ID` on the
+executor thread; `off` is CPU spent for the same rung on any other thread of
+the process -- `iou-wrk` kernel workers -- which the executor's own clock
+cannot see. `total` is the sum, which is what a machine pays.
+
+### Warm page cache, `BufferedFile`
+
+| payload | read+write cpu | send_file cpu | send_file off | total ratio |
+|--------:|---------------:|--------------:|--------------:|------------:|
+| 1 KiB   |  3,027 ns |   6,210 ns |   2,041 ns | 2.73x |
+| 4 KiB   |  3,275 ns |   6,191 ns |   2,071 ns | 2.52x |
+| 16 KiB  |  3,712 ns |   6,203 ns |   2,266 ns | 2.28x |
+| 32 KiB  |  4,194 ns |   6,253 ns |   2,542 ns | 2.10x |
+| 64 KiB  |  5,569 ns |   6,458 ns |   3,607 ns | 1.81x |
+| 128 KiB |  8,240 ns |  11,960 ns |   7,204 ns | 2.33x |
+| 256 KiB | 13,762 ns |  23,340 ns |  13,394 ns | 2.67x |
+| 512 KiB | 25,595 ns |  46,162 ns |  25,445 ns | 2.80x |
+| 1 MiB   | 51,068 ns |  91,167 ns |  50,644 ns | 2.78x |
+| 8 MiB   | 418,179 ns | 710,654 ns | 401,672 ns | 2.66x |
+
+`read + write_all` recorded 0-61 ns of off-thread CPU at every size, so its
+`cpu` column is its whole cost. `send_file`'s is roughly half of its.
+
+Two shapes in that table say what is going on:
+
+**`send_file` is flat from 1 KiB to 64 KiB** -- 6,210 ns to 6,458 ns while the
+payload grows 64-fold. It is paying per operation, not per byte. Above 64 KiB
+it becomes linear at about 5,550 ns of executor CPU and 3,140 ns of worker CPU
+per chunk (8 MiB is 128 chunks: 710,654/128 and 401,672/128).
+
+**The chunk is 64 KiB because that is the pipe**, and `PIPE_CAPACITY` is the
+unmodified default. So 8 MiB is 256 ring operations against the two that
+`read_at` plus `write_all` submit for the same bytes. `F_SETPIPE_SZ` was
+deferred out of the design; this table is what deferring it costs.
+
+**Every chunk reaches a kernel worker.** The off-thread column is never zero
+for `send_file`, not even at 1 KiB, and thread names during a run confirm the
+workers: five `iou-wrk-<tid>` threads, all parented to the executor thread. A
+warm `read_at` completes inline on the submitting thread and spawns nothing.
+Marginal cost per 64 KiB works out at ~3.2 us for copying the bytes through
+userspace twice, against ~8.7 us for splicing them zero times.
+
+### Page cache dropped before every response, `BufferedFile`
+
+| payload | read+write cpu | send_file cpu | send_file off | total ratio |
+|--------:|---------------:|--------------:|--------------:|------------:|
+| 4 KiB   |   9,280 ns |   6,945 ns |   1,993 ns | 0.96x |
+| 16 KiB  |  11,031 ns |   7,431 ns |   2,153 ns | 0.87x |
+| 64 KiB  |  21,730 ns |   7,974 ns |   3,649 ns | 0.53x |
+| 256 KiB |  53,369 ns |  39,065 ns |  38,680 ns | 1.46x |
+| 1 MiB   | 130,529 ns | 108,737 ns |  75,286 ns | 1.41x |
+| 8 MiB   | 848,396 ns | 825,013 ns | 585,124 ns | 1.66x |
+
+This is the one group `send_file` wins, and only up to 64 KiB. What changes is
+not `send_file` -- its numbers barely move from the warm table -- but its
+opponent: a cold `read_at` cannot complete inline, so it too pays a park and a
+wake, which is most of what `send_file` was paying all along. Read the
+executor-CPU column alone and `send_file` wins the whole range down to 0.37x;
+add the workers it wakes and the win survives only where the payload is one
+pipe-load or less.
+
+### `O_DIRECT`, `DmaFile`
+
+| payload | read+write cpu | send_file cpu | send_file off | total ratio |
+|--------:|---------------:|--------------:|--------------:|------------:|
+| 16 KiB  |   7,895 ns |    8,714 ns |   4,121 ns | 1.63x |
+| 64 KiB  |  10,930 ns |    9,012 ns |   5,823 ns | 1.36x |
+| 256 KiB |  27,500 ns |   34,904 ns |  23,235 ns | 2.11x |
+| 1 MiB   |  83,549 ns |  137,984 ns |  93,370 ns | 2.77x |
+| 8 MiB   | 520,947 ns | 1,091,129 ns | 744,826 ns | 3.52x |
+
+`O_DIRECT` already avoids the page cache, so the copy `send_file` removes is
+the only one left, and the chunking overhead swamps it. This is the worst
+group for splicing and the one where a caller is likeliest to reach for it.
+
+### What this means for the feature
+
+`send_file` stays. It is correct, it is tested, and it is the only way to
+serve a file without the bytes entering the process -- which matters for
+address-space pressure and for kTLS offload independently of CPU. But the
+rustdoc's original claim, that its cost "does not scale with the size of the
+payload the way a read-then-write does", is false as measured and has been
+corrected: it scales at 64 KiB granularity, which is worse than a single large
+`read_at` scales.
+
+The honest recommendation, now in the doc comment: reach for `send_file` when
+the file is not in page cache and the payload is at most one pipe-load; prefer
+`read_at` plus `write_all` otherwise.
+
+**The one lever worth pulling before revisiting this** is `F_SETPIPE_SZ`. At
+1 MiB of pipe the chunk count for an 8 MiB payload drops from 128 to 8, and
+per-chunk cost is where the whole deficit lives. That is a measurement, not a
+prediction -- nothing here shows a bigger pipe stays as cheap per chunk. It is
+the first thing to try, not a promised fix.
+
 ## What this does not cover
 
 Loopback only, one connection, 64-byte messages, TCP only. Not covered: real

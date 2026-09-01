@@ -903,8 +903,9 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
     /// entering this process.
     ///
     /// The kernel moves page references through a pipe rather than copying
-    /// through a user buffer, so the cost does not scale with the size of the
-    /// payload the way a read-then-write does.
+    /// through a user buffer, so the payload never occupies this process's
+    /// address space. That is what this method is for; it is not a way to
+    /// spend less CPU. See `# Cost` below before reaching for it.
     ///
     /// Returns the number of bytes actually sent, which is short if the file
     /// ends before `len` bytes are available.
@@ -926,6 +927,30 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
     /// assert_eq!(sent, size);
     /// # });
     /// ```
+    ///
+    /// # Cost
+    ///
+    /// Measured against `read_at` plus `write_all` in
+    /// `examples/send_file_ladder.rs` (Threadripper PRO 9975WX, kernel 7.2.2,
+    /// XFS on NVMe), splicing costs *more* total CPU than copying at every
+    /// payload from 1 KiB to 8 MiB, except one case:
+    ///
+    /// | file state | payload | vs. read + write_all |
+    /// |------------|--------:|---------------------:|
+    /// | in page cache | any size measured | 1.8x - 2.8x more CPU |
+    /// | not in page cache | up to 64 KiB | 0.53x - 0.96x, a win |
+    /// | not in page cache | above 64 KiB | 1.4x - 1.7x more CPU |
+    /// | `O_DIRECT` ([`DmaFile`](crate::io::DmaFile)) | any size measured | 1.4x - 3.5x more CPU |
+    ///
+    /// The reason is the pipe: it holds 64 KiB, so a payload is spliced in
+    /// 64 KiB chunks, two ring operations each, and the file-to-pipe leg
+    /// reaches an `iou-wrk` kernel worker every time. A single `read_at`
+    /// submits one operation for the whole payload however large it is.
+    ///
+    /// So: prefer this when the bytes must not enter the process, or when the
+    /// file is cold and the payload fits one pipe-load. Prefer `read_at` plus
+    /// `write_all` otherwise. The numbers and the mechanism are in
+    /// `docs/investigations/io-path/network.md`.
     ///
     /// # Alignment
     ///
