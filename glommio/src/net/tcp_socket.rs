@@ -969,7 +969,7 @@ impl<B: RxBuf + Unpin> TcpStream<B> {
         len: usize,
     ) -> Result<usize> {
         let alignment = file.splice_offset_alignment();
-        if alignment > 1 && offset % alignment != 0 {
+        if alignment > 1 && !offset.is_multiple_of(alignment) {
             return Err(crate::GlommioError::IoError(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
