@@ -296,24 +296,26 @@ the *executor* thread at `blocking.rs:255` with `failed to enqueue blocking
 operation: "SendError(..)"`. Not a degraded pool: a dead one, and it takes the
 caller with it.
 
-### Stage 1 — two small bug fixes
+### Stage 1 — one small bug fix, and it is not open yet
 
 | PR | Size | Notes |
 |---|---|---|
-| `spawn_blocking` panic fix (`dcab422`) | ~40 lines | Deletes an `unsafe` block, an `assume_init` and an `Arc::try_unwrap(..).expect("leak")`. Best review-to-value ratio we have. **Code applies cleanly to their `main`**; only its tests need re-homing, since ours live in a module a later commit introduced |
-| Kernel probe returns an error instead of calling `exit(1)` (`cd7c9d3`) | ~150 lines, **needs a rewrite** | See below — it does not apply to their tree |
+| `spawn_blocking` panic fix (`dcab422`) | +52/−12, 1 file | Deletes an `unsafe` block, an `assume_init` and an `Arc::try_unwrap(..).expect("leak")`. Best review-to-value ratio we have. **Code applies cleanly to their `main`**; only its tests need re-homing, since upstream has no `glommio/tests` directory at all — everything there is an inline `#[cfg(test)]` module |
+| ~~Kernel probe returns an error instead of calling `exit(1)`~~ | — | **Already in #35** as `d873c54`, and by patch-id identical to `cd7c9d3` |
 
-**The kernel probe fix is not independent of #35, contrary to what an earlier
-draft of this plan said.** Their `main` still contains `glommio/src/iou` and
-`glommio/src/uring_sys`; ours is written against the `io-uring` crate's
-`Probe`, which only exists after that PR. Two ways forward, and the second is
-better: gate it behind #35, or **rewrite it against their liburing-based
-probe**. The valuable half — a library not calling `exit(1)` on its caller's
-process — is independent of which probe API reports the opcodes. Do not let
-the best bug fix we have wait behind a stalled PR for an incidental reason.
+**The kernel probe fix resolved itself.** An earlier draft said it had to be
+rewritten against their `iou` probe, or gated behind #35. Neither happened: it
+rode along inside #35 when that branch was reworked on 2026-09-02, written
+against the `io-uring` `Probe` the same PR introduces. One less thing to carry.
 
-**Gate to Stage 2: one of these merged.** A merge proves the pipeline works
-end to end. Anything larger before that is speculative.
+**And the remaining fix has not been offered.** Its rationale is filed as
+[#37](https://github.com/glommio/glommio/issues/37), which is the cheap half;
+the patch waits on the gate below rather than adding a seventh open PR to a
+queue of six.
+
+**Gate to Stage 2: something merged.** A merge proves the pipeline works end to
+end. A review does not — #35 has had a good one and is still open. Anything
+larger before a merge is speculative.
 
 ### Stage 2 — API additions, smallest commitment first
 
@@ -346,13 +348,16 @@ much we want it.
 **Never more than two of these open at once.** The failure mode to avoid is
 recreating today's queue of six.
 
-### Stage 3 — the structural ones, each behind a hard dependency
+### Stage 3 — the structural ones
 
-- **Deleting the vendored `liburing` and the five C files.** Strictly
-  downstream of #35: their `main` still has `iou`/`uring_sys` calling into that
-  C. Cannot be offered before #35 lands, and is trivial afterwards — the
-  finding that made it possible is that *nothing references the C symbols* once
-  the `io-uring` migration is complete.
+- ~~**Deleting the vendored `liburing` and the five C files.**~~ **Done, and
+  not as a separate stage.** It went into #35 itself on 2026-09-02, because a
+  reviewer pointed out that a PR titled "retire the vendored iou" which leaves
+  `build.rs` compiling liburing has not done what it says. The finding that
+  made it safe held up: no `extern "C"` block and no reference to a C symbol
+  survives in `glommio/src` after the migration, checked before deleting
+  anything. `cargo package -p glommio` verifies as a result, which it could not
+  before — see [#36](https://github.com/glommio/glommio/issues/36).
 - **`#[glommio::main]` / `#[glommio::test]`.** Raise as an **issue**, never as
   an unsolicited PR. Merging it obliges them to publish and maintain a second
   crate on crates.io under their name, permanently. That is a policy decision,
@@ -365,32 +370,37 @@ They are older, they are already queued, and asking for attention on new work
 while six sit unreviewed is how a contributor becomes noise. They are also
 load-bearing for what follows:
 
-| Open PR | Touches | Consequence for the new series |
+| Open PR | Touches | Consequence for the queued series |
 |---|---|---|
-| [#35](https://github.com/glommio/glommio/pull/35) retire vendored `iou` | `sys/uring.rs`, **+474/−258** | **Decides the shape of new #2** and hard-gates new #14 |
-| [#33](https://github.com/glommio/glommio/pull/33) timing wheel | `timer/mod.rs`, **+8** | Barely interacts with new #9 and #10 |
-| [#29](https://github.com/glommio/glommio/pull/29), [#30](https://github.com/glommio/glommio/pull/30), [#32](https://github.com/glommio/glommio/pull/32) | `executor/mod.rs` | Same file as new #1 and #3, different regions |
+| [#35](https://github.com/glommio/glommio/pull/35) retire vendored `iou` | `sys/uring.rs`, **+474/−258** | Now *carries* the kernel-probe fix and the C deletion outright, so it gates neither |
+| [#33](https://github.com/glommio/glommio/pull/33) timing wheel | `timer/mod.rs`, **+8** | Barely interacts with queued #8 and #9 |
+| [#29](https://github.com/glommio/glommio/pull/29), [#30](https://github.com/glommio/glommio/pull/30), [#32](https://github.com/glommio/glommio/pull/32) | `executor/mod.rs` | Same file as queued #1 and #2, different regions |
 | [#31](https://github.com/glommio/glommio/pull/31) cache-domain placement | `executor/placement/` | No overlap |
 
-**The exception: new #1 and #2 need not wait.** Strict seniority would put a
-two-thousand-line performance PR ahead of a forty-line bug fix that deletes
-`unsafe` and stops a hang. Both are bugs rather than features, both are small,
-and one of them stops a library calling `exit(1)` on its caller's process.
-Offer them alongside the existing six, not behind them — and say in the PR
-body that they are deliberately jumping a queue of our own making, so it reads
-as triage rather than impatience.
+**The exception used to be that the two bug fixes need not wait.** One of them
+— the kernel probe — is in #35 already, and it was rewritten against the
+`io-uring` probe rather than their `iou` one, so the fork in the road that this
+section used to describe is closed. Queued #1, the `spawn_blocking` panic fix,
+is the only opener left, and its rationale is now filed as
+[#37](https://github.com/glommio/glommio/issues/37) rather than asserted in a
+PR body.
 
-**New #2 exists in two mutually exclusive forms**, and #35 decides which:
-
-- **If #35 has not landed:** write it against their `iou` probe. It lands now,
-  and *we* own porting it forward when #35 later merges. That obligation is
-  ours to carry, not theirs to discover.
-- **If #35 has landed:** `cd7c9d3` applies as it stands.
+**Whether even that should be offered before something merges is a real
+question, and as of 2026-09-02 the answer is no.** The gate below is *one
+merged*, not one reviewed. Six PRs are open, one of them has just been reworked
+in response to a review, and the reviewer received a force-push, two comments
+and three issues inside half an hour on 2026-09-02. Adding a seventh PR on top
+of that is the failure mode this document was written to avoid, whatever the
+merits of the patch.
 
 Everything else in the series waits for the existing six to move. If they never
 do, the queue was never the problem.
 
 ### The series
+
+**Re-verified 2026-09-02 against `master`, commit by commit.** Every commit
+named below still exists there; two that this table used to queue turned out to
+be in flight already, so the series is shorter by two than it was.
 
 Numbered in the order they should be offered. The number is the order, **not
 permission to open them all** — the two-at-a-time rule below still holds.
@@ -399,33 +409,66 @@ Branches are `upstream/NN-name`, cut from `upstream/main`, pushed to the
 `fork` remote (`dahankzter/glommio-community`), PR'd against `glommio/glommio`
 `main`.
 
-| # | Title | Contains | Apply after | Size | What a reviewer must decide |
-|---|---|---|---|---|---|
-| 1 | fix: don't hang the caller when a `spawn_blocking` closure panics | `dcab422`, tests re-homed | — | ~40 | Nothing. It is a bug fix that deletes `unsafe` |
-| 2 | fix: report why a kernel cannot run glommio instead of exiting | rewrite of `cd7c9d3` against their `iou` probe | — | ~150 | Nothing, once rewritten. A library should not `exit(1)` on its caller |
-| 3 | feat: add `spawn_blocking_send` | `61bb142` | 1 (shares a test module) | ~230 | Whether the pool should hand back a `Send` future at all |
-| 4 | feat: add an async `Mutex` | `133a565`, incl. `Semaphore::is_closed` | — | ~260 | Whether `lock()` returns `Result`, as their `RwLock` does |
-| 5 | feat: add `sync::OnceCell` | split from `b67355f` | 4 (`sync/mod.rs`) | ~250 | Nothing beyond wanting it |
-| 6 | feat: add `channels::oneshot` | `c362fb0` | — | ~230 | Nothing beyond wanting it |
-| 7 | feat: add `channels::watch` | split from `b67355f` | 6 (`channels/mod.rs`) | ~350 | Nothing beyond wanting it |
-| 8 | feat: add `channels::broadcast` | `f86bb8a` + its design doc | 7 (`channels/mod.rs`) | ~480 | The semantics. Mirrors tokio deliberately; `recv` returns a bespoke `RecvError` because `Lagged` is neither closed nor would-block |
-| 9 | feat: add `future::timeout` | split from `8a867b9` | — | ~120 | **The naming.** By the `try_` convention the general form should own `timeout` and theirs should become `try_timeout`. We split by module to avoid breaking their callers; the rename is theirs to take at a breaking release |
-| 10 | feat: add `timer::Interval` and `MissedTickBehavior` | split from `8a867b9` | 9 (`timer/mod.rs`) | ~400 | Whether all three missed-tick behaviours are wanted. Rebase risk if #33 lands first |
-| 11 | feat: add a hierarchical `CancellationToken` | `5bf58cd` | 5 (`sync/mod.rs`) | ~350 | **The scope argument.** `!Send` means it cannot carry a cross-shard shutdown; a maintainer may want the `Send` one instead |
-| 12 | feat: send to a shared channel from a thread with no executor | `986213e` | — | ~300 | That the handle is deliberately not `Clone`, because the buffer is strictly single-producer |
-| 13 | test: stop the eventfd leak tests racing each other | idea from `eff2c49`, rewritten | — | ~30 | Nothing. Their tests count process-wide descriptors in parallel |
-| 14 | refactor: delete the vendored `liburing` and the C it fed | `322fb8d` | **#35 merged** | −3.2 MB | Nothing, once #35 is in. Nothing references the C symbols after it |
-| 15 | `#[glommio::main]` / `#[glommio::test]` | `upstream/macros-proposal` | **an issue first** | ~900 | Whether to publish and maintain a second crate on crates.io. A policy decision, not a review |
+#### Already with them, and complete
 
-**1, 2, 6, 9, 12 and 13 depend on nothing** and can be offered in any order.
-The "apply after" column is almost entirely about two branches appending to the
+Nothing further to send for any of these. What each carries from `master`:
+
+| PR | from `master` | contains |
+|---|---|---|
+| [#29](https://github.com/glommio/glommio/pull/29) | `3f4d113` | no process abort when a task panics in a custom queue |
+| [#30](https://github.com/glommio/glommio/pull/30) | `fix/issue-695-public-spawn` lineage | non-panicking `LocalExecutor::spawn` |
+| [#31](https://github.com/glommio/glommio/pull/31) | `f15c68c` | cache-domain-aware placement |
+| [#32](https://github.com/glommio/glommio/pull/32) | `f28a619` | `executor_id` in the task header — **and this is the #448 fix** |
+| [#33](https://github.com/glommio/glommio/pull/33) | `81769d6` + follow-ups | timing wheel replacing the timer `BTreeMap` |
+| [#35](https://github.com/glommio/glommio/pull/35) | migration + `cd7c9d3` + `322fb8d` | iou retirement, kernel-probe error, the C deletion, `test_spin` |
+
+**Two former series entries live here now.** Old #2 (kernel probe, `cd7c9d3`)
+and #35's `d873c54` are the *identical patch* — same patch-id, `a92e93a…`. Old
+#14 (delete the vendored C, `322fb8d`) went in as `3db5be3` on 2026-09-02,
+minus the fork-only `scripts/prep-ng-release.sh`. Neither needs a branch of its
+own any more, and #14's "hard-gated on #35" note is obsolete because it is now
+*part of* #35.
+
+#### Queued
+
+| # | PR | from `master` | Size | Apply after | What a reviewer must decide |
+|---|---|---|---|---|---|
+| 1 | fix: don't hang the caller when a `spawn_blocking` closure panics | `dcab422`, tests re-homed | +52/−12, 1 file | — | Nothing. A bug fix that deletes an `unsafe`; rationale filed as [#37](https://github.com/glommio/glommio/issues/37) |
+| 2 | feat: add `spawn_blocking_send` | `61bb142` | +228, 1 file | 1 (shares a test module) | Whether the pool should hand back a `Send` future at all |
+| 3 | feat: add an async `Mutex` | `133a565`, incl. `Semaphore::is_closed` | +257, 3 files | — | Whether `lock()` returns `Result`, as their `RwLock` does |
+| 4 | feat: add `sync::OnceCell` | split of `b67355f` | ~250, estimated | 3 (`sync/mod.rs`) | Nothing beyond wanting it |
+| 5 | feat: add `channels::oneshot` | `c362fb0` | +226, 2 files | — | Nothing beyond wanting it |
+| 6 | feat: add `channels::watch` | split of `b67355f` | ~350, estimated | 5 (`channels/mod.rs`) | Nothing beyond wanting it |
+| 7 | feat: add `channels::broadcast` | `f86bb8a` + its design doc | +482, 2 files | 6 | The semantics. Mirrors tokio deliberately; `recv` returns a bespoke `RecvError` because `Lagged` is neither closed nor would-block |
+| 8 | feat: add `future::timeout` | split of `8a867b9` | ~120, estimated | — | **The naming.** By the `try_` convention the general form should own `timeout` and theirs should become `try_timeout`. The rename is theirs to take at a breaking release |
+| 9 | feat: add `timer::Interval` and `MissedTickBehavior` | split of `8a867b9` | ~400, estimated | 8, and #33 | Whether all three missed-tick behaviours are wanted |
+| 10 | feat: add a hierarchical `CancellationToken` | `5bf58cd` | +293, 2 files | 4 (`sync/mod.rs`) | **The scope argument.** `!Send` means it cannot carry a cross-shard shutdown |
+| 11 | feat: send to a shared channel from a thread with no executor | `986213e` | +302, 1 file | — | That the handle is deliberately not `Clone`, because the buffer is strictly single-producer |
+| 12 | test: stop the eventfd leak tests racing each other | idea from `eff2c49`, rewritten | ~30 | — | Nothing. Their tests count process-wide descriptors in parallel |
+| 13 | `#[glommio::main]` / `#[glommio::test]` | `upstream/macros-proposal` | ~900 | **an issue first** | Whether to publish and maintain a second crate on crates.io. A policy decision, not a review |
+
+`b67355f` and `8a867b9` are each **one commit carrying two unrelated features**,
+so each must be split before it goes. The per-half sizes above are estimates;
+the measured combined figures are +509 (4 files) and +543 (4 files).
+
+**1, 5, 8, 11 and 12 depend on nothing** and can be offered in any order. The
+"apply after" column is almost entirely about two branches appending to the
 same `mod` / `pub use` list; merged out of order, each costs a two-line rebase
 and nothing more.
 
-**Start with 1 and 2.** Both are bug fixes, neither asks for a design decision,
-and 2 is the one that stops a library from calling `exit(1)` on its caller's
-process. If those land, the pipeline works and the rest is worth queueing. If
-they sit, nothing else would have fared better.
+**Start with 1.** It is a bug fix, it asks for no design decision, it deletes an
+`unsafe`, and it now arrives with its own filed issue rather than as an
+assertion. Old #2 was the other opener and is already in #35.
+
+#### Deliberately not going up
+
+| What | Why |
+|---|---|
+| `feat/splice-send-file`, 16 commits | not merged to `master` yet, and its own ladder says it costs more CPU than the read-plus-write it replaces at every size except a cold cache under one pipe-load |
+| Miri task-lifecycle tests (`c96e9a1`) | genuinely blocked on #32 — uses the new `spawn_local` signature |
+| `docs/investigations/` | held; answers DataDog #641 but needs framing as measurement rather than correction |
+| doctest repairs (`32dd7dd`), spawn-API restoration (`c750df0`) | these fix our own breakage and are not upstream value |
+| the rest of the 235 commits | fork infrastructure, benchmarks, release scripts |
 
 ### Verified porting mechanics
 
@@ -443,9 +486,9 @@ Every row below was tested by cherry-picking onto `upstream/main` on
 | `CancellationToken` | `5bf58cd` | `sync/mod.rs` list conflict; clean when stacked | — |
 | `future::timeout` + `Interval` | `8a867b9` | `timer/mod.rs` list conflict, 3 lines | **split into two PRs**; their `timeout` sits at `timer/mod.rs:56`, unchanged |
 | `spawn_blocking` panic fix | `dcab422` | code clean; test module conflicts | re-home the tests |
-| Kernel probe error | `cd7c9d3` | **conflicts on `sys/uring.rs`** | needs rewriting against their `iou` probe — see Stage 1 |
+| Kernel probe error | `cd7c9d3` | ~~conflicts on `sys/uring.rs`~~ | **landed inside #35** as `d873c54`; identical patch to `cd7c9d3` by patch-id, so no rewrite against their `iou` probe was needed after all |
 | eventfd leak test race | `eff2c49` | conflicts | their test file differs; port the mutex idea, not the diff |
-| Delete the vendored C | `322fb8d` | n/a | **hard-gated on #35** — verified: `iou` and `uring_sys` are still in their tree |
+| Delete the vendored C | `322fb8d` | n/a | ~~hard-gated on #35~~ — **landed inside #35** as `3db5be3` on 2026-09-02, once it was verified that no `extern "C"` block or C symbol reference survives in `glommio/src` |
 
 **Applied in order, the seven additive commits stack onto `upstream/main` with
 zero conflicts and the result compiles.** The conflicts in that table are
