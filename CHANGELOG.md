@@ -8,12 +8,91 @@ change upstream.
 Dependency line, unchanged across every version below:
 
 ```toml
-glommio = { package = "glommio-ng", version = "0.10" }
+glommio = { package = "glommio-ng", version = "0.12" }
 ```
+
+**Correct this if you copied it before 2026-09-02.** This line read
+`version = "0.10"` from the first release until now, which was right through
+0.10.15 and wrong from 0.11.0 onward: cargo reads `"0.10"` as
+`>=0.10.0, <0.11.0`, so anyone who pasted it has been pinned below every
+0.11.x release and has none of the fixes in them.
 
 `glommio-ng-macros` is published in lockstep from `0.10.2` onward and is pulled
 in automatically by the default `macros` feature. You do not depend on it
 directly.
+
+## 0.12.0 — 2026-09-02
+
+Two fixes and one new API. Upgrade for the fixes: both are memory-safety
+problems reachable from ordinary use, and both are live in 0.11.5.
+
+The minor bump rather than a patch is for `TcpStream::send_file`, which is new
+public API. Nothing is removed and nothing changes shape, so the upgrade is a
+version-line edit.
+
+### Fixed
+
+- **`MSG_ZEROCOPY` is no longer set on every socket send.** The flag went on
+  every `Send` and `SendMsg` while nothing ever set `SO_ZEROCOPY`, without
+  which the kernel copies and ignores it — so it had been inert since it was
+  written, confirmed with a positive-control probe.
+
+  Inert is not harmless. `AsRawFd` is public on `TcpStream` and `UdpSocket`,
+  and `recv_tls_record`'s own documentation tells callers to reach through it
+  and `setsockopt` to turn on kernel TLS. One `SO_ZEROCOPY` from a user would
+  have armed a send path that frees its buffer at the send CQE while the
+  kernel still holds those pages and reports their release on an error queue
+  nothing in this crate reads: **a use-after-free reachable without touching
+  glommio**, transmitting freed memory. Removing the flag changes no
+  behaviour, since the kernel was already ignoring it.
+
+- **The wake-up eventfd is no longer force-closed when an executor drops.**
+  `Reactor::drop` called `close_eventfd()`, which shut the descriptor even
+  while other threads still held an `Arc<SleepNotifier>` — and a
+  `shared_channel` peer on another executor legitimately does. `notify()` read
+  the descriptor number under a lock, released it, then wrote, so the close
+  could free the number and the kernel hand it to the next `open` before the
+  write landed: eight bytes into an unrelated descriptor, or a panic out of
+  `write_eventfd`'s unwrap.
+
+  The mechanism turned out to be unnecessary as well as unsafe. It existed so
+  that a dropped executor released its eventfd even while tasks held the
+  notifier, and tasks stopped holding it when the task header began carrying
+  an `executor_id` instead. Measured rather than assumed: twenty executor
+  lifecycles grow the process descriptor count by twenty before either change,
+  and by nothing with the header change alone and the close removed. So the
+  close is gone rather than locked, and the race with it.
+
+### Added
+
+- **`TcpStream::send_file`** — sends a file to a socket without the bytes
+  entering the process, built on `IORING_OP_SPLICE` through a per-call pipe.
+  Takes any `SpliceSource`, a sealed trait implemented for `BufferedFile` and
+  `DmaFile`. A `DmaFile`'s `O_DIRECT` alignment requirement on the offset is
+  checked before submission and refused with an error naming the offset and
+  the alignment it needed, rather than returning a bare kernel `EINVAL`.
+
+  **Read the cost table before reaching for it.** Measured against `read_at`
+  plus `write_all` on total process CPU:
+
+  | file state | payload | vs. read + write_all |
+  |---|---|---|
+  | in page cache | any size measured | 1.8x – 2.8x **more** CPU |
+  | not in page cache | up to 64 KiB | 0.53x – 0.96x, a win |
+  | not in page cache | above 64 KiB | 1.4x – 1.7x more CPU |
+  | `O_DIRECT` (`DmaFile`) | any size measured | 1.4x – 3.5x more CPU |
+
+  The pipe holds 64 KiB, so a payload is spliced in 64 KiB chunks of two ring
+  operations each and the file-to-pipe leg reaches an `iou-wrk` worker every
+  time, while a single `read_at` submits one operation whatever the size.
+  Prefer this when the bytes must not enter the process — address-space
+  pressure, not CPU, is what it buys — or when the file is cold and the
+  payload fits one pipe-load. Prefer `read_at` plus `write_all` otherwise.
+
+  Note it opens two descriptors per call and closes them through the reactor,
+  so budget accordingly at high concurrency. Numbers, method and the ordered
+  list of what would make it faster are in
+  `docs/investigations/io-path/network.md`.
 
 ## 0.11.5 — 2026-08-26
 
