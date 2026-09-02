@@ -149,12 +149,11 @@ Verified against `community/main`, not assumed:
 They still vendor `iou` and `uring_sys`, and still have the old `timer_impl`
 without a wheel — so 3 and 10 are not duplicated effort.
 
-**Added since, and not yet on `master`** — both sit on branches, so neither is
-part of "everything on main" until it is merged there:
+**Added since this plan was written:**
 
 | | what | value | where |
 |---|---|---|---|
-| 11 | **`TcpStream::send_file`** — `IORING_OP_SPLICE` through a per-call pipe | the only way to serve a file without the bytes entering the process. **Measured, and the measurement is unflattering:** 1.8x-2.8x more total CPU than `read_at` + `write_all` on a warm cache, 3.5x on `O_DIRECT`; it wins only on a cold cache at one pipe-load or less | `feat/splice-send-file`, 16 commits |
+| 11 | **`TcpStream::send_file`** — `IORING_OP_SPLICE` through a per-call pipe | the only way to serve a file without the bytes entering the process. **Measured, and the measurement is unflattering:** 1.8x-2.8x more total CPU than `read_at` + `write_all` on a warm cache, 3.5x on `O_DIRECT`; it wins only on a cold cache at one pipe-load or less | on `master` since 2026-09-02 |
 | 12 | ~~`fd43b32`~~ — **superseded**; see below | — | deleted |
 
 Item 11 is not upstream material yet, and possibly not at all: a feature whose
@@ -464,7 +463,7 @@ assertion. Old #2 was the other opener and is already in #35.
 
 | What | Why |
 |---|---|
-| `feat/splice-send-file`, 16 commits | not merged to `master` yet, and its own ladder says it costs more CPU than the read-plus-write it replaces at every size except a cold cache under one pipe-load |
+| `TcpStream::send_file` — on `master` since 2026-09-02, 16 commits | its own ladder says it costs more CPU than the read-plus-write it replaces at every size except a cold cache under one pipe-load. Offering a feature upstream whose measurement argues against it needs the `F_SETPIPE_SZ` and `IOSQE_IO_LINK` work first |
 | Miri task-lifecycle tests (`c96e9a1`) | genuinely blocked on #32 — uses the new `spawn_local` signature |
 | `docs/investigations/` | held; answers DataDog #641 but needs framing as measurement rather than correction |
 | doctest repairs (`32dd7dd`), spawn-API restoration (`c750df0`) | these fix our own breakage and are not upstream value |
