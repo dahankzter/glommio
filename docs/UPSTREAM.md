@@ -155,13 +155,28 @@ part of "everything on main" until it is merged there:
 | | what | value | where |
 |---|---|---|---|
 | 11 | **`TcpStream::send_file`** — `IORING_OP_SPLICE` through a per-call pipe | the only way to serve a file without the bytes entering the process. **Measured, and the measurement is unflattering:** 1.8x-2.8x more total CPU than `read_at` + `write_all` on a warm cache, 3.5x on `O_DIRECT`; it wins only on a cold cache at one pipe-load or less | `feat/splice-send-file`, 16 commits |
-| 12 | **`fd43b32`** — the wake-up eventfd written under the lock that closes it | fixes a use-after-close **we** introduced with the #448 fix; reproduced deterministically, not argued | `fix/notify-eventfd-race` |
+| 12 | ~~`fd43b32`~~ — **superseded**; see below | — | deleted |
 
 Item 11 is not upstream material yet, and possibly not at all: a feature whose
 own ladder says it costs more CPU than the thing it replaces needs the
 `F_SETPIPE_SZ` and `IOSQE_IO_LINK` work first, or an honest doc comment
-carrying the numbers — it currently has the latter. Item 12 is only meaningful
-alongside the #448 change, so it travels with it.
+carrying the numbers — it currently has the latter.
+
+**Item 12 is gone, and so is what it fixed** (`147aa0e`, 2026-09-02). Porting
+the eventfd change out of #35 meant first asking whether it still did anything,
+and it does not: [#32](https://github.com/glommio/glommio/pull/32) puts
+`executor_id` in the task header instead of an `Arc<SleepNotifier>`, which is
+what actually fixes #448 — nothing outlives the executor holding its notifier
+alive, so the refcount reaches zero on its own. Measured, not argued: twenty
+executor lifecycles grow the descriptor count by twenty before either change,
+and by nothing with the header change alone and `close_eventfd` deleted.
+
+`close_eventfd` was therefore a workaround that outlived its premise, and it
+was not inert while it did — a `shared_channel` peer on another executor can
+legitimately still hold that `Arc`, and closing the descriptor under it is what
+created the use-after-close. Deleting the mechanism removed the race instead of
+locking around it. **So there is no separate #448 PR**, contrary to what was
+said on #35; the correction is posted there. #448 rides on #32.
 
 ## What has been submitted
 
@@ -263,12 +278,23 @@ theirs may not. Tell them what breaks and let them pick the fix.
 **Gate to Stage 1: any human reply on any of the three.** That is the signal
 that review capacity exists. Without it, nothing else is worth queueing.
 
-**Status 2026-09-02: none of the three was ever filed, and the gate opened
-anyway** — on #35, not on an issue. See
+**Status 2026-09-02: filed, and the gate had already opened by another
+route** — on #35, not on an issue. See
 [2026-08-31: a review arrived](#2026-08-31-a-review-arrived-and-the-gate-is-open).
-File them regardless: they are still defects in their code, they still cost a
-maintainer minutes rather than hours, and the `configure` one now has an
-independent witness in that review.
+
+| Issue | What | Verified |
+|---|---|---|
+| [#36](https://github.com/glommio/glommio/issues/36) | `cargo package` fails verification; `build.rs` runs `./configure` in-tree | first-hand on `1981af4`: `error: failed to verify package tarball` |
+| [#37](https://github.com/glommio/glommio/issues/37) | a panicking `spawn_blocking` closure hangs its caller **and** breaks the pool | both reproduced; the second is worse than this plan recorded |
+| [#38](https://github.com/glommio/glommio/issues/38) | `LocalExecutorBuilder::name` ignored by `make()` | reproduced; `make()` reads every builder field except `name` |
+
+**#37 was under-stated here.** The old entry said the panic "permanently costs
+the pool a worker". It does, but the default pool is `PoolPlacement::Unbound(1)`
+— one thread — so the first panic drops the last receiver and the request
+channel disconnects. Every later `spawn_blocking` on that executor then panics
+the *executor* thread at `blocking.rs:255` with `failed to enqueue blocking
+operation: "SendError(..)"`. Not a degraded pool: a dead one, and it takes the
+caller with it.
 
 ### Stage 1 — two small bug fixes
 
