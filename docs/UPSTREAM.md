@@ -1,9 +1,12 @@
 # Upstreaming: Where, What, and Whether
 
-**Date:** 2026-08-02, status updated 2026-08-10
+**Date:** 2026-08-02, status updated 2026-08-10 and 2026-09-02
 **Short answer:** yes, it is worth it — but to **`glommio/glommio`**, not DataDog.
 **Caveat added 2026-08-10:** that repository has gone quiet too. See
 [Upstream activity](#upstream-activity) before planning around it.
+**Superseded 2026-09-02:** a substantive review arrived on #35. The staging
+below still holds, but its Stage 0 gate is open — see
+[2026-08-31: a review arrived](#2026-08-31-a-review-arrived-and-the-gate-is-open).
 
 ## The landscape changed
 
@@ -45,6 +48,38 @@ Practical consequences:
 - **Do not chase.** One factual comment when a real blocker clears is
   reasonable — that is what the io-uring merge earned on #34. Repeated nudging
   on a volunteer project is not.
+
+### 2026-08-31: a review arrived, and the gate is open
+
+**`utilitydelta` reviewed [#35](https://github.com/glommio/glommio/pull/35)**,
+in detail and on their own initiative: a 437-test black-box conformance suite
+(public API only) overlaid on the branch, full behaviour parity with `main`,
+zero flakes over four runs, both side commits verified by reproduction
+(seccomp-forced `io_uring_setup` failure; a CPU-0-pinned competitor for
+`test_spin`), plus an audit of `io-uring` 0.7.14's contracts at every call site
+with CQ-overflow and cancellation-storm probes. Verdict: "the foundation is
+sound", with two blockers and six non-blocking follow-ups.
+
+**They are not a passer-by.** `1981af4` — the current tip of `upstream/main`,
+and the base every one of our six PRs is cut from — is their commit.
+
+What this changes, and what it does not:
+
+- **The Stage 0 gate is satisfied**, by a route this plan did not anticipate.
+  The gate was "any human reply on any of the three bug reports"; the three
+  reports were never filed (upstream has only our issue #34), and the signal
+  arrived on a PR instead. The purpose of the gate was to establish that review
+  capacity exists. It does.
+- **One of the unfiled reports now has an independent witness.** Stage 0's
+  second report says `build.rs` running `./configure` in-tree makes
+  `cargo package` reject the tarball. The reviewer, working from scratch,
+  reached the same place: "cargo package -p glommio still fails verification."
+  File it with the corroboration.
+- **"Do not chase" is unchanged; "do not reply" was never the rule.** A prompt,
+  substantive answer to a reviewer who has just spent real effort is the
+  cheapest thing available. It is nudging that is unwelcome, not engagement.
+- **The two-at-a-time rule stands.** One competent review is evidence of
+  capacity, not proof of throughput.
 
 Re-check before spending effort on upstream sequencing: if `main` moves again,
 the calculus changes.
@@ -114,6 +149,20 @@ Verified against `community/main`, not assumed:
 They still vendor `iou` and `uring_sys`, and still have the old `timer_impl`
 without a wheel — so 3 and 10 are not duplicated effort.
 
+**Added since, and not yet on `master`** — both sit on branches, so neither is
+part of "everything on main" until it is merged there:
+
+| | what | value | where |
+|---|---|---|---|
+| 11 | **`TcpStream::send_file`** — `IORING_OP_SPLICE` through a per-call pipe | the only way to serve a file without the bytes entering the process. **Measured, and the measurement is unflattering:** 1.8x-2.8x more total CPU than `read_at` + `write_all` on a warm cache, 3.5x on `O_DIRECT`; it wins only on a cold cache at one pipe-load or less | `feat/splice-send-file`, 16 commits |
+| 12 | **`fd43b32`** — the wake-up eventfd written under the lock that closes it | fixes a use-after-close **we** introduced with the #448 fix; reproduced deterministically, not argued | `fix/notify-eventfd-race` |
+
+Item 11 is not upstream material yet, and possibly not at all: a feature whose
+own ladder says it costs more CPU than the thing it replaces needs the
+`F_SETPIPE_SZ` and `IOSQE_IO_LINK` work first, or an honest doc comment
+carrying the numbers — it currently has the latter. Item 12 is only meaningful
+alongside the #448 change, so it travels with it.
+
 ## What has been submitted
 
 Opened 2026-08-02, smallest and most obviously correct first, so review trust
@@ -139,6 +188,40 @@ dependency points at `tokio-rs/io-uring` directly.
 the accessor. The dependency is now a plain `io-uring = "0.7.14"` — no git
 dependency, nothing preventing publication. See
 [investigations/iou-replacement](investigations/iou-replacement/).
+
+**Reviewed 2026-08-31, and it needs surgery before it can land.** Two blockers,
+both fair:
+
+1. **`f3b8bc5` carries a `SleepNotifier` change that has nothing to do with
+   retiring `iou`**, and does not mention it in the commit message. It replaces
+   `eventfd: std::fs::File` with `Mutex<Option<File>>` and adds
+   `close_eventfd()` — that is the **#448 fix**, smuggled into a refactor. It
+   also introduced a use-after-close: `notify()` read the descriptor number
+   under the lock, released it, then wrote, so a concurrent `close_eventfd()`
+   could free the number and let the kernel hand it to the next `open` before
+   the write landed. Fixed on `fix/notify-eventfd-race` (`fd43b32`), with a
+   test that reproduces it by pinning every participant to one CPU.
+   **The resolution for #35 is removal, not repair:** upstream has no
+   `close_eventfd` at all, so taking the eventfd change out of `f3b8bc5`
+   leaves the PR with no race to fix and restores their plain `File`. #448 then
+   goes as its own PR carrying the `Mutex`, the `close_eventfd`, the locked
+   `notify()` and the regression test — which is the split the reviewer asked
+   for.
+2. **The vendored C is not actually retired.** `build.rs` on the PR branch
+   still clones the submodule and compiles `liburing` plus `rusturing.c`, which
+   nothing links any more, and `.gitmodules` is still there. Our `master`
+   fixed this long ago — 14-line `build.rs`, no `cc` dependency, no
+   `.gitmodules`, no `rusturing.c` — so this is a port from `master`, not new
+   work. Note that `master` itself still carries `submodules: recursive` in
+   `.github/workflows/ci.yml` in three places; dead, and worth removing in the
+   same pass.
+
+Six non-blocking follow-ups came with it: orphaned `#[allow]` stacks on
+`mod parking`/`mod nop`, a README that still says kernel 5.8 while the code says
+5.6, a missing const size/align assert on the `KernelTimespec` cast, a
+discarded `submit_and_wait` count that deserves a `debug_assert_eq!`, a dangling
+doc reference, and an opcode-probe failure string memoized even for a transient
+`EMFILE`.
 
 ### Not yet submitted
 
@@ -179,6 +262,13 @@ theirs may not. Tell them what breaks and let them pick the fix.
 
 **Gate to Stage 1: any human reply on any of the three.** That is the signal
 that review capacity exists. Without it, nothing else is worth queueing.
+
+**Status 2026-09-02: none of the three was ever filed, and the gate opened
+anyway** — on #35, not on an issue. See
+[2026-08-31: a review arrived](#2026-08-31-a-review-arrived-and-the-gate-is-open).
+File them regardless: they are still defects in their code, they still cost a
+maintainer minutes rather than hours, and the `configure` one now has an
+independent witness in that review.
 
 ### Stage 1 — two small bug fixes
 
@@ -354,7 +444,18 @@ before anyone budgets rebase time for this.
 
 **131 commits is not a pull request.** It is roughly seven, and several need
 rebasing onto their 15. Expect real conflict work in `executor/mod.rs`,
-`task/header.rs` and `task/raw.rs`.
+`task/header.rs` and `task/raw.rs`. *(As of 2026-09-02 the count is 232 commits
+ahead of `upstream/main`, which has not moved since. The shape of the argument
+is unchanged; only the number grew.)*
+
+**The six open PRs did not go stale while they waited.** Checked 2026-09-02:
+their distinctive files are byte-identical to `master` — the tests on #29 and
+#30, `header.rs`/`raw.rs`/`task_impl.rs`/`multitask.rs` on #32,
+`timing_wheel.rs`/`staged_wheel.rs`/`timer_id.rs` on #33. Where they differ from
+`master` it is entirely in high-churn shared files (`executor/mod.rs`,
+`net/stream.rs`, `reactor.rs`, `lib.rs`) carrying 232 commits of unrelated work.
+Since `upstream/main` has not moved either, all six still apply to it. **Only
+#35 needs work, and its work is subtraction plus a port.**
 
 **Some of our commits fix our own breakage** and should not be presented as
 upstream value: the doctest repairs undo a rename we made, and the spawn-API
