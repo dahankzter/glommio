@@ -193,3 +193,43 @@ fn test_executor_with_tasks() {
     // Even with non-runnable tasks, eventfds should be closed
     assert!(leaked < 5, "FDs leaked with non-runnable tasks: {}", leaked);
 }
+
+/// The strict form of the same question, and the one that would catch a
+/// regression immediately.
+///
+/// The tests above allow up to ten stray descriptors, which is the right
+/// tolerance for a cycle that also builds shared channels and pins threads.
+/// A bare executor that runs nothing has no such noise: it must not grow the
+/// count at all, and one leaked eventfd per executor would show immediately.
+///
+/// This matters more than it used to. `close_eventfd` used to force the
+/// notifier's eventfd shut from `Reactor::drop` as a second line of defence.
+/// It was removed once it was redundant -- storing `executor_id` in the task
+/// header rather than an `Arc<SleepNotifier>` means nothing outlives the
+/// executor holding its notifier alive -- and removing it also removed a
+/// use-after-close, since a `shared_channel` peer on another executor can
+/// legitimately still hold that `Arc`. With the belt gone, this test is the
+/// braces.
+#[test]
+fn a_bare_executor_lifecycle_does_not_grow_the_descriptor_count() {
+    let _guard = serialised();
+
+    // The first executor in a process initialises state that is never torn
+    // down, so it is warm-up rather than part of the measurement.
+    LocalExecutor::default().run(async {});
+
+    let before = count_open_fds();
+    for _ in 0..20 {
+        LocalExecutor::default().run(async {});
+    }
+    let after = count_open_fds();
+
+    // Not equality: the count may legitimately fall, since descriptors held
+    // lazily elsewhere in the process can be released during the run. What
+    // must never happen is growth, and one leaked eventfd per executor is
+    // what a regression looks like -- 20 lifecycles, 20 descriptors.
+    assert!(
+        after <= before,
+        "20 executor lifecycles grew the process descriptor count from {before} to {after}"
+    );
+}
