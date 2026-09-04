@@ -10,12 +10,17 @@ community fork at **[glommio/glommio](https://github.com/glommio/glommio)** took
 over: a new org with the original author's blessing to take the crates.io name
 (DataDog issue #707). This fork's `#700` fix is already merged there.
 
-**But that fork has gone quiet too (checked 2026-08-10).** Last commit
-2026-06-13, last merged PR 2026-06-22. Six of our PRs have been open since
-2026-08-02 with no review, no comments, and no CI runs. Not abandoned — a
-volunteer project between bursts — but **do not plan around an upstream merge
-landing.** This fork is the artifact consumers should depend on. Keep the PRs
-open, keep them rebasing cleanly, don't add more, don't chase. See
+**That fork was quiet for months, and is not any more (checked 2026-09-04).**
+`utilitydelta`, whose commit is the tip of their `main`, reviewed PR #35 on
+2026-08-31 with a 437-test conformance suite, and again on 09-03. Both rounds
+were acted on. Their `main` itself still has not moved since 2026-06-22, and
+none of our six PRs has merged.
+
+So the standing advice holds with one change: **do not plan around a merge
+landing**, this fork is still the artifact consumers should depend on, keep
+the PRs rebasing cleanly — but "don't chase" now means *answer promptly and
+add nothing new*, not *assume nobody is listening*. **The gate for opening
+anything further is one PR merged, not one reviewed.** See
 [docs/UPSTREAM.md](docs/UPSTREAM.md#upstream-activity).
 
 **So upstream means `glommio/glommio`, not DataDog.** See
