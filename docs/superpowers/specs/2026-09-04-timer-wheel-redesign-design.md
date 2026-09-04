@@ -270,18 +270,65 @@ riding along with a large change.
 The gate, not an afterthought. The control is **upstream's `BTreeMap`**, not
 the implementation on `perf/timing-wheel`.
 
-1. **How many timers does a real glommio server hold?** Instrument one and
-   count. Everything below is conditional on this. If the answer is
-   "hundreds", the wheel is solving a problem the executor does not have.
-2. **Deadline churn** — insert and cancel, never fire, at 100 / 1k / 10k /
-   100k live. The primary workload for the target profile, and
+### Step 1 — how many timers, and in what ratio
+
+Everything below is conditional on this. If the answer is "hundreds", the wheel
+is solving a problem the executor does not have.
+
+**Derive the ceiling from the code first; it is free and it is most of the
+answer.** Only two sites insert into the reactor's timer structure —
+`net/stream.rs:331` and `timer_impl.rs:174` — and everything else routes
+through them. So live timers are exactly:
+
+- one per stream **per direction**, held only while an operation is pending,
+  and only if the application called `set_read_timeout` / `set_write_timeout`.
+  The default is `Cell::new(None)` (`net/stream.rs:308`), so a server that
+  never sets timeouts contributes **zero**;
+- one per live `Timer` / `sleep` / `Interval` future.
+
+The hard ceiling is therefore `2 × concurrent connections with timeouts set`.
+The 100k figure #33 was argued from implies a **50,000-connection proxy with
+timeouts in both directions, all blocked at once**. That may be a real glommio
+target, but it is not the default shape, and it settles what "realistic" means
+before anything is run.
+
+**Then measure the ratio, which decides more than the count does.** If timers
+are overwhelmingly cancelled before firing, O(1) cancellation is the entire
+justification for this design and cascade cost barely matters; if they mostly
+fire, cheap next-expiry and cascading dominate and the slab is decoration.
+Three counters in `Timers` answer it: high-water live, total inserted, total
+cancelled-before-fire.
+
+Those counters belong behind the existing `debugging` feature, which is
+declared and empty (`debugging = []` in `glommio/Cargo.toml`). Nothing is paid
+in a default build, and `make ci` already compiles `--all-features`, so the
+code cannot rot unnoticed.
+
+**Drive it with a ladder**, following the pattern already established by
+`accept_ladder.rs`, `recv_ladder.rs`, `send_file_ladder.rs` and
+`writev_ladder.rs`: sweep connection count with timeouts set and reads pending,
+reporting high-water mark and churn ratio.
+
+`timer_soak_test.rs` is not that shape — it drives 10,000 `sleep` tasks, the
+scheduled-work profile, which is the secondary case here. Its header also
+instructs `--features timing-wheel`, which is not a feature this crate
+declares.
+
+Finally, ask a downstream consumer what they actually run: whether they set
+socket timeouts at all, and at what concurrency. One answer from production
+outweighs any synthetic figure produced here.
+
+### Step 2 — the comparison, once step 1 has an answer
+
+1. **Deadline churn** — insert and cancel, never fire, at the counts step 1
+   says are real. The primary workload for the target profile, and
    `benches/timer_benchmark.rs` does not isolate it today.
-3. **Expiry** — insert and let fire, at the same counts.
-4. **Next-expiry cost per poll** at each count, measured directly, since that
+2. **Expiry** — insert and let fire, at the same counts.
+3. **Next-expiry cost per poll** at each count, measured directly, since that
    is where the O(n) regression lives.
-5. **Idle gap** — promote to wheel, idle ten minutes, measure the next poll.
+4. **Idle gap** — promote to wheel, idle ten minutes, measure the next poll.
    The case the current benchmark structurally cannot express.
-6. **End-to-end** — a socket workload with timeouts set. Micro-benchmarks of
+5. **End-to-end** — a socket workload with timeouts set. Micro-benchmarks of
    timer operations do not establish that timers sit on anyone's critical
    path.
 
