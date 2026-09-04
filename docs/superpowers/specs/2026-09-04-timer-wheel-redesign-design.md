@@ -1,8 +1,10 @@
 # Design: timer wheel redesign — stable handles over a cascading wheel
 
 **Date:** 2026-09-04
-**Status:** approved in chat 2026-09-04. No implementation plan yet, and none
-should be written until [Measurement](#measurement) step 1 has an answer
+**Status:** approved in chat 2026-09-04. Specifies arm A of a three-arm
+comparison — see [Arms of the comparison](#arms-of-the-comparison) — and no
+implementation plan should be written for any arm until
+[Measurement](#measurement) step 1 has an answer
 **Supersedes:** the implementation on `perf/timing-wheel`, offered upstream as
 [#33](https://github.com/glommio/glommio/pull/33)
 **Review that prompted it:** `vlovich` on #33, 2026-09-04, 14 inline comments
@@ -48,6 +50,59 @@ That keeps cascading — and therefore full expiry precision — while making
 cancellation a genuine O(1) array index. It is the property `bitwheel` offers
 by forbidding migration altogether; here it comes from indirection instead, at
 the cost of one pointer chase on expiry and none on cancel.
+
+**This design is one of three arms, not a foregone conclusion.** It is built
+in parallel with a `bitwheel` integration and measured against upstream's
+`BTreeMap`; the direction is chosen from the results. See
+[Arms of the comparison](#arms-of-the-comparison).
+
+## Arms of the comparison
+
+| Arm | What it is | What it must prove |
+|---|---|---|
+| **Control** — upstream `BTreeMap` | `reactor.rs:123-139` on `main`. O(log n) insert and remove, O(1) next expiry, exact firing, no capacity limit | Nothing. It is the incumbent, and if it is not beaten it wins by default |
+| **A — slab over a cascading wheel** | This document | That O(1) cancel and O(levels) next-expiry beat O(log n) at the timer counts step 1 finds real, and that cascade cost does not eat the win |
+| **B — `bitwheel` integration** | The crate, wired to `Timer`/`TimerDriver` | That its fixed capacity can be sized for glommio without unacceptable memory, and that its firing imprecision is invisible to real users |
+
+### What reading `bitwheel` 0.6.0 established
+
+The API fits glommio better than its README suggests. `TimerDriver<T: Timer>`
+is generic over the payload with **no `Send`/`Sync` bound**, which suits a
+thread-per-core `!Send` runtime. `poll(now, ctx)` threads a
+`&mut T::Context` through firing, so `Context = Vec<Waker>` falls out naturally
+— and that shape fixes the `RefMut`-held-across-`wake` problem structurally
+rather than by convention. `peek_next_fire()` is O(1) from a cached
+`next_fire_tick` with per-gear minima and a dirty mask, which is a better
+answer to next-expiry than the bitmap scan arm A proposes.
+
+Four properties decide whether it can host glommio:
+
+1. **Capacity is fixed at compile time and the default is small.**
+   `NUM_SLOTS` is a hard `const 64` in `timer/gear.rs`, not a generic, so
+   capacity is `64 × SLOT_CAP × NUM_GEARS`. Defaults (`SLOT_CAP = 32`,
+   `NUM_GEARS = 5`) hold 10,240 timers. Reaching 100k needs roughly
+   `SLOT_CAP = 256, NUM_GEARS = 8` — 131,072 preallocated slots, per
+   executor, multiplied by core count.
+2. **Overflow falls back to a `BTreeMap`.** `BitWheelWithFailover` holds
+   `failover: BTreeMap<(u64, u32), T>`. Undersized, it degrades into the
+   control at exactly the scale the wheel was supposed to win.
+3. **Firing imprecision is congestion-dependent, not uniform.**
+   `DEFAULT_RESOLUTION_MS = 4`, and `acquire_next_available` probes forward up
+   to `MAX_PROBES = 3` slots when the target is full, so a timer fires up to
+   12 ms late — but only under slot congestion. `delay.max(1)` also means
+   `sleep(1ms)` cannot fire before one tick. Both are tunable; finer
+   resolution costs gears for the same horizon.
+4. **It moves unsafe code into a dependency.** `timer/slot.rs` carries 166
+   lines containing `unsafe` out of 965. The zero-unsafe property #33 claimed
+   is not preserved by adopting it, and unsafe in a dependency is unsafe we do
+   not Miri.
+
+Non-technical, and real: the crate published ten-plus releases between
+2025-12-14 and 2025-12-18 and nothing since, is pre-1.0, and is 28%
+documented. A project whose own premise is that its upstream went unmaintained
+should weigh taking a dependency with that shape — but weigh it against the
+code, which is substantial and benchmarked, not against the release cadence
+alone.
 
 ## Types
 
@@ -320,20 +375,41 @@ outweighs any synthetic figure produced here.
 
 ### Step 2 — the comparison, once step 1 has an answer
 
-1. **Deadline churn** — insert and cancel, never fire, at the counts step 1
-   says are real. The primary workload for the target profile, and
-   `benches/timer_benchmark.rs` does not isolate it today.
-2. **Expiry** — insert and let fire, at the same counts.
-3. **Next-expiry cost per poll** at each count, measured directly, since that
-   is where the O(n) regression lives.
+All three arms run the same cases, at the counts step 1 says are real. Arms A
+and B are both built; the direction is chosen from results, not from argument.
+
+1. **Deadline churn** — insert and cancel, never fire. The primary workload for
+   the target profile, and `benches/timer_benchmark.rs` does not isolate it
+   today.
+2. **Expiry** — insert and let fire.
+3. **Next-expiry cost per poll**, measured directly, since that is where the
+   O(n) regression lives.
 4. **Idle gap** — promote to wheel, idle ten minutes, measure the next poll.
    The case the current benchmark structurally cannot express.
 5. **End-to-end** — a socket workload with timeouts set. Micro-benchmarks of
    timer operations do not establish that timers sit on anyone's critical
    path.
 
-**If the `BTreeMap` matches within noise at the count measured in (1), the
-design is not built.** That is `measure-premise-before-perf-work`, and it is
-the trap the task arena fell into: a premise assumed rather than measured,
-months spent, then reverted
-([task-arena post-mortem](../../investigations/task-arena/README.md)).
+Two cases exist only for arm B, because only it can fail them:
+
+6. **Resident memory per executor**, at the sizing needed to hold the step-1
+   count without failover, multiplied by core count. Arms Control and A grow
+   with live timers; arm B preallocates.
+7. **Firing lateness distribution**, not its mean — a histogram, under the
+   congestion that makes `MAX_PROBES` bite. The relevant question is the tail:
+   how late is the worst timer when slots are full, and does anything in the
+   target profile notice.
+
+### Choosing
+
+- If the **control** matches the best arm within noise at the step-1 count,
+  neither wheel ships. That is `measure-premise-before-perf-work`, and it is
+  the trap the task arena fell into: a premise assumed rather than measured,
+  months spent, then reverted
+  ([task-arena post-mortem](../../investigations/task-arena/README.md)).
+- If **arm B** wins on speed but needs sizing whose memory (case 6) or tail
+  lateness (case 7) is unacceptable, it loses anyway — and the reason is
+  recorded rather than relitigated.
+- If **arm A** wins, it ships as code we own, Miri-able, with no dependency.
+- If **arm B** wins cleanly, we take the dependency and say so plainly,
+  including that it was unmaintained since 2025-12-18 when we chose it.
