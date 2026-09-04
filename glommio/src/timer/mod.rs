@@ -7,6 +7,9 @@
 mod interval;
 mod timer_impl;
 
+#[cfg(feature = "debugging")]
+pub mod debugging;
+
 pub mod timing_wheel;
 
 pub mod staged_wheel;
