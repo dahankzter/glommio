@@ -75,12 +75,6 @@ impl ReactorTimers {
         self.wheel.remove(internal_id)
     }
 
-    /// Check if a timer exists by ID
-    pub(crate) fn exists(&self, id: TimerId) -> bool {
-        let internal_id = id.index() as u64;
-        self.id_to_expiry.contains_key(&internal_id)
-    }
-
     /// Process expired timers
     ///
     /// Returns (next_timer_duration, num_woke)
@@ -188,19 +182,16 @@ mod tests {
     }
 
     #[test]
-    fn test_exists() {
+    fn test_removing_twice_reports_the_second_as_absent() {
         let mut timers = ReactorTimers::new();
         let now = Instant::now();
 
-        // Insert and get ID
         let id = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        assert_eq!(timers.len(), 1);
 
-        // Should exist with correct ID
-        assert!(timers.exists(id));
-
-        // Remove and check it no longer exists
-        timers.remove(id);
-        assert!(!timers.exists(id));
+        assert!(timers.remove(id), "the first removal withdraws it");
+        assert_eq!(timers.len(), 0);
+        assert!(!timers.remove(id), "the second finds nothing to withdraw");
     }
 
     #[test]
@@ -219,9 +210,11 @@ mod tests {
         assert!(timers.remove(id2));
         assert_eq!(timers.len(), 2);
 
-        // Verify correct timers remain
-        assert!(timers.exists(id1));
-        assert!(!timers.exists(id2));
-        assert!(timers.exists(id3));
+        // The two that were not withdrawn are still withdrawable; the one
+        // that was is not.
+        assert!(!timers.remove(id2), "already gone");
+        assert!(timers.remove(id1));
+        assert!(timers.remove(id3));
+        assert_eq!(timers.len(), 0);
     }
 }
