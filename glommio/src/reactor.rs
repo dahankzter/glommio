@@ -120,8 +120,11 @@ mod timers {
 
         /// Return the duration until next event and the number of
         /// ready and woke timers.
-        pub(super) fn process_timers(&mut self) -> (Option<Duration>, usize) {
-            let (next, woke) = self.wheel.process_timers();
+        pub(super) fn process_timers(
+            &mut self,
+            wakers: &mut Vec<Waker>,
+        ) -> (Option<Duration>, usize) {
+            let (next, woke) = self.wheel.process_timers(wakers);
             #[cfg(feature = "debugging")]
             self.stats.record_fired(woke);
             (next, woke)
@@ -162,6 +165,11 @@ pub(crate) struct Reactor {
 
     timers: RefCell<Timers>,
 
+    /// Reused across polls so expiring a batch of timers allocates nothing.
+    /// Lives outside `timers` so it can be filled under that borrow and
+    /// drained after it is released.
+    timer_wakers: RefCell<Vec<Waker>>,
+
     shared_channels: RefCell<SharedChannels>,
 
     io_scheduler: Rc<IoScheduler>,
@@ -190,6 +198,7 @@ impl Reactor {
         Ok(Reactor {
             sys,
             timers: RefCell::new(Timers::new()),
+            timer_wakers: RefCell::new(Vec::new()),
             shared_channels: RefCell::new(SharedChannels::new()),
             io_scheduler: Rc::new(IoScheduler::new()),
             record_io_latencies,
@@ -794,8 +803,28 @@ impl Reactor {
     ///
     /// Returns the duration until the next timer
     fn process_timers(&self) -> (Option<Duration>, usize) {
-        let mut timers = self.timers.borrow_mut();
-        timers.process_timers()
+        // Collect first, wake after. `timers` is a RefCell, so a waker that
+        // arms or cancels a timer while we still hold it re-enters and panics
+        // on the second borrow. The scratch buffer is kept across calls so a
+        // batch of expiries costs no allocation.
+        let mut scratch = std::mem::take(&mut *self.timer_wakers.borrow_mut());
+        debug_assert!(
+            scratch.is_empty(),
+            "scratch is drained before it is returned"
+        );
+
+        let next = {
+            let mut timers = self.timers.borrow_mut();
+            timers.process_timers(&mut scratch).0
+        };
+
+        let woke = scratch.len();
+        for waker in scratch.drain(..) {
+            wake!(waker);
+        }
+        *self.timer_wakers.borrow_mut() = scratch;
+
+        (next, woke)
     }
 
     fn process_shared_channels(&self) -> usize {
