@@ -261,7 +261,14 @@ impl TimingWheel {
     /// Insert a timer entry into the appropriate level
     fn insert_entry(&mut self, entry: TimerEntry) {
         let deadline_ms = match entry.expires_at.checked_duration_since(self.start_time) {
-            Some(duration) => duration.as_millis().min(u64::MAX as u128) as u64,
+            // Round up. `as_millis` truncates, which places a timer due at
+            // 1.7ms in tick 1 and fires it 0.7ms early -- before its own
+            // deadline, so the future polls, finds itself not ready, and has to
+            // arm again. A timer may fire late; it may never fire early.
+            Some(duration) => duration
+                .as_nanos()
+                .div_ceil(1_000_000)
+                .min(u64::MAX as u128) as u64,
             None => {
                 // Timer is in the past - expire immediately
                 self.expired.push(entry);
@@ -523,6 +530,32 @@ mod tests {
     // Helper: a waker that does nothing when woken.
     fn dummy_waker() -> Waker {
         Waker::noop().clone()
+    }
+
+    #[test]
+    fn a_deadline_between_ticks_does_not_expire_at_the_earlier_one() {
+        // A deadline is rounded up to a whole tick, never down. Truncating
+        // places a timer due at 1.7ms in tick 1 and expires it at 1.0ms --
+        // before it is due. The future then finds itself not ready and arms
+        // again, so one sleep costs several registrations.
+        //
+        // Checked here rather than through the executor because the reactor
+        // sleeps until the true deadline when nothing else is running, which
+        // hides it; and because inline storage compares instants exactly, so
+        // it only appears once the staged wheel has promoted.
+        let start = Instant::now();
+        let mut wheel = TimingWheel::new_at(start);
+        wheel.insert(start + Duration::from_micros(1_700), dummy_waker());
+
+        wheel.advance_to(start + Duration::from_millis(1));
+        assert_eq!(
+            wheel.drain_expired().count(),
+            0,
+            "expired at 1ms a timer that is due at 1.7ms"
+        );
+
+        wheel.advance_to(start + Duration::from_millis(2));
+        assert_eq!(wheel.drain_expired().count(), 1, "due by 2ms");
     }
 
     #[test]
