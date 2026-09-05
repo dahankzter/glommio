@@ -320,6 +320,32 @@ the per-batch allocation review asked about at `staged_wheel.rs:170`.
 go up as its own small PR against `main`, independent of any wheel, rather than
 riding along with a large change.
 
+## Comparability protocol
+
+Three implementations are only comparable if the thing measuring them is
+identical. That is a structural property, not a matter of care, so it is
+arranged rather than intended.
+
+- **Every arm branches from `master` at the merge that carries the harness**
+  (`64a0d77`), so all three inherit the same counters, the same ladder, and
+  the same deadline-rounding baseline.
+- **No arm may modify `timer_ladder.rs` or `timer/debugging.rs`.** A
+  measurement the ladder cannot express is a change to `master`, which every
+  arm then rebases onto. An arm that edits its own instrument has stopped
+  being comparable and its numbers are void.
+- **The counters live in the reactor's `Timers` wrapper, not in any wheel**,
+  so they mean the same thing whatever is underneath.
+- **The control is a branch too.** `arm/control-btreemap` is `master` with the
+  wheel swapped back for upstream's `BTreeMap` and the harness kept, rather
+  than upstream's tree measured with different instruments.
+- **Every run records the commit of its arm, the machine, the toolchain and
+  the profile**, and all arms are run in one sitting on one machine. Numbers
+  from different sittings are not compared.
+
+Runs are `--release --features debugging`. The `debugging` feature is what
+exposes the counters; it does not otherwise change the timer path, and the arms
+are measured with it on so that they are measured identically.
+
 ## Measurement
 
 The gate, not an afterthought. The control is **upstream's `BTreeMap`**, not
