@@ -258,6 +258,35 @@ mod bitwheel_contract {
         assert_eq!(woke, 1, "the survivor fires");
     }
 
+    /// The same failure on the crate's own shipped preset, to show it is not
+    /// a consequence of how this arm configures it.
+    ///
+    /// `bitwheel::timer::Wheel` is the crate's "STANDARD" alias --
+    /// `BitWheel<T, 2, 4, 32, 8>`. A 400ms deadline lands in gear 1, whose
+    /// slots span 64 ticks of 4ms; polling at 256ms crosses that slot boundary
+    /// and fires the timer, 144ms before it was due.
+    #[test]
+    #[ignore = "reaches undefined behaviour in bitwheel 0.6.0; aborts rather than fails"]
+    fn the_same_holds_for_the_crates_own_preset() {
+        use bitwheel::timer::Wheel;
+
+        let epoch = Instant::now();
+        let mut wheel: Box<Wheel<WakerTimer>> = Wheel::boxed_with_epoch(epoch);
+
+        let handle = wheel
+            .insert(
+                epoch + Duration::from_millis(400),
+                WakerTimer(Some(dummy_waker())),
+            )
+            .expect("room in the slot");
+
+        let mut ctx = Vec::new();
+        wheel.poll(epoch + Duration::from_millis(256), &mut ctx);
+
+        // Still 144ms before the deadline, so cancel takes the unchecked path.
+        wheel.cancel(handle);
+    }
+
     /// Minimal reproduction of the soundness bug glommio's suite hits.
     ///
     /// `BitWheel::cancel` justifies an unchecked `remove` with, among others,
