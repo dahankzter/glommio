@@ -10,12 +10,6 @@ mod timer_impl;
 #[cfg(feature = "debugging")]
 pub mod debugging;
 
-pub mod timing_wheel;
-
-pub mod staged_wheel;
-
-pub mod timer_id;
-
 pub(crate) mod reactor_adapter;
 
 pub use interval::{interval, interval_at, Interval, MissedTickBehavior, Tick};

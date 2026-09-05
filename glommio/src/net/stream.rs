@@ -10,7 +10,7 @@ use crate::{
 use futures_lite::ready;
 use nix::sys::socket::MsgFlags;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     io::{self, IoSlice},
     net::Shutdown,
     os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
@@ -296,7 +296,9 @@ impl RxBuf for Preallocated {
 
 #[derive(Debug)]
 struct Timeout {
-    handle: Cell<Option<crate::timer::timer_id::TimerId>>,
+    // RefCell, not Cell: bitwheel's handle is not Copy, and Cell is only
+    // Debug when its contents are.
+    handle: RefCell<Option<bitwheel::timer::TimerHandle>>,
     timeout: Cell<Option<Duration>>,
     timer: Cell<Option<Instant>>,
 }
@@ -304,7 +306,7 @@ struct Timeout {
 impl Timeout {
     fn new() -> Self {
         Self {
-            handle: Cell::new(None),
+            handle: RefCell::new(None),
             timeout: Cell::new(None),
             timer: Cell::new(None),
         }
@@ -329,7 +331,7 @@ impl Timeout {
             if self.timer.get().is_none() {
                 let deadline = Instant::now() + timeout;
                 let id = reactor.insert_timer(deadline, waker.clone());
-                self.handle.set(Some(id));
+                *self.handle.borrow_mut() = Some(id);
                 self.timer.set(Some(deadline));
             }
         }
@@ -337,7 +339,7 @@ impl Timeout {
 
     fn cancel_timer(&self, reactor: &Reactor) {
         if self.timer.take().is_some() {
-            if let Some(id) = self.handle.take() {
+            if let Some(id) = self.handle.borrow_mut().take() {
                 reactor.remove_timer(id);
             }
         }
@@ -355,7 +357,7 @@ impl Timeout {
             return Ok(());
         }
 
-        if let Some(id) = self.handle.take() {
+        if let Some(id) = self.handle.borrow_mut().take() {
             reactor.remove_timer(id);
         }
         self.timer.take();

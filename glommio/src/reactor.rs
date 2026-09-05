@@ -82,7 +82,7 @@ impl SharedChannels {
 mod timers {
     use super::*;
     use crate::timer::reactor_adapter::ReactorTimers;
-    use crate::timer::timer_id::TimerId;
+    use bitwheel::timer::TimerHandle;
 
     pub(super) struct Timers {
         wheel: ReactorTimers,
@@ -101,15 +101,15 @@ mod timers {
 
         /// Insert a timer and return its handle
         ///
-        /// BREAKING CHANGE: Now returns TimerId instead of using external IDs
-        pub(super) fn insert_with_handle(&mut self, when: Instant, waker: Waker) -> TimerId {
+        /// BREAKING CHANGE: Now returns TimerHandle instead of using external IDs
+        pub(super) fn insert_with_handle(&mut self, when: Instant, waker: Waker) -> TimerHandle {
             #[cfg(feature = "debugging")]
             self.stats.record_insert();
             self.wheel.insert(when, waker)
         }
 
         /// Remove a timer by handle (O(1), no hashing!)
-        pub(super) fn remove_by_handle(&mut self, handle: TimerId) -> bool {
+        pub(super) fn remove_by_handle(&mut self, handle: TimerHandle) -> bool {
             let removed = self.wheel.remove(handle);
             #[cfg(feature = "debugging")]
             if removed {
@@ -120,8 +120,11 @@ mod timers {
 
         /// Return the duration until next event and the number of
         /// ready and woke timers.
-        pub(super) fn process_timers(&mut self) -> (Option<Duration>, usize) {
-            let (next, woke) = self.wheel.process_timers();
+        pub(super) fn process_timers(
+            &mut self,
+            wakers: &mut Vec<Waker>,
+        ) -> (Option<Duration>, usize) {
+            let (next, woke) = self.wheel.process_timers(wakers);
             #[cfg(feature = "debugging")]
             self.stats.record_fired(woke);
             (next, woke)
@@ -162,6 +165,11 @@ pub(crate) struct Reactor {
 
     timers: RefCell<Timers>,
 
+    /// Reused across polls so expiring a batch of timers allocates nothing.
+    /// Lives outside `timers` so it can be filled under that borrow and
+    /// drained after it is released.
+    timer_wakers: RefCell<Vec<Waker>>,
+
     shared_channels: RefCell<SharedChannels>,
 
     io_scheduler: Rc<IoScheduler>,
@@ -190,6 +198,7 @@ impl Reactor {
         Ok(Reactor {
             sys,
             timers: RefCell::new(Timers::new()),
+            timer_wakers: RefCell::new(Vec::new()),
             shared_channels: RefCell::new(SharedChannels::new()),
             io_scheduler: Rc::new(IoScheduler::new()),
             record_io_latencies,
@@ -764,22 +773,18 @@ impl Reactor {
         source
     }
 
-    /// Registers a timer and returns a TimerId for O(1) cancellation.
+    /// Registers a timer and returns a TimerHandle for O(1) cancellation.
     ///
     /// This API provides direct access to timer storage without HashMap overhead.
-    pub(crate) fn insert_timer(
-        &self,
-        when: Instant,
-        waker: Waker,
-    ) -> crate::timer::timer_id::TimerId {
+    pub(crate) fn insert_timer(&self, when: Instant, waker: Waker) -> bitwheel::timer::TimerHandle {
         let mut timers = self.timers.borrow_mut();
         timers.insert_with_handle(when, waker)
     }
 
-    /// Removes a timer by TimerId (O(1), no hashing).
+    /// Removes a timer by TimerHandle (O(1), no hashing).
     ///
     /// Returns true if the timer was found and removed.
-    pub(crate) fn remove_timer(&self, id: crate::timer::timer_id::TimerId) -> bool {
+    pub(crate) fn remove_timer(&self, id: bitwheel::timer::TimerHandle) -> bool {
         let mut timers = self.timers.borrow_mut();
         timers.remove_by_handle(id)
     }
@@ -794,8 +799,28 @@ impl Reactor {
     ///
     /// Returns the duration until the next timer
     fn process_timers(&self) -> (Option<Duration>, usize) {
-        let mut timers = self.timers.borrow_mut();
-        timers.process_timers()
+        // Collect first, wake after. `timers` is a RefCell, so a waker that
+        // arms or cancels a timer while we still hold it re-enters and panics
+        // on the second borrow. The scratch buffer is kept across calls so a
+        // batch of expiries costs no allocation.
+        let mut scratch = std::mem::take(&mut *self.timer_wakers.borrow_mut());
+        debug_assert!(
+            scratch.is_empty(),
+            "scratch is drained before it is returned"
+        );
+
+        let next = {
+            let mut timers = self.timers.borrow_mut();
+            timers.process_timers(&mut scratch).0
+        };
+
+        let woke = scratch.len();
+        for waker in scratch.drain(..) {
+            wake!(waker);
+        }
+        *self.timer_wakers.borrow_mut() = scratch;
+
+        (next, woke)
     }
 
     fn process_shared_channels(&self) -> usize {

@@ -19,7 +19,7 @@ type Result<T> = crate::Result<T, ()>;
 #[derive(Debug)]
 struct Inner {
     /// Timer ID for O(1) cancellation (no HashMap lookup!)
-    id: Option<crate::timer::timer_id::TimerId>,
+    id: Option<bitwheel::timer::TimerHandle>,
     /// The waker handed to the reactor alongside `id`.
     ///
     /// The wheel mints a fresh id per insert, so re-registering does not
@@ -36,7 +36,7 @@ impl Inner {
     fn reset(&mut self, dur: Duration) {
         if self.is_charged {
             // Deregister the timer from the reactor using the ID (O(1)!)
-            if let Some(id) = self.id {
+            if let Some(id) = self.id.take() {
                 self.reactor.upgrade().unwrap().remove_timer(id);
             }
         }
@@ -150,11 +150,11 @@ impl Timer {
 
 impl Drop for Timer {
     fn drop(&mut self) {
-        let inner = self.inner.borrow_mut();
+        let mut inner = self.inner.borrow_mut();
         if inner.is_charged {
             // Deregister the timer using ID (O(1), no HashMap!)
             if let Some(reactor) = inner.reactor.upgrade() {
-                if let Some(id) = inner.id {
+                if let Some(id) = inner.id.take() {
                     reactor.remove_timer(id);
                 }
             }
@@ -498,9 +498,9 @@ impl<T: 'static> TimerActionOnce<T> {
     pub fn destroy(&self) {
         // Remove using handle if charged
         if let Some(reactor) = self.reactor.upgrade() {
-            let inner = self.inner.borrow();
+            let mut inner = self.inner.borrow_mut();
             if inner.is_charged {
-                if let Some(id) = inner.id {
+                if let Some(id) = inner.id.take() {
                     reactor.remove_timer(id);
                 }
             }

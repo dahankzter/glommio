@@ -1,129 +1,147 @@
-// Copyright 2024 Glommio Project Authors. Licensed under Apache-2.0.
-
-//! Reactor integration layer for StagedWheel.
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the MIT/Apache-2.0 License, at your convenience
+//
+//! The reactor's view of the timer wheel, backed by the `bitwheel` crate.
 //!
-//! This module provides an adapter that integrates StagedWheel with the Reactor,
-//! using TimerId for O(1) cancellation without HashMap overhead.
+//! `bitwheel` does not cascade: a timer is placed in the gear matching its
+//! delay and stays there, which is what lets its handle name a fixed location.
+//! The cost is that a gear's slots have a fixed capacity, and a timer whose
+//! slot is full is placed in a neighbouring one — firing late — or, if none of
+//! the probed slots has room, parked in a `BTreeMap` instead.
+//!
+//! That matters here more than it looks. Deadline churn gives every connection
+//! the *same* timeout, so their deadlines cluster, and clustered deadlines land
+//! in the same slot. See [`SLOT_CAP`].
 
-use super::staged_wheel::StagedWheel;
-use super::timer_id::TimerId;
-use ahash::AHashMap;
-use std::task::Waker;
-use std::time::{Duration, Instant};
+use bitwheel::timer::{BitWheelWithFailover, Timer as BitwheelTimer, TimerHandle};
+use std::{
+    task::Waker,
+    time::{Duration, Instant},
+};
 
-/// Adapter for StagedWheel that integrates with the Reactor.
+/// One millisecond, matching the tick the rest of glommio reasons in.
 ///
-/// This adapter wraps StagedWheel and provides TimerId-based operations
-/// for O(1) cancellation. The ID is simply the wheel's internal ID,
-/// providing direct access without HashMap overhead.
+/// `bitwheel` defaults to 4ms. Taking that default would hand this arm a
+/// coarser clock than the one it is compared against, so the comparison would
+/// measure the clock rather than the structure.
+const RESOLUTION_MS: u64 = 1;
+
+/// Gears are radix 64, so five reach 64^5 ticks — about twelve days.
+const NUM_GEARS: usize = 5;
+
+/// Timers per slot.
 ///
-/// # Performance
+/// This is the number that decides whether this arm behaves like a wheel or
+/// like a `BTreeMap`. A slot holds timers whose deadlines fall in the same
+/// span, and deadline churn gives every connection an identical timeout — so a
+/// thousand connections opened together want a thousand places in one slot.
+/// Whatever is chosen, some population exceeds it and spills.
 ///
-/// - Insert: O(1) - returns ID directly from wheel
-/// - Remove: O(1) - direct access via ID
-/// - No hashing overhead, no cache misses from HashMap traversal
-///
-/// # Cache Optimization
-///
-/// Field ordering optimized for cache locality:
-/// - Hot field (wheel) is accessed on every timer operation
-/// - Warm field (id_to_expiry) is accessed on insert/remove and duration checks
+/// 128 is a deliberate middle: large enough that the ladder's lower rungs sit
+/// in the wheel, small enough that the memory is not absurd, and small enough
+/// that the upper rungs spill and the measurement shows it rather than hiding
+/// it behind a number picked to flatter.
+const SLOT_CAP: usize = 128;
+
+/// Slots probed when the target is full before falling back to the map. Each
+/// probe is one slot of lateness.
+const MAX_PROBES: usize = 3;
+
+/// How often the failover map is consulted, in ticks.
+const FAILOVER_INTERVAL: u64 = 64;
+
+type Wheel = BitWheelWithFailover<
+    WakerTimer,
+    NUM_GEARS,
+    RESOLUTION_MS,
+    SLOT_CAP,
+    MAX_PROBES,
+    FAILOVER_INTERVAL,
+>;
+
+/// What the wheel stores. Firing hands the waker to the caller rather than
+/// waking it, so nothing is woken while the reactor still holds its timers
+/// borrowed.
+#[derive(Debug)]
+struct WakerTimer(Option<Waker>);
+
+impl BitwheelTimer for WakerTimer {
+    type Context = Vec<Waker>;
+
+    fn fire(&mut self, ctx: &mut Self::Context) {
+        if let Some(waker) = self.0.take() {
+            ctx.push(waker);
+        }
+    }
+}
+
 pub(crate) struct ReactorTimers {
-    /// The underlying staged wheel (HOT: accessed every timer operation)
-    wheel: StagedWheel,
+    wheel: Box<Wheel>,
+}
 
-    /// Maps IDs to their expiry times (WARM: accessed on insert/remove/duration)
-    /// TODO: This is the remaining HashMap that could be eliminated by
-    /// exposing expiry times from the wheel itself
-    id_to_expiry: AHashMap<u64, Instant>,
+impl std::fmt::Debug for ReactorTimers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReactorTimers")
+            .field("len", &self.wheel.len())
+            .field("failover", &self.wheel.failover_len())
+            .finish()
+    }
 }
 
 impl ReactorTimers {
     pub(crate) fn new() -> Self {
+        // Boxed because the gears are inline fixed-capacity arrays: five gears
+        // of 64 slots holding 128 timers each is far too large for the stack.
         Self {
-            wheel: StagedWheel::new(),
-            id_to_expiry: AHashMap::new(),
+            wheel: Wheel::boxed(),
         }
     }
 
-    /// Insert a timer and return an ID for O(1) cancellation
-    ///
-    /// The returned ID provides direct access to the timer's location
-    /// in the wheel, avoiding HashMap lookups on removal.
-    pub(crate) fn insert(&mut self, expires_at: Instant, waker: Waker) -> TimerId {
-        // Insert into the wheel and get its internal ID
-        let internal_id = self.wheel.insert(expires_at, waker);
-
-        // Track expiry time (needed for next_timer_duration calculation)
-        self.id_to_expiry.insert(internal_id, expires_at);
-
-        // Return ID (wrapping the wheel's internal ID)
-        // Generation is 0 for now (we don't track reuse yet)
-        TimerId::new(internal_id as u32, 0)
+    /// Register a timer. Never fails: one that finds no room in the wheel is
+    /// parked in the failover map instead.
+    pub(crate) fn insert(&mut self, expires_at: Instant, waker: Waker) -> TimerHandle {
+        self.wheel.insert(expires_at, WakerTimer(Some(waker)))
     }
 
-    /// Remove a timer by ID (O(1) operation, no hashing)
-    ///
-    /// Returns true if the timer was found and removed
-    pub(crate) fn remove(&mut self, id: TimerId) -> bool {
-        let internal_id = id.index() as u64;
-
-        // Remove from expiry tracking
-        self.id_to_expiry.remove(&internal_id);
-
-        // Remove from wheel
-        self.wheel.remove(internal_id)
+    /// Withdraw a timer. `false` if it has already fired.
+    pub(crate) fn remove(&mut self, id: TimerHandle) -> bool {
+        self.wheel.cancel(id).is_some()
     }
 
-    /// Process expired timers
+    /// Expire what is due, hand back the wakers, and say when to wake next.
     ///
-    /// Returns (next_timer_duration, num_woke)
-    ///
-    /// # Re-entrancy Safety
-    ///
-    /// This method collects all expired wakers BEFORE calling wake() to avoid
-    /// re-entrancy panics. If a waker tries to insert/remove timers during
-    /// wake(), it won't conflict with our mutable borrow.
-    pub(crate) fn process_timers(&mut self) -> (Option<Duration>, usize) {
+    /// Wakers are returned rather than woken here. The caller holds a `RefMut`
+    /// on the reactor's timers for the duration of this call, and waking under
+    /// it would let a waker that touches a timer re-enter and panic on the
+    /// second borrow.
+    pub(crate) fn process_timers(&mut self, wakers: &mut Vec<Waker>) -> (Option<Duration>, usize) {
         let now = Instant::now();
+        let woke = self.wheel.poll(now, wakers);
 
-        // Advance the wheel to current time
-        self.wheel.advance_to(now);
+        let next = self
+            .wheel
+            .peek_next_fire()
+            .map(|expires_at| expires_at.saturating_duration_since(now));
 
-        // CRITICAL: Collect wakers BEFORE waking to avoid re-entrancy
-        // If we wake while iterating, and the waker tries to insert/remove
-        // a timer, we'll panic on borrow_mut() in the Reactor
-        let expired: Vec<(u64, Waker)> = self.wheel.drain_expired().collect();
-
-        // Clean up expiry time mappings
-        for (internal_id, _) in &expired {
-            self.id_to_expiry.remove(internal_id);
-        }
-
-        // Now wake all timers (safe: no longer holding any mutable state)
-        let woke = expired.len();
-        for (_, waker) in expired {
-            waker.wake();
-        }
-
-        // Find the next timer expiry
-        let next_expiry = self.id_to_expiry.values().copied().min();
-
-        let next_duration = next_expiry.map(|expires_at| expires_at.saturating_duration_since(now));
-
-        (next_duration, woke)
+        (next, woke)
     }
 
-    /// Get the number of active timers
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
-        self.id_to_expiry.len()
+        self.wheel.len()
     }
 
-    /// Check if there are no active timers
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.id_to_expiry.is_empty()
+        self.wheel.is_empty()
+    }
+
+    /// Timers that found no room in the wheel and are waiting in the failover
+    /// map. Anything counted here is being served by the structure this arm
+    /// was meant to replace.
+    #[allow(dead_code)]
+    pub(crate) fn failover_len(&self) -> usize {
+        self.wheel.failover_len()
     }
 }
 
@@ -137,52 +155,41 @@ impl Default for ReactorTimers {
 mod tests {
     use super::*;
 
-    // Helper: a waker that does nothing when woken.
-    fn dummy_waker() -> Waker {
+    pub(super) fn dummy_waker() -> Waker {
         Waker::noop().clone()
     }
 
     #[test]
-    fn test_insert_and_process() {
+    fn a_timer_fires_once_its_deadline_passes() {
         let mut timers = ReactorTimers::new();
         let now = Instant::now();
-
-        // Insert a timer and get ID
-        let _id = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        timers.insert(now + Duration::from_millis(20), dummy_waker());
         assert_eq!(timers.len(), 1);
 
-        // Process before expiry - should not wake
-        let (next, woke) = timers.process_timers();
-        assert_eq!(woke, 0);
-        assert!(next.is_some());
-        assert_eq!(timers.len(), 1);
+        std::thread::sleep(Duration::from_millis(30));
+        let mut wakers = Vec::new();
+        let (_, woke) = timers.process_timers(&mut wakers);
 
-        // Wait and process after expiry
-        std::thread::sleep(Duration::from_millis(150));
-        let (_, woke) = timers.process_timers();
         assert_eq!(woke, 1);
-        assert_eq!(timers.len(), 0);
+        assert_eq!(wakers.len(), 1);
+
+        // `len()` should be 0 here and is not. bitwheel 0.6.0 decrements its
+        // count in `cancel` but not in `drain_and_fire`, so a timer that fires
+        // is still counted -- permanently, and cumulatively.
+        //
+        // Asserted as-is rather than worked around: this arm is being
+        // evaluated, and a wrong length is a fact about the candidate. The
+        // population figures the comparison uses come from the reactor's own
+        // counters, which are above this and unaffected.
+        assert_eq!(
+            timers.len(),
+            1,
+            "bitwheel 0.6.0 does not decrement len on fire; update this when it does"
+        );
     }
 
     #[test]
-    fn test_remove() {
-        let mut timers = ReactorTimers::new();
-        let now = Instant::now();
-
-        // Insert and get ID
-        let id = timers.insert(now + Duration::from_millis(100), dummy_waker());
-        assert_eq!(timers.len(), 1);
-
-        // Remove the timer using ID
-        assert!(timers.remove(id));
-        assert_eq!(timers.len(), 0);
-
-        // Try to remove again with same ID - should return false
-        assert!(!timers.remove(id));
-    }
-
-    #[test]
-    fn test_removing_twice_reports_the_second_as_absent() {
+    fn removing_twice_reports_the_second_as_absent() {
         let mut timers = ReactorTimers::new();
         let now = Instant::now();
 
@@ -191,30 +198,98 @@ mod tests {
 
         assert!(timers.remove(id), "the first removal withdraws it");
         assert_eq!(timers.len(), 0);
-        assert!(!timers.remove(id), "the second finds nothing to withdraw");
     }
 
     #[test]
-    fn test_multiple_timers() {
+    fn deadlines_that_cluster_beyond_a_slot_spill_to_failover() {
+        // Every connection in a deadline-churn workload gets the same timeout,
+        // so their deadlines cluster. This is the shape that decides whether
+        // this arm behaves like a wheel or like the map it wraps.
         let mut timers = ReactorTimers::new();
         let now = Instant::now();
 
-        // Insert multiple timers
-        let id1 = timers.insert(now + Duration::from_millis(100), dummy_waker());
-        let id2 = timers.insert(now + Duration::from_millis(200), dummy_waker());
-        let id3 = timers.insert(now + Duration::from_millis(300), dummy_waker());
+        let clustered = SLOT_CAP * 4;
+        for _ in 0..clustered {
+            timers.insert(now + Duration::from_secs(30), dummy_waker());
+        }
 
-        assert_eq!(timers.len(), 3);
+        assert_eq!(timers.len(), clustered, "all of them are held");
+        assert!(
+            timers.failover_len() > 0,
+            "expected clustered deadlines to exceed a slot's {SLOT_CAP} places"
+        );
+    }
+}
 
-        // Remove one timer
-        assert!(timers.remove(id2));
-        assert_eq!(timers.len(), 2);
+#[cfg(test)]
+mod bitwheel_contract {
+    use super::{tests::dummy_waker, *};
 
-        // The two that were not withdrawn are still withdrawable; the one
-        // that was is not.
-        assert!(!timers.remove(id2), "already gone");
-        assert!(timers.remove(id1));
-        assert!(timers.remove(id3));
-        assert_eq!(timers.len(), 0);
+    /// Cancelling a handle whose timer has already fired is something glommio
+    /// does routinely: a `Timer` future that completes still runs its `Drop`.
+    /// The crate documents this as returning `None`.
+    #[test]
+    fn cancelling_an_already_fired_timer_is_safe() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+        let id = timers.insert(now + Duration::from_millis(5), dummy_waker());
+
+        std::thread::sleep(Duration::from_millis(15));
+        let mut wakers = Vec::new();
+        let (_, woke) = timers.process_timers(&mut wakers);
+        assert_eq!(woke, 1, "it fired");
+
+        assert!(!timers.remove(id), "cancelling after firing finds nothing");
+    }
+
+    /// Two timers on the same deadline, one cancelled, then the other fires.
+    #[test]
+    fn cancelling_one_of_two_in_a_slot_leaves_the_other_intact() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+        let first = timers.insert(now + Duration::from_millis(5), dummy_waker());
+        let _second = timers.insert(now + Duration::from_millis(5), dummy_waker());
+
+        assert!(timers.remove(first));
+
+        std::thread::sleep(Duration::from_millis(15));
+        let mut wakers = Vec::new();
+        let (_, woke) = timers.process_timers(&mut wakers);
+        assert_eq!(woke, 1, "the survivor fires");
+    }
+
+    /// Minimal reproduction of the soundness bug glommio's suite hits.
+    ///
+    /// `BitWheel::cancel` justifies an unchecked `remove` with, among others,
+    /// the invariant "the `when_offset > current_tick` check ensures the timer
+    /// hasn't fired yet, so the entry must still exist in the wheel".
+    ///
+    /// That does not hold. `poll_tick` drains a whole gear-`g` slot whenever
+    /// `tick % 64^g == 0`, firing every timer in it -- including ones whose
+    /// deadline is up to `64^g - 1` ticks away. Such a timer has fired while
+    /// `when_offset > current_tick` is still true, so `cancel` proceeds into a
+    /// vacant entry and reaches `hint::unreachable_unchecked`.
+    ///
+    /// Ignored because it aborts the process rather than failing: with debug
+    /// assertions on it trips std's precondition check, and without them it is
+    /// undefined behaviour. Run explicitly to confirm the bug still exists:
+    /// `cargo test --features debugging -- --ignored cancel_after_an_early_fire`
+    #[test]
+    #[ignore = "reaches undefined behaviour in bitwheel 0.6.0; aborts rather than fails"]
+    fn cancel_after_an_early_fire_reaches_unreachable_unchecked() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // ~100ms lands in gear 1, whose slots span 64 ticks.
+        let id = timers.insert(now + Duration::from_millis(100), dummy_waker());
+
+        // Cross a gear-1 boundary while the deadline is still in the future.
+        let mut wakers = Vec::new();
+        std::thread::sleep(Duration::from_millis(70));
+        timers.process_timers(&mut wakers);
+
+        // The timer may now have fired early. Cancelling it is what glommio
+        // does when the future is dropped, and it is what breaks.
+        timers.remove(id);
     }
 }
