@@ -86,12 +86,16 @@ mod timers {
 
     pub(super) struct Timers {
         wheel: ReactorTimers,
+        #[cfg(feature = "debugging")]
+        stats: crate::timer::debugging::TimerStats,
     }
 
     impl Timers {
         pub(super) fn new() -> Timers {
             Timers {
                 wheel: ReactorTimers::new(),
+                #[cfg(feature = "debugging")]
+                stats: Default::default(),
             }
         }
 
@@ -99,12 +103,19 @@ mod timers {
         ///
         /// BREAKING CHANGE: Now returns TimerId instead of using external IDs
         pub(super) fn insert_with_handle(&mut self, when: Instant, waker: Waker) -> TimerId {
+            #[cfg(feature = "debugging")]
+            self.stats.record_insert();
             self.wheel.insert(when, waker)
         }
 
         /// Remove a timer by handle (O(1), no hashing!)
         pub(super) fn remove_by_handle(&mut self, handle: TimerId) -> bool {
-            self.wheel.remove(handle)
+            let removed = self.wheel.remove(handle);
+            #[cfg(feature = "debugging")]
+            if removed {
+                self.stats.record_cancel();
+            }
+            removed
         }
 
         /// Check if a timer exists by handle
@@ -115,7 +126,20 @@ mod timers {
         /// Return the duration until next event and the number of
         /// ready and woke timers.
         pub(super) fn process_timers(&mut self) -> (Option<Duration>, usize) {
-            self.wheel.process_timers()
+            let (next, woke) = self.wheel.process_timers();
+            #[cfg(feature = "debugging")]
+            self.stats.record_fired(woke);
+            (next, woke)
+        }
+
+        /// Snapshot of the population counters.
+        ///
+        /// These sit here rather than inside the wheel deliberately: the
+        /// numbers must mean the same thing whichever timer implementation is
+        /// underneath, or the implementations cannot be compared.
+        #[cfg(feature = "debugging")]
+        pub(super) fn stats(&self) -> crate::timer::debugging::TimerStats {
+            self.stats.clone()
         }
     }
 }
@@ -763,6 +787,12 @@ impl Reactor {
     pub(crate) fn remove_timer(&self, id: crate::timer::timer_id::TimerId) -> bool {
         let mut timers = self.timers.borrow_mut();
         timers.remove_by_handle(id)
+    }
+
+    /// Snapshot of this executor's timer population counters.
+    #[cfg(feature = "debugging")]
+    pub(crate) fn timer_stats(&self) -> crate::timer::debugging::TimerStats {
+        self.timers.borrow().stats()
     }
 
     /// Checks if a timer exists by TimerId.
