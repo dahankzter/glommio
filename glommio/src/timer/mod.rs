@@ -5,6 +5,7 @@
 //
 //! glommio::timer is a module that provides timing related primitives.
 mod interval;
+mod slab;
 mod timer_impl;
 
 #[cfg(feature = "debugging")]
