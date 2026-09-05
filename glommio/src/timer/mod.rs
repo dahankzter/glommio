@@ -5,17 +5,12 @@
 //
 //! glommio::timer is a module that provides timing related primitives.
 mod interval;
-mod slab;
+pub(crate) mod slab;
 mod timer_impl;
+mod timing_wheel;
 
 #[cfg(feature = "debugging")]
 pub mod debugging;
-
-pub mod timing_wheel;
-
-pub mod staged_wheel;
-
-pub mod timer_id;
 
 pub(crate) mod reactor_adapter;
 

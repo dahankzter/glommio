@@ -73,6 +73,17 @@ pub(crate) struct TimerId {
     generation: Generation,
 }
 
+impl TimerId {
+    /// The slab position this handle names.
+    ///
+    /// The wheel stores bare positions rather than whole handles: a slot holds
+    /// four bytes per timer instead of twelve, so cascading a slot moves four
+    /// times as many timers per cache line.
+    pub(crate) fn slot(self) -> SlotIndex {
+        self.slot
+    }
+}
+
 #[derive(Debug)]
 enum Slot<T> {
     Occupied {
@@ -186,6 +197,32 @@ impl<T> TimerSlab<T> {
         match self.slots.get_mut(id.slot.as_usize())? {
             Slot::Occupied { generation, value } if *generation == id.generation => Some(value),
             _ => None,
+        }
+    }
+
+    /// Every live value, in no particular order.
+    ///
+    /// Linear in the slab's high-water mark rather than in live entries, so
+    /// this is for whole-population questions, never for finding one timer.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().filter_map(|slot| match slot {
+            Slot::Occupied { value, .. } => Some(value),
+            Slot::Vacant { .. } => None,
+        })
+    }
+
+    /// Look up the handle for a slot whose generation is current.
+    ///
+    /// The wheel stores bare `SlotIndex` values, so this is how it recovers a
+    /// full handle when it needs one — on expiry, where the entry it is
+    /// looking at is live by construction.
+    pub(crate) fn id_at(&self, slot: SlotIndex) -> Option<TimerId> {
+        match self.slots.get(slot.as_usize())? {
+            Slot::Occupied { generation, .. } => Some(TimerId {
+                slot,
+                generation: *generation,
+            }),
+            Slot::Vacant { .. } => None,
         }
     }
 }

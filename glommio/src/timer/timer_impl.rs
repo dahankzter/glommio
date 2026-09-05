@@ -19,7 +19,7 @@ type Result<T> = crate::Result<T, ()>;
 #[derive(Debug)]
 struct Inner {
     /// Timer ID for O(1) cancellation (no HashMap lookup!)
-    id: Option<crate::timer::timer_id::TimerId>,
+    id: Option<crate::timer::slab::TimerId>,
     /// The waker handed to the reactor alongside `id`.
     ///
     /// The wheel mints a fresh id per insert, so re-registering does not
