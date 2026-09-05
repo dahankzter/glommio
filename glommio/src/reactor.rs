@@ -118,11 +118,6 @@ mod timers {
             removed
         }
 
-        /// Check if a timer exists by handle
-        pub(super) fn exists_by_handle(&self, handle: TimerId) -> bool {
-            self.wheel.exists(handle)
-        }
-
         /// Return the duration until next event and the number of
         /// ready and woke timers.
         pub(super) fn process_timers(
@@ -798,12 +793,6 @@ impl Reactor {
     #[cfg(feature = "debugging")]
     pub(crate) fn timer_stats(&self) -> crate::timer::debugging::TimerStats {
         self.timers.borrow().stats()
-    }
-
-    /// Checks if a timer exists by TimerId.
-    pub(crate) fn timer_exists(&self, id: crate::timer::slab::TimerId) -> bool {
-        let timers = self.timers.borrow();
-        timers.exists_by_handle(id)
     }
 
     /// Processes ready timers and extends the list of wakers to wake.

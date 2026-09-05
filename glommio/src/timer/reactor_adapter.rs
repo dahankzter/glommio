@@ -37,11 +37,6 @@ impl ReactorTimers {
         self.wheel.remove(id)
     }
 
-    /// Whether a handle still names a live timer.
-    pub(crate) fn exists(&self, id: TimerId) -> bool {
-        self.wheel.contains(id)
-    }
-
     /// Expire what is due, hand back the wakers, and say when to wake next.
     ///
     /// Wakers are returned rather than woken here. The caller holds a
@@ -78,5 +73,93 @@ impl ReactorTimers {
 impl Default for ReactorTimers {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: a waker that does nothing when woken.
+    fn dummy_waker() -> Waker {
+        Waker::noop().clone()
+    }
+
+    #[test]
+    fn test_insert_and_process() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert a timer and get ID
+        let _id = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        assert_eq!(timers.len(), 1);
+
+        // Process before expiry - should not wake
+        let mut wakers = Vec::new();
+        let (next, woke) = timers.process_timers(&mut wakers);
+        assert_eq!(woke, 0);
+        assert!(next.is_some());
+        assert_eq!(timers.len(), 1);
+
+        // Wait and process after expiry
+        std::thread::sleep(Duration::from_millis(150));
+        wakers.clear();
+        let (_, woke) = timers.process_timers(&mut wakers);
+        assert_eq!(woke, 1);
+        assert_eq!(timers.len(), 0);
+    }
+
+    #[test]
+    fn test_remove() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert and get ID
+        let id = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        assert_eq!(timers.len(), 1);
+
+        // Remove the timer using ID
+        assert!(timers.remove(id));
+        assert_eq!(timers.len(), 0);
+
+        // Try to remove again with same ID - should return false
+        assert!(!timers.remove(id));
+    }
+
+    #[test]
+    fn test_removing_twice_reports_the_second_as_absent() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        let id = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        assert_eq!(timers.len(), 1);
+
+        assert!(timers.remove(id), "the first removal withdraws it");
+        assert_eq!(timers.len(), 0);
+        assert!(!timers.remove(id), "the second finds nothing to withdraw");
+    }
+
+    #[test]
+    fn test_multiple_timers() {
+        let mut timers = ReactorTimers::new();
+        let now = Instant::now();
+
+        // Insert multiple timers
+        let id1 = timers.insert(now + Duration::from_millis(100), dummy_waker());
+        let id2 = timers.insert(now + Duration::from_millis(200), dummy_waker());
+        let id3 = timers.insert(now + Duration::from_millis(300), dummy_waker());
+
+        assert_eq!(timers.len(), 3);
+
+        // Remove one timer
+        assert!(timers.remove(id2));
+        assert_eq!(timers.len(), 2);
+
+        // The two that were not withdrawn are still withdrawable; the one
+        // that was is not.
+        assert!(!timers.remove(id2), "already gone");
+        assert!(timers.remove(id1));
+        assert!(timers.remove(id3));
+        assert_eq!(timers.len(), 0);
     }
 }
