@@ -154,7 +154,12 @@ impl<
         let delay = when_tick.saturating_sub(self.current_tick).max(1);
 
         let gear_idx = self.gear_for_delay(delay);
-        let target_slot = self.slot_for_tick(gear_idx, when_tick);
+        // PATCHED (glommio timer comparison): was `when_tick`. `delay` is
+        // clamped to at least one tick, but the slot was computed from the
+        // unclamped deadline, so a timer due inside the current tick landed in
+        // the *current* slot -- which compute_gear_min_fire skips. It was then
+        // invisible to duration_until_next for a whole gear revolution.
+        let target_slot = self.slot_for_tick(gear_idx, self.current_tick + delay);
         let Ok(guard) = self.gears[gear_idx].acquire_next_available(target_slot, MAX_PROBES) else {
             return Err(InsertError(timer));
         };

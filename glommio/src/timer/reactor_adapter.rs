@@ -306,3 +306,74 @@ mod bitwheel_contract {
         timers.remove(id);
     }
 }
+
+#[cfg(test)]
+mod next_fire_probe {
+    #![allow(unused_imports)]
+    use super::{tests::dummy_waker, *};
+
+    /// What does the wheel say is due next, with a population parked?
+    ///
+    /// The benchmark reports 40-60ms for a 100us sleep once anything is
+    /// waiting, on both of the crate's next-deadline accessors. This asks the
+    /// wheel directly, so the answer is not filtered through the reactor.
+    #[test]
+    fn what_is_due_next_with_a_population_parked() {
+        for parked in [0usize, 64, 4096] {
+            let mut timers = ReactorTimers::new();
+            let now = Instant::now();
+
+            for _ in 0..parked {
+                timers.insert(now + Duration::from_secs(3600), dummy_waker());
+            }
+            timers.insert(now + Duration::from_micros(100), dummy_waker());
+
+            let held = timers.len();
+            let (next, woke) = timers.process_timers(&mut Vec::new());
+            println!(
+                "parked={parked:<5} held={held:<5} failover={:<5} woke={woke} next={next:?}",
+                timers.failover_len(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sleep_shape_probe {
+    /// Is a slow sleep slow because the reactor waits too long, or because the
+    /// timer keeps re-arming? Counting registrations tells them apart: waiting
+    /// costs one, spinning costs many.
+    #[test]
+    fn one_short_sleep_with_a_population_parked() {
+        use crate::timer::debugging::timer_stats;
+        use futures_lite::future::poll_once;
+        use glommio_macros::test as _;
+        use std::time::{Duration, Instant};
+
+        let ex = crate::LocalExecutor::default();
+        ex.run(async {
+            for parked in [0usize, 64, 1024] {
+                let mut held: Vec<crate::timer::Timer> = (0..parked)
+                    .map(|_| crate::timer::Timer::new(Duration::from_secs(3600)))
+                    .collect();
+                for timer in held.iter_mut() {
+                    assert!(poll_once(timer).await.is_none());
+                }
+
+                let before = timer_stats();
+                let started = Instant::now();
+                crate::timer::sleep(Duration::from_micros(100)).await;
+                let elapsed = started.elapsed();
+                let after = timer_stats();
+
+                println!(
+                    "parked={parked:<5} elapsed={:>9.1}us armings={:<6} fired={}",
+                    elapsed.as_micros() as f64,
+                    after.inserted - before.inserted,
+                    after.fired - before.fired,
+                );
+                drop(held);
+            }
+        });
+    }
+}

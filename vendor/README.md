@@ -14,6 +14,11 @@ in the source and reported upstream as
   uses the crate's own `try_remove`.
 - `len` was decremented in `cancel` but not when a timer fired, so it
   over-reported permanently.
+- `insert` clamped `delay` to at least one tick but computed the target slot
+  from the unclamped deadline, so a timer due inside the current tick landed in
+  the current slot -- which `compute_gear_min_fire` skips. It stayed invisible
+  to `duration_until_next` for a whole gear revolution, making a 100us sleep
+  take 64ms. Measured 64,370us before the one-line fix and 1,128us after.
 
 Neither patch touches the structure being measured. If the arm is not adopted
 this directory goes away; if it is, the dependency comes from crates.io once
