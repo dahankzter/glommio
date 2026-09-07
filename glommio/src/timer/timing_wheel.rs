@@ -229,11 +229,6 @@ impl TimingWheel {
             .filter(|tick| *tick <= limit)
     }
 
-    /// Whether a handle still names a live timer.
-    pub(crate) fn contains(&self, id: TimerId) -> bool {
-        self.slab.get(id).is_some()
-    }
-
     /// Register a timer, returning a handle valid until it fires or is removed.
     pub(crate) fn insert(&mut self, expires_at: Instant, waker: Waker) -> TimerId {
         let id = self.slab.insert(TimerEntry {

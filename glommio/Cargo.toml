@@ -153,10 +153,6 @@ name    = "tcp"
 
 [[bench]]
 harness = false
-name    = "timer_benchmark"
-
-[[bench]]
-harness = false
 name    = "tokio_tcp"
 
 [[bench]]

@@ -175,13 +175,8 @@ pub(crate) struct Reactor {
     io_scheduler: Rc<IoScheduler>,
     record_io_latencies: bool,
 
-    /// Whether there are events in the latency ring.
-    ///
-    /// Acquired once during initialization: the ring is behind a `RefCell`, and
-    /// `need_preempt` runs on every scheduler iteration and every cooperative
-    /// yield point, so borrowing the queue to ask would cost far more than the
-    /// comparison does. `CompletionStatus` borrows nothing and answers in two
-    /// loads without entering the kernel.
+    /// Whether the latency ring has events waiting. Taken once at startup:
+    /// `need_preempt` runs constantly and must not borrow the ring to ask.
     preempt_status: CompletionStatus,
 }
 

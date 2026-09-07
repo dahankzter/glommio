@@ -200,17 +200,6 @@ impl<T> TimerSlab<T> {
         }
     }
 
-    /// Every live value, in no particular order.
-    ///
-    /// Linear in the slab's high-water mark rather than in live entries, so
-    /// this is for whole-population questions, never for finding one timer.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
-        self.slots.iter().filter_map(|slot| match slot {
-            Slot::Occupied { value, .. } => Some(value),
-            Slot::Vacant { .. } => None,
-        })
-    }
-
     /// Look up the handle for a slot whose generation is current.
     ///
     /// The wheel stores bare `SlotIndex` values, so this is how it recovers a
