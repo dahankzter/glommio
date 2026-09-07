@@ -33,8 +33,8 @@ cargo run --release --features debugging --example timer_bench   # costs
 ## What the workload actually is
 
 Before comparing structures, count what they hold. Only two sites register a
-timer with the reactor — `net/stream.rs` for socket timeouts and
-`timer_impl.rs` for `Timer`/`sleep` — glommio registers none of its own, and
+timer with the reactor, `net/stream.rs` for socket timeouts and
+`timer_impl.rs` for `Timer`/`sleep`, glommio registers none of its own, and
 socket timeouts are `None` unless an application asks for them.
 
 `timer_ladder`, connections with a read timeout doing request/response cycles
@@ -49,7 +49,7 @@ that complete well inside it:
 ```
 
 **Nothing fires.** Cancellation is the whole hot path, and the live count is
-exactly the connection count — one pending read per connection, not two. The
+exactly the connection count, one pending read per connection, not two. The
 100k figure #33 was argued from implies a 50,000-connection proxy.
 
 Scheduled work (`sleep`, `Interval`) is the mirror image, 100% fired, and is
@@ -83,7 +83,7 @@ arm B (bitwheel+3)        45–80        43–57       ~1,009 µs        0.1–0
 ```
 
 **The asymptotic argument did not survive.** Every arm is flat from 64 to 4,096
-timers. `log₂(4096)` is twice `log₂(64)` and the difference does not appear —
+timers. `log₂(4096)` is twice `log₂(64)` and the difference does not appear,
 the tree operations are swamped by allocation, waker clone and poll machinery.
 The wheel wins on constants, roughly 18ns per cancellation, not on complexity.
 
@@ -91,7 +91,7 @@ The wheel wins on constants, roughly 18ns per cancellation, not on complexity.
 the workload: 34ns against the control's 52.
 
 **Precision had to be fixed before the wheel was usable at all.** A wheel
-rounds deadlines to whole ticks, so a 100µs sleep took ~1ms — a floor under
+rounds deadlines to whole ticks, so a 100µs sleep took ~1ms, a floor under
 every short sleep, which is exactly the case a low-latency caller reaches for.
 Arm A now reports the real deadline from the earliest occupied slot rather than
 the tick boundary it was rounded up to, and expires by deadline rather than by
@@ -119,13 +119,13 @@ already, except the sixth.
 Three defects had to be patched before it could be measured at all, all
 reported upstream:
 
-- [#18](https://github.com/Abso1ut3Zer0/bitwheel/issues/18) — `cancel`
+- [#18](https://github.com/Abso1ut3Zer0/bitwheel/issues/18), `cancel`
   performs an unchecked removal justified by "a timer whose deadline is still
   in the future cannot have fired". `poll_tick` fires whole gear slots early,
   so that is false, and cancelling such a timer reaches
-  `hint::unreachable_unchecked` — undefined behaviour in release. glommio's
+  `hint::unreachable_unchecked`, undefined behaviour in release. glommio's
   suite hits it, because cancelling before the deadline is our common case.
-- [#19](https://github.com/Abso1ut3Zer0/bitwheel/issues/19) — `insert` clamps
+- [#19](https://github.com/Abso1ut3Zer0/bitwheel/issues/19), `insert` clamps
   the delay to at least one tick but computes the slot from the unclamped
   deadline, so a timer due inside the current tick lands in the slot the clamp
   was avoiding. `poll` fires it; `duration_until_next` cannot see it for a
@@ -137,7 +137,7 @@ this workload. Slots have a fixed compile-time capacity, and identical timeouts
 give identical deadlines, so a deadline-churn population above `SLOT_CAP` spills
 into the `BTreeMap` failover the wheel was meant to replace. And because it
 fires slots early by design, a timer can be woken before its deadline and be
-gone from the wheel, with no way to ask whether a registration still exists —
+gone from the wheel, with no way to ask whether a registration still exists,
 so every pending poll must re-arm unconditionally.
 
 Three `TimerActionRepeat` tests also fail on cadence: an action expected to run
@@ -152,7 +152,7 @@ are live on `master` today.
 The honest caveat: the win is a constant, not an asymptote, and roughly 18ns per
 cancellation against ~800 lines of wheel is a judgement call rather than a
 conclusion the measurement makes for you. If that trade is not wanted, the
-control is a complete implementation that also removes all four defects — by
+control is a complete implementation that also removes all four defects, by
 deleting the wheel.
 
 bitwheel is not viable here regardless of its speed: three patches to a crate
