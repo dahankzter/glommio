@@ -3,7 +3,6 @@
 //
 // This product includes software developed at Datadog (https://www.datadoghq.com/). Copyright 2020 Datadog, Inc.
 //
-use crate::uring_sys;
 use ahash::AHashMap;
 use log::debug;
 use nix::sys::socket::SockaddrLike;
@@ -466,15 +465,69 @@ pub struct StatxTimestamp {
     pub __statx_timestamp_pad1: [i32; 1],
 }
 
+/// Uninitialised storage for a peer address, filled in by `accept`.
+pub struct SockAddrStorage {
+    storage: std::mem::MaybeUninit<nix::sys::socket::sockaddr_storage>,
+    len: libc::socklen_t,
+}
+
+impl fmt::Debug for SockAddrStorage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SockAddrStorage")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl SockAddrStorage {
+    pub fn uninit() -> Self {
+        SockAddrStorage {
+            storage: std::mem::MaybeUninit::uninit(),
+            len: std::mem::size_of::<nix::sys::socket::sockaddr_storage>() as libc::socklen_t,
+        }
+    }
+
+    /// Address and length pointers for handing to the kernel. It writes both,
+    /// so they must stay valid until the completion is reaped -- which the
+    /// `Source` owning this storage is what guarantees.
+    pub(crate) fn as_raw_parts(&mut self) -> (*mut libc::sockaddr, *mut libc::socklen_t) {
+        (
+            self.storage.as_mut_ptr() as *mut libc::sockaddr,
+            &mut self.len as *mut libc::socklen_t,
+        )
+    }
+}
+
+/// The kernel's `struct __kernel_timespec`, laid out the same as
+/// `io_uring::types::Timespec` so the submission path can pass a pointer to
+/// one without copying it.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub(crate) struct KernelTimespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+// `io-uring` is a separate crate, so hold it to that layout here: a change
+// there would otherwise show up as a timeout of garbage duration.
+const _: () = {
+    assert!(
+        std::mem::size_of::<KernelTimespec>() == std::mem::size_of::<io_uring::types::Timespec>()
+    );
+    assert!(
+        std::mem::align_of::<KernelTimespec>() == std::mem::align_of::<io_uring::types::Timespec>()
+    );
+};
+
 #[derive(Clone, Copy)]
 pub(crate) struct TimeSpec64 {
-    raw: uring_sys::__kernel_timespec,
+    raw: KernelTimespec,
 }
 
 impl Default for TimeSpec64 {
     fn default() -> TimeSpec64 {
         TimeSpec64 {
-            raw: uring_sys::__kernel_timespec {
+            raw: KernelTimespec {
                 tv_sec: 0,
                 tv_nsec: 0,
             },
@@ -511,7 +564,7 @@ impl TryFrom<Duration> for TimeSpec64 {
     fn try_from(dur: Duration) -> Result<Self, Self::Error> {
         if let Ok(secs) = i64::try_from(dur.as_secs()) {
             Ok(TimeSpec64 {
-                raw: uring_sys::__kernel_timespec {
+                raw: KernelTimespec {
                     tv_sec: secs,
                     tv_nsec: dur.subsec_nanos() as libc::c_longlong,
                 },
@@ -524,7 +577,7 @@ impl TryFrom<Duration> for TimeSpec64 {
 
 impl TimeSpec64 {
     pub const MAX: TimeSpec64 = TimeSpec64 {
-        raw: uring_sys::__kernel_timespec {
+        raw: KernelTimespec {
             tv_sec: i64::MAX,
             tv_nsec: 999_999_999,
         },

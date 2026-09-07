@@ -1,3 +1,0 @@
-[submodule "glommio/liburing"]
-	path = glommio/liburing
-	url = git://git.kernel.dk/liburing
