@@ -109,6 +109,10 @@ name    = "echo"
 
 [[bench]]
 harness = false
+name    = "timer"
+
+[[bench]]
+harness = false
 name    = "executor"
 
 [[bench]]
@@ -151,10 +155,6 @@ name    = "spsc_queue"
 [[bench]]
 harness = false
 name    = "tcp"
-
-[[bench]]
-harness = false
-name    = "timer_benchmark"
 
 [[bench]]
 harness = false

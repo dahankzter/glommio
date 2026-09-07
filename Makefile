@@ -212,7 +212,7 @@ bench:
 
 bench-timer:
 	@echo "→ Running timer benchmarks on $(PLATFORM)..."
-	@$(call run_cargo,bench --bench timer_benchmark)
+	@$(call run_cargo,run --release --features debugging --example timer_bench)
 
 # Runs the timer benchmark against every arm of the timer comparison, in one
 # sitting on one machine. Checks out each arm branch and restores yours after,
@@ -228,7 +228,7 @@ bench-spawn:
 
 bench-ci:
 	@echo "→ Running benchmarks in CI mode (bencher format) on $(PLATFORM)..."
-	@$(call run_cargo,bench --bench timer_benchmark -- --output-format bencher)
+	@$(call run_cargo,bench --bench spawn_benchmark -- --output-format bencher)
 
 # =============================================================================
 # Miri - Undefined Behavior Detection

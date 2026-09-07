@@ -23,7 +23,7 @@ else
 fi
 
 OUT="${TIMER_ARMS_OUT:-target/timer-arms}"
-BENCH="timer_bench"
+BENCH="timer"
 
 if [[ -n "$(git status --porcelain)" ]]; then
     echo "working tree is dirty; commit or stash first" >&2
@@ -37,7 +37,7 @@ restore() {
 trap restore EXIT
 
 # The benchmark's own commit. Every arm must contain it.
-HARNESS="$(git rev-list -1 master -- "glommio/examples/${BENCH}.rs")"
+HARNESS="$(git rev-list -1 master -- "glommio/benches/${BENCH}.rs")"
 if [[ -z "${HARNESS}" ]]; then
     echo "master has no ${BENCH}; nothing to run" >&2
     exit 1
@@ -52,28 +52,37 @@ echo
 for arm in "${ARMS[@]}"; do
     branch="arm/${arm}"
 
-    if ! git rev-parse --verify --quiet "${branch}" >/dev/null; then
-        echo "${arm}: no such branch ${branch}, skipping" >&2
-        continue
+    # On a fresh clone the arms exist only as remote-tracking refs.
+    ref="${branch}"
+    if ! git rev-parse --verify --quiet "${ref}" >/dev/null; then
+        ref="origin/${branch}"
+        if ! git rev-parse --verify --quiet "${ref}" >/dev/null; then
+            echo "${arm}: no ${branch} locally or on origin, skipping" >&2
+            continue
+        fi
     fi
 
-    if ! git merge-base --is-ancestor "${HARNESS}" "${branch}"; then
+    if ! git merge-base --is-ancestor "${HARNESS}" "${ref}"; then
         echo "${arm}: does not contain the harness commit." >&2
         echo "        git checkout ${branch} && git merge master" >&2
         continue
     fi
 
-    git checkout --quiet "${branch}"
+    git checkout --quiet --detach "${ref}"
     commit="$(git rev-parse --short HEAD)"
 
-    if ! cargo build --release --features debugging --example "${BENCH}" >/dev/null 2>&1; then
+    if ! cargo build --benches >/dev/null 2>&1; then
         echo "${arm}: does not build, skipping" >&2
-        cargo build --release --features debugging --example "${BENCH}" 2>&1 | tail -20 >&2
+        cargo build --benches 2>&1 | tail -20 >&2
         continue
     fi
 
     echo "== ${arm} (${commit})"
-    ARM="${arm} ${commit}" "./target/release/examples/${BENCH}" | tee "${OUT}/${arm}.txt"
+    cargo bench --bench "${BENCH}" -- \
+        --warm-up-time "${TIMER_ARMS_WARMUP:-1}" \
+        --measurement-time "${TIMER_ARMS_TIME:-2}" \
+        --sample-size "${TIMER_ARMS_SAMPLES:-10}" 2>&1 |
+        grep -E "^timer/" | tee "${OUT}/${arm}.txt"
     echo
 done
 
