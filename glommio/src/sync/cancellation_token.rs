@@ -135,7 +135,7 @@ struct Node {
 #[derive(Debug, Default)]
 struct ForeignState {
     cancelled: AtomicBool,
-    wakers: Mutex<WakerList>,
+    wakers: Mutex<Registrations>,
 }
 
 impl ForeignState {
@@ -258,7 +258,7 @@ impl CancellationToken {
     pub fn foreign_child(&self) -> ForeignCancellation {
         let state = Arc::new(ForeignState {
             cancelled: AtomicBool::new(self.node.cancelled.get()),
-            wakers: Mutex::new(WakerList::new()),
+            wakers: Mutex::new(Registrations::default()),
         });
 
         if !state.is_cancelled() {
@@ -408,6 +408,7 @@ impl ForeignCancellation {
 
         let waiting = ForeignCancelled {
             state: self.state.clone(),
+            registration: None,
         };
         let to_cancel = token.clone();
 
@@ -430,6 +431,11 @@ impl ForeignCancellation {
 /// else here, because it is what the watching task parks on.
 struct ForeignCancelled {
     state: Arc<ForeignState>,
+    /// As in [`Cancelled`]: withdrawn on drop, so a poll that does not fire
+    /// leaves nothing behind. Reached far less often here, since this is
+    /// awaited once by the watching task rather than round a loop, but the
+    /// registration has the same shape and should not need a different rule.
+    registration: Option<usize>,
 }
 
 impl Future for ForeignCancelled {
@@ -440,16 +446,32 @@ impl Future for ForeignCancelled {
             return Poll::Ready(());
         }
 
-        let mut wakers = self.state.wakers.lock().unwrap();
+        let this = self.get_mut();
+        let mut wakers = this.state.wakers.lock().unwrap();
 
         // Re-checked under the lock: the origin may have cancelled between the
         // read above and here, in which case nobody is left to wake us.
-        if self.state.is_cancelled() {
+        if this.state.is_cancelled() {
             return Poll::Ready(());
         }
 
-        wakers.push(cx.waker().clone());
+        match this.registration {
+            Some(key) => wakers.refresh(key, cx.waker()),
+            None => this.registration = Some(wakers.register(cx.waker().clone())),
+        }
         Poll::Pending
+    }
+}
+
+impl Drop for ForeignCancelled {
+    fn drop(&mut self) {
+        // As in `Cancelled`: nothing to withdraw once cancelled, since the
+        // list was drained and no new registration can follow.
+        if let Some(key) = self.registration {
+            if !self.state.is_cancelled() {
+                self.state.wakers.lock().unwrap().withdraw(key);
+            }
+        }
     }
 }
 
@@ -790,5 +812,59 @@ mod registration {
 
             waiter.await;
         });
+    }
+}
+
+#[cfg(test)]
+mod foreign_registration {
+    use super::*;
+    use crate::LocalExecutor;
+    use futures_lite::future::poll_once;
+
+    /// Same rule as the local future, checked the same way. This one is
+    /// normally awaited once rather than in a loop, so the accumulation is
+    /// unlikely to bite, but the registration should not behave differently
+    /// depending on how hard it is to reach.
+    #[test]
+    fn polling_and_dropping_leaves_nothing_registered() {
+        LocalExecutor::default().run(async {
+            let token = CancellationToken::new();
+            let remote = token.foreign_child();
+            let state = remote.state.clone();
+
+            for _ in 0..100 {
+                let waiting = ForeignCancelled {
+                    state: state.clone(),
+                    registration: None,
+                };
+                assert!(poll_once(waiting).await.is_none());
+            }
+
+            assert_eq!(state.wakers.lock().unwrap().registered(), 0);
+            assert_eq!(
+                state.wakers.lock().unwrap().slots.len(),
+                1,
+                "one slot, taken and given back"
+            );
+        });
+    }
+
+    #[test]
+    fn a_foreign_waiter_is_still_woken() {
+        let token = CancellationToken::new();
+        let remote = token.foreign_child();
+
+        let worker = std::thread::spawn(move || {
+            LocalExecutor::default().run(async move {
+                remote.attach().cancelled().await;
+            })
+        });
+
+        LocalExecutor::default().run(async {
+            crate::timer::sleep(std::time::Duration::from_millis(20)).await;
+            token.cancel();
+        });
+
+        worker.join().expect("the far side was woken");
     }
 }
