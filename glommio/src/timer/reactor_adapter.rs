@@ -118,10 +118,10 @@ impl ReactorTimers {
         let now = Instant::now();
         let woke = self.wheel.poll(now, wakers);
 
-        let next = self
-            .wheel
-            .peek_next_fire()
-            .map(|expires_at| expires_at.saturating_duration_since(now));
+        // `duration_until_next` rather than `peek_next_fire`: the latter
+        // clamps to the next failover check, which is a whole
+        // FAILOVER_INTERVAL of ticks away.
+        let next = self.wheel.duration_until_next();
 
         (next, woke)
     }
@@ -173,19 +173,7 @@ mod tests {
         assert_eq!(woke, 1);
         assert_eq!(wakers.len(), 1);
 
-        // `len()` should be 0 here and is not. bitwheel 0.6.0 decrements its
-        // count in `cancel` but not in `drain_and_fire`, so a timer that fires
-        // is still counted -- permanently, and cumulatively.
-        //
-        // Asserted as-is rather than worked around: this arm is being
-        // evaluated, and a wrong length is a fact about the candidate. The
-        // population figures the comparison uses come from the reactor's own
-        // counters, which are above this and unaffected.
-        assert_eq!(
-            timers.len(),
-            1,
-            "bitwheel 0.6.0 does not decrement len on fire; update this when it does"
-        );
+        assert_eq!(timers.len(), 0, "and is no longer held");
     }
 
     #[test]
@@ -266,7 +254,6 @@ mod bitwheel_contract {
     /// slots span 64 ticks of 4ms; polling at 256ms crosses that slot boundary
     /// and fires the timer, 144ms before it was due.
     #[test]
-    #[ignore = "reaches undefined behaviour in bitwheel 0.6.0; aborts rather than fails"]
     fn the_same_holds_for_the_crates_own_preset() {
         use bitwheel::timer::Wheel;
 
@@ -299,13 +286,10 @@ mod bitwheel_contract {
     /// `when_offset > current_tick` is still true, so `cancel` proceeds into a
     /// vacant entry and reaches `hint::unreachable_unchecked`.
     ///
-    /// Ignored because it aborts the process rather than failing: with debug
-    /// assertions on it trips std's precondition check, and without them it is
-    /// undefined behaviour. Run explicitly to confirm the bug still exists:
-    /// `cargo test --features debugging -- --ignored cancel_after_an_early_fire`
+    /// Passes against the vendored copy, which routes `cancel` through the
+    /// crate's own `try_remove`. Against unpatched 0.6.0 it aborts.
     #[test]
-    #[ignore = "reaches undefined behaviour in bitwheel 0.6.0; aborts rather than fails"]
-    fn cancel_after_an_early_fire_reaches_unreachable_unchecked() {
+    fn cancel_after_an_early_fire_is_safe() {
         let mut timers = ReactorTimers::new();
         let now = Instant::now();
 

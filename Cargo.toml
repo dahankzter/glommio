@@ -1,3 +1,5 @@
 [workspace]
 members  = ["examples", "glommio", "glommio-macros"]
+# Vendored only for the timer comparison on arm/b-bitwheel; see vendor/README.md
+exclude  = ["vendor/bitwheel"]
 resolver = "2"

@@ -177,15 +177,19 @@ impl Future for Timer {
             inner.is_charged = false;
             Poll::Ready(inner.when)
         } else {
-            // A registration already routing to this task is still good, and
-            // re-registering would leave the previous one behind to fire and
-            // wake a task that has moved on.
-            let already_registered = match (&inner.id, &inner.registered_waker) {
-                (Some(_), Some(waker)) => waker.will_wake(cx.waker()),
-                _ => false,
-            };
-
-            if !already_registered {
+            // Always re-arm, unlike the other arms.
+            //
+            // bitwheel fires an entire gear slot when the tick divides its
+            // span, so a timer can be woken before its deadline and is gone
+            // from the wheel when it is. Keeping an existing registration on
+            // the grounds that it still wakes this task would keep one that no
+            // longer exists, and the future would never complete. There is no
+            // way to ask whether it still exists: cancelling is what consumes
+            // the handle.
+            //
+            // The extra withdraw-and-insert per spurious wake is a cost of
+            // this arm and is left in the measurement rather than hidden.
+            {
                 if let Some(stale) = inner.id.take() {
                     inner.reactor.upgrade().unwrap().remove_timer(stale);
                 }
