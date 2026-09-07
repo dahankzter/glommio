@@ -253,7 +253,13 @@ glommio/
   argument for a wheel does not appear at any population glommio actually holds,
   and a wheel puts a floor under short sleeps unless it reports the deadline it
   was asked for rather than the tick it rounded into.
-- Re-run it with `make timer-arms`.
+- Re-run it with `make timer-arms`, or
+  `TIMER_ARMS_WARMUP=3 TIMER_ARMS_TIME=10 TIMER_ARMS_SAMPLES=100 make timer-arms`
+  for numbers worth quoting.
+- **Benchmarks go in `benches/` and use criterion.** A hand-written timing loop
+  read a cold allocator here and buried the effect it was measuring under noise
+  of its own making, which is how this investigation reached the wrong answer
+  once already.
 - `bitwheel` was rejected. Two soundness and correctness bugs reported upstream
   ([#18](https://github.com/Abso1ut3Zer0/bitwheel/issues/18),
   [#19](https://github.com/Abso1ut3Zer0/bitwheel/issues/19)), and its fixed slot
