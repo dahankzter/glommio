@@ -296,7 +296,7 @@ impl RxBuf for Preallocated {
 
 #[derive(Debug)]
 struct Timeout {
-    handle: Cell<Option<crate::timer::timer_id::TimerId>>,
+    handle: Cell<Option<crate::timer::slab::TimerId>>,
     timeout: Cell<Option<Duration>>,
     timer: Cell<Option<Instant>>,
 }
