@@ -170,7 +170,14 @@ impl TimingWheel {
         // the earliest deadline and the answer is exact.
         let from = ((self.current_tick + 1) % LEVEL_0_SLOTS as u64) as usize;
         if let Some(offset) = self.masks[0].distance_to_next(from, LEVEL_0_SLOTS) {
-            return Some(self.tick_to_instant(self.current_tick + 1 + offset as u64));
+            // The slot names a tick, but the entries in it carry the deadline
+            // the caller actually asked for -- somewhere in the millisecond
+            // ending at that tick. Reporting the tick would round every sleep
+            // up to the wheel's resolution, which is the whole millisecond for
+            // a caller who asked for a hundred microseconds. The slot is
+            // small, so take the real minimum from it.
+            let slot = (from + offset) % LEVEL_0_SLOTS;
+            return self.earliest_in(&self.slots_1ms[slot]);
         }
 
         // Otherwise the next thing that must happen is a cascade. The
@@ -179,6 +186,15 @@ impl TimingWheel {
         self.next_cascade_tick()
             .map(|tick| self.tick_to_instant(tick))
             .or_else(|| self.overflow.keys().next().copied())
+    }
+
+    /// The earliest deadline among the entries a slot holds.
+    fn earliest_in(&self, slot: &[SlotIndex]) -> Option<Instant> {
+        slot.iter()
+            .filter_map(|index| self.slab.id_at(*index))
+            .filter_map(|id| self.slab.get(id))
+            .map(|entry| entry.expires_at)
+            .min()
     }
 
     fn tick_to_instant(&self, tick: u64) -> Instant {
@@ -271,7 +287,63 @@ impl TimingWheel {
             }
         }
 
+        self.expire_due_before(now);
         self.check_overflow();
+    }
+
+    /// Expire entries in the next slot whose real deadline has already passed.
+    ///
+    /// Deadlines round up to a whole tick so nothing fires early, which puts a
+    /// timer due at 1.7ms in tick 2 -- and the tick sweep alone would not
+    /// reach it until 2.0ms. `next_expiry` reports 1.7ms, so the reactor wakes
+    /// then, and this is what finds it. Without it the wheel's resolution
+    /// becomes a floor under every sleep.
+    fn expire_due_before(&mut self, now: Instant) {
+        let slot = ((self.current_tick + 1) % LEVEL_0_SLOTS as u64) as usize;
+
+        // Cheap check first: the slot is usually empty, and when it is not,
+        // usually nothing in it is due yet.
+        let any_due = self.slots_1ms[slot]
+            .iter()
+            .filter_map(|index| self.slab.id_at(*index))
+            .filter_map(|id| self.slab.get(id))
+            .any(|entry| entry.expires_at <= now);
+        if !any_due {
+            return;
+        }
+
+        let held = std::mem::take(&mut self.slots_1ms[slot]);
+        let mut retained = Vec::with_capacity(held.len());
+        for index in held {
+            let Some(id) = self.slab.id_at(index) else {
+                continue;
+            };
+            let due = self
+                .slab
+                .get(id)
+                .is_some_and(|entry| entry.expires_at <= now);
+
+            if due {
+                self.expired.push(index);
+                let at = WheelPos::Expired {
+                    index: self.expired.len() - 1,
+                };
+                self.record(id, at);
+            } else {
+                retained.push(index);
+                let at = WheelPos::Slot {
+                    level: 0,
+                    slot,
+                    index: retained.len() - 1,
+                };
+                self.record(id, at);
+            }
+        }
+
+        if retained.is_empty() {
+            self.masks[0].clear(slot);
+        }
+        self.slots_1ms[slot] = retained;
     }
 
     /// Take everything that has come due.
@@ -524,6 +596,35 @@ mod tests {
     // Helper: a waker that does nothing when woken.
     fn dummy_waker() -> Waker {
         Waker::noop().clone()
+    }
+
+    #[test]
+    fn a_sub_tick_deadline_is_reported_and_expired_at_its_real_time() {
+        // The wheel's resolution must not become a floor under every sleep.
+        // A caller asking for 300us gets 300us, not the millisecond the tick
+        // it landed in ends at.
+        let start = Instant::now();
+        let mut wheel = TimingWheel::new_at(start);
+        wheel.insert(start + Duration::from_micros(300), dummy_waker());
+
+        assert_eq!(
+            wheel.next_expiry(),
+            Some(start + Duration::from_micros(300)),
+            "reported the tick boundary instead of the deadline asked for"
+        );
+
+        wheel.advance_to(start + Duration::from_micros(300));
+        assert_eq!(wheel.drain_expired().count(), 1, "due at 300us");
+    }
+
+    #[test]
+    fn a_sub_tick_deadline_still_does_not_expire_early() {
+        let start = Instant::now();
+        let mut wheel = TimingWheel::new_at(start);
+        wheel.insert(start + Duration::from_micros(300), dummy_waker());
+
+        wheel.advance_to(start + Duration::from_micros(299));
+        assert_eq!(wheel.drain_expired().count(), 0, "not due at 299us");
     }
 
     #[test]
