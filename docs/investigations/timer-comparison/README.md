@@ -23,11 +23,17 @@ runs the benchmark and puts your branch back; results land in
 `target/timer-arms/`. An arm that does not contain the benchmark's own commit
 is refused rather than measured.
 
+The run is quick by default. For numbers worth quoting, give criterion longer:
+
+```bash
+TIMER_ARMS_WARMUP=3 TIMER_ARMS_TIME=10 TIMER_ARMS_SAMPLES=100 make timer-arms
+```
+
 The two programs behind it, runnable on any branch:
 
 ```bash
 cargo run --release --features debugging --example timer_ladder  # populations
-cargo run --release --features debugging --example timer_bench   # costs
+cargo bench --bench timer                                        # costs
 ```
 
 ## What the workload actually is
@@ -75,28 +81,38 @@ a hash lookup the candidates never pay.
 
 ## Results
 
-```
-                       arm ns/op   cancel ns/op   100µs sleep   idle overshoot
-control (BTreeMap)        69–74        51–55         ~105 µs        0.1–0.6 ms
-arm A (slab wheel)        55–75        34–40         ~105 µs        0.1–0.5 ms
-arm B (bitwheel+3)        45–80        43–57       ~1,009 µs        0.1–0.4 ms
-```
+`cargo bench --bench timer`, 64 cores, nanoseconds per operation:
 
-**The asymptotic argument did not survive.** Every arm is flat from 64 to 4,096
-timers. `log₂(4096)` is twice `log₂(64)` and the difference does not appear,
-the tree operations are swamped by allocation, waker clone and poll machinery.
-The wheel wins on constants, roughly 18ns per cancellation, not on complexity.
+| | arm/64 | arm/4096 | cancel/64 | cancel/4096 | sleep 100us |
+|---|---|---|---|---|---|
+| control, `BTreeMap` | 45.1 | 56.0 | 41.6 | 49.6 | 105 us |
+| arm A, slab wheel | 44.1 | 43.1 | 24.1 | 26.1 | 105 us |
+| arm B, `bitwheel` | 40.1 | 67.2 | 23.1 | 49.5 | 1007 us |
 
-**Cancellation is where it shows**, and the ladder says cancellation is 100% of
-the workload: 34ns against the control's 52.
+**The complexity class is visible, and an earlier version of this document said
+it was not.** That claim came from a hand-written timing loop, and it was
+wrong: the loop measured a cold allocator, reported 55 to 75ns for arming where
+a warmed measurement says 43, and buried a real effect under noise of its own
+making. Review upstream asked for criterion rather than a hand-rolled harness
+and was right in a way that changed the answer, not the presentation.
+
+Warmed up, with non-overlapping intervals:
+
+- the ordered map **grows** with population: arm 45.1 to 56.0ns, cancel 41.6 to
+  49.6ns
+- the slab wheel is **flat**: 43ns arm and 26ns cancel at every count measured
+- at 4096 the wheel is 47% faster on cancellation, which step 1 measured as
+  100% of the workload, and the gap widens with population
 
 **Precision had to be fixed before the wheel was usable at all.** A wheel
-rounds deadlines to whole ticks, so a 100µs sleep took ~1ms, a floor under
+rounds deadlines to whole ticks, so a 100us sleep took ~1ms, a floor under
 every short sleep, which is exactly the case a low-latency caller reaches for.
-Arm A now reports the real deadline from the earliest occupied slot rather than
-the tick boundary it was rounded up to, and expires by deadline rather than by
-tick, so it matches the ordered map at 105µs. **This is still unfixed on fork
-`master`.**
+Arm A reports the real deadline from the earliest occupied slot rather than the
+tick it was rounded into, and expires by deadline rather than by tick, so it
+matches the ordered map at 105us. `bitwheel` still has that floor.
+
+**Neither the incumbent nor the slab wheel contains any `unsafe`.** The
+vendored `bitwheel` has 166 lines of it in `timer/slot.rs` alone.
 
 ## What the defects were
 
@@ -145,16 +161,30 @@ eleven times in a window runs five.
 
 ## Verdict
 
-Arm A. It matches the ordered map on precision, beats it by about a third on
-the one operation the workload actually performs, and removes four defects that
-are live on `master` today.
+Arm A, on the stated order of safety before performance.
 
-The honest caveat: the win is a constant, not an asymptote, and roughly 18ns per
-cancellation against ~800 lines of wheel is a judgement call rather than a
-conclusion the measurement makes for you. If that trade is not wanted, the
-control is a complete implementation that also removes all four defects, by
-deleting the wheel.
+**`bitwheel` fails the first test before the second is reached.** It reached
+`hint::unreachable_unchecked` from safe API composition, on the pattern glommio
+uses most: cancelling a timer before its deadline. It runs here only as a
+vendored copy with three patches, both reported issues are unanswered, and the
+crate has not been touched since 2025-12-18. Adopting it means depending on
+known-unfixed undefined behaviour or maintaining a fork of someone else's crate,
+and its `unsafe` is in a dependency, so it is `unsafe` we cannot Miri. It also
+lost on performance once measured properly.
 
-bitwheel is not viable here regardless of its speed: three patches to a crate
-last published 2025-12-18, a capacity model that degrades into a `BTreeMap` on
-precisely this workload, and unsafe code we cannot Miri.
+**Between the ordered map and the slab wheel, safety is a genuine tie**: both
+are zero `unsafe`. Not identical, though. The map has shipped for years; the
+wheel is ~800 new lines with invariants that have to hold, back-patched
+positions on `swap_remove`, bitmap maintenance at four sites, generations
+surviving vacancy. Those failures would be logic bugs rather than undefined
+behaviour, and each is covered by a test that fails when the guard is reverted,
+but new code is a real risk that "safe" does not cancel.
+
+Performance breaks the tie: 47% on the operation that is the entire workload,
+and flat where the incumbent grows.
+
+**The condition, still unmet.** Case 5, the end-to-end socket workload, has not
+been run. 24ns per cancellation is real but small beside what a connection
+costs. If timers are a rounding error there, then 800 lines we own is the wrong
+trade against zero lines we do not, and the ordered map should stay. Run case 5
+before treating this as settled.

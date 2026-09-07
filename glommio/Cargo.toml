@@ -109,6 +109,10 @@ name    = "echo"
 
 [[bench]]
 harness = false
+name    = "spawn"
+
+[[bench]]
+harness = false
 name    = "timer"
 
 [[bench]]
