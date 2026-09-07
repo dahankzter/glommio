@@ -52,18 +52,23 @@ echo
 for arm in "${ARMS[@]}"; do
     branch="arm/${arm}"
 
-    if ! git rev-parse --verify --quiet "${branch}" >/dev/null; then
-        echo "${arm}: no such branch ${branch}, skipping" >&2
-        continue
+    # On a fresh clone the arms exist only as remote-tracking refs.
+    ref="${branch}"
+    if ! git rev-parse --verify --quiet "${ref}" >/dev/null; then
+        ref="origin/${branch}"
+        if ! git rev-parse --verify --quiet "${ref}" >/dev/null; then
+            echo "${arm}: no ${branch} locally or on origin, skipping" >&2
+            continue
+        fi
     fi
 
-    if ! git merge-base --is-ancestor "${HARNESS}" "${branch}"; then
+    if ! git merge-base --is-ancestor "${HARNESS}" "${ref}"; then
         echo "${arm}: does not contain the harness commit." >&2
         echo "        git checkout ${branch} && git merge master" >&2
         continue
     fi
 
-    git checkout --quiet "${branch}"
+    git checkout --quiet --detach "${ref}"
     commit="$(git rev-parse --short HEAD)"
 
     if ! cargo build --release --features debugging --example "${BENCH}" >/dev/null 2>&1; then
