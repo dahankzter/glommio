@@ -7,7 +7,7 @@ sudo -E \
     PATH="${PATH}:/usr/share/rust/.cargo/bin" \
     TEST_TARGET="${target}" \
     bash -c '
-        set -uo pipefail
+        set -euo pipefail
 
         ulimit -Sl 512
         ulimit -Hl 512
@@ -28,8 +28,8 @@ sudo -E \
         fi
 
         echo cargo "${args[@]}"
-        cargo "${args[@]}"
-        nextest_status=$?
+        nextest_status=0
+        cargo "${args[@]}" || nextest_status=$?
 
         # nextest cannot run doc tests, so they need a separate cargo test
         # invocation or they do not run at all. Only on the host target: a
@@ -38,8 +38,7 @@ sudo -E \
         doc_status=0
         if [[ -z "${TEST_TARGET}" ]]; then
             echo cargo test --doc --locked
-            cargo test --doc --locked
-            doc_status=$?
+            cargo test --doc --locked || doc_status=$?
         else
             echo "skipping doc tests: they run on the host target only"
         fi
