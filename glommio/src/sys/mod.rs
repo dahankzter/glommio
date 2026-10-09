@@ -262,6 +262,8 @@ pub(crate) struct SleepNotifier {
     id: usize,
     eventfd: std::fs::File,
     should_notify: AtomicBool,
+    /// Accepted notifications that have not yet had a draining pass.
+    foreign_pending: AtomicBool,
     foreign_wakes: crossbeam::channel::Receiver<Waker>,
     waker_sender: crossbeam::channel::Sender<Waker>,
     foreign_wakes_closed: AtomicBool,
@@ -297,6 +299,7 @@ impl SleepNotifier {
             eventfd,
             id,
             should_notify: AtomicBool::new(false),
+            foreign_pending: AtomicBool::new(false),
             waker_sender,
             foreign_wakes,
             foreign_wakes_closed: AtomicBool::new(false),
@@ -338,6 +341,7 @@ impl SleepNotifier {
             return;
         }
         let result = self.waker_sender.send(waker);
+        let first = !self.foreign_pending.swap(true, Ordering::AcqRel);
         drop(guard);
 
         if result.is_err() {
@@ -350,7 +354,7 @@ impl SleepNotifier {
         #[cfg(test)]
         test_support::after_foreign_wake_queued();
 
-        self.notify(force_notify);
+        self.notify(force_notify && first);
     }
 
     /// Whether a foreign waker can still be handed to the owning executor.
@@ -370,6 +374,10 @@ impl SleepNotifier {
     }
 
     pub(crate) fn process_foreign_wakes(&self) -> usize {
+        if !self.foreign_pending.load(Ordering::Acquire) {
+            return 0;
+        }
+        self.foreign_pending.store(false, Ordering::Release);
         let mut processed = 0;
         while let Ok(waker) = self.foreign_wakes.try_recv() {
             processed += 1;
@@ -706,3 +714,6 @@ pub(crate) fn shutdown(raw: RawFd, how: Shutdown) -> io::Result<()> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod foreign_wake_tests;
