@@ -56,6 +56,16 @@ fn forced_notifications_coalesce_until_the_next_drain() {
 }
 
 #[test]
+fn forced_notification_after_an_ordinary_wake_writes_the_eventfd() {
+    let notifier = new_sleep_notifier().unwrap();
+    let waker = Waker::from(Arc::new(Count::default()));
+    notifier.queue_waker(waker.clone(), false);
+    notifier.queue_waker(waker, true);
+    assert_eq!(notification_count(notifier.eventfd_fd()), 1);
+    assert_eq!(notifier.process_foreign_wakes(), 2);
+}
+
+#[test]
 fn sleeping_owner_is_notified_for_a_non_forced_batch() {
     let notifier = new_sleep_notifier().unwrap();
     let count = Arc::new(Count::default());
