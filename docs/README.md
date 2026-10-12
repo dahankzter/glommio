@@ -53,6 +53,14 @@ Investigation of confusing `spawn_local()` API that panics even when called on a
 **Fix:** `LocalExecutor::spawn()` is now public. Additive — thread safety still
 comes from `!Send`, and no existing API changed.
 
+### [Model Checking the SleepNotifier Wake Protocol](./investigations/loom-sleep-notifier/)
+**Status:** Design, not started
+
+loom tests for the cross-thread wake protocol, judged by mutations of the real
+code. Phase 1 trusts crossbeam and targets interleaving bugs like #89's; phase 2
+swaps in a loom-visible queue to settle a memory ordering question about
+`should_notify`.
+
 ### [Task Arena Allocator - Post-Mortem](./investigations/task-arena/)
 **Status:** Tried, measured, reverted
 **Outcome:** No arena — recommend mimalloc instead
