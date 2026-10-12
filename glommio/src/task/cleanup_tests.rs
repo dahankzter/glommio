@@ -717,6 +717,14 @@ fn idle_handle_drop_preserves_executor_context() {
     allocation.assert_freed();
 }
 
+/// The latency an executor's I/O requirements ask for, in a comparable form.
+fn requested_latency(requirements: crate::IoRequirements) -> Option<Duration> {
+    match requirements.latency_req {
+        crate::Latency::Matters(latency) => Some(latency),
+        crate::Latency::NotImportant => None,
+    }
+}
+
 /// Synchronous cleanup must restore the executor and queue that it interrupted.
 #[test]
 fn idle_handle_cleanup_restores_other_executor_context() {
@@ -769,13 +777,13 @@ fn idle_handle_cleanup_restores_other_executor_context() {
         assert_eq!(crate::executor::executor_id(), Some(other.id()));
         assert_eq!(ex.current_task_queue(), queue);
         assert_eq!(
-            ex.reactor().io_requirements()._io_handle,
-            requirements._io_handle
+            requested_latency(ex.reactor().io_requirements()),
+            requested_latency(requirements)
         );
     });
     assert_eq!(
-        owner_reactor.io_requirements()._io_handle,
-        owner_requirements._io_handle,
+        requested_latency(owner_reactor.io_requirements()),
+        requested_latency(owner_requirements),
         "cleanup did not restore its owner's I/O requirements",
     );
     assert_eq!(crate::executor::executor_id(), None);
