@@ -25,5 +25,6 @@ mod gate;
 mod once_cell;
 mod rwlock;
 mod semaphore;
+mod waiter_queue;
 
 pub use self::{gate::*, once_cell::*, rwlock::*, semaphore::*};

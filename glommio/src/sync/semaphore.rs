@@ -3,161 +3,39 @@
 //!
 //! This product includes software developed at [Datadog](https://www.datadoghq.com/). Copyright 2020 Datadog, Inc.
 //!
+use super::waiter_queue::{WaiterKey, WaiterQueue};
 use crate::error::{GlommioError, ResourceType};
 use std::{
     cell::RefCell,
     future::Future,
     pin::Pin,
-    task::{Context, Poll, Waker},
+    rc::Rc,
+    task::{Context, Poll},
 };
-
-use intrusive_collections::{
-    container_of, linked_list::LinkOps, offset_of, Adapter, LinkedList, LinkedListLink, PointerOps,
-};
-use std::{marker::PhantomPinned, ptr::NonNull, rc::Rc};
 
 type Result<T> = crate::error::Result<T, ()>;
 
 #[derive(Debug)]
 struct Waiter<'a> {
-    node: WaiterNode,
-    semaphore: &'a Semaphore,
-}
-
-#[derive(Debug)]
-struct WaiterNode {
-    link: LinkedListLink,
     units: u64,
-    waker: RefCell<Option<Waker>>,
-
-    // Waiter node can not be `Unpin` so its pointer could be used inside intrusive
-    // collections, it also can not outlive the container which is guaranteed by the
-    // Waiter lifetime bound to the Semaphore which is container of all Waiters.
-    _p: PhantomPinned,
-}
-
-struct WaiterPointerOps;
-
-unsafe impl PointerOps for WaiterPointerOps {
-    type Value = WaiterNode;
-    type Pointer = NonNull<WaiterNode>;
-
-    unsafe fn from_raw(&self, value: *const Self::Value) -> Self::Pointer {
-        NonNull::new(value as *mut Self::Value).expect("Passed in Pointer can not be null")
-    }
-
-    fn into_raw(&self, ptr: Self::Pointer) -> *const Self::Value {
-        ptr.as_ptr() as *const Self::Value
-    }
-}
-
-struct WaiterAdapter {
-    pointers_ops: WaiterPointerOps,
-    link_ops: LinkOps,
-}
-
-impl WaiterAdapter {
-    fn new() -> Self {
-        WaiterAdapter {
-            pointers_ops: WaiterPointerOps,
-            link_ops: LinkOps,
-        }
-    }
-}
-
-unsafe impl Adapter for WaiterAdapter {
-    type LinkOps = LinkOps;
-    type PointerOps = WaiterPointerOps;
-
-    unsafe fn get_value(
-        &self,
-        link: <Self::LinkOps as intrusive_collections::LinkOps>::LinkPtr,
-    ) -> *const <Self::PointerOps as PointerOps>::Value {
-        container_of!(link.as_ptr(), WaiterNode, link)
-    }
-
-    unsafe fn get_link(
-        &self,
-        value: *const <Self::PointerOps as PointerOps>::Value,
-    ) -> <Self::LinkOps as intrusive_collections::LinkOps>::LinkPtr {
-        if value.is_null() {
-            panic!("Passed in pointer to the value can not be null");
-        }
-
-        let ptr = (value as *const u8).add(offset_of!(WaiterNode, link));
-        // We call unchecked method because of safety check above
-        core::ptr::NonNull::new_unchecked(ptr as *mut _)
-    }
-
-    fn link_ops(&self) -> &Self::LinkOps {
-        &self.link_ops
-    }
-
-    fn link_ops_mut(&mut self) -> &mut Self::LinkOps {
-        &mut self.link_ops
-    }
-
-    fn pointer_ops(&self) -> &Self::PointerOps {
-        &self.pointers_ops
-    }
+    key: Option<WaiterKey>,
+    semaphore: &'a Semaphore,
 }
 
 impl<'a> Waiter<'a> {
     fn new(units: u64, semaphore: &'a Semaphore) -> Waiter<'a> {
         Waiter {
-            node: WaiterNode {
-                link: LinkedListLink::new(),
-                units,
-                waker: RefCell::new(None),
-                _p: PhantomPinned,
-            },
+            units,
+            key: None,
             semaphore,
         }
-    }
-
-    fn remove_from_waiting_queue(
-        waiter_node: Pin<&mut WaiterNode>,
-        sem_state: &mut SemaphoreState,
-    ) {
-        if waiter_node.link.is_linked() {
-            let mut cursor = unsafe {
-                sem_state
-                    .waiters_list
-                    .cursor_mut_from_ptr(Pin::into_inner_unchecked(waiter_node) as *const _)
-            };
-
-            if cursor.remove().is_none() {
-                panic!("Waiter has to be linked into the list of waiting futures");
-            }
-        }
-    }
-
-    fn register_in_waiting_queue(
-        waiter_node: Pin<&mut WaiterNode>,
-        sem_state: &mut SemaphoreState,
-        waker: Waker,
-    ) {
-        *waiter_node.waker.borrow_mut() = Some(waker);
-
-        if waiter_node.link.is_linked() {
-            return;
-        }
-
-        sem_state.waiters_list.push_back(unsafe {
-            // It is safe to use unchecked call here because we convert passed in reference
-            // which can not be null
-            NonNull::new_unchecked(Pin::into_inner_unchecked(waiter_node) as *mut _)
-        });
     }
 }
 
 impl Drop for Waiter<'_> {
     fn drop(&mut self) {
-        if self.node.link.is_linked() {
-            // If node is linked that is for sure is pinned so that is safe
-            // to make it pinned directly
-            let waiter_node = unsafe { Pin::new_unchecked(&mut self.node) };
-            Self::remove_from_waiting_queue(waiter_node, &mut self.semaphore.state.borrow_mut())
+        if let Some(key) = self.key.take() {
+            self.semaphore.state.borrow_mut().waiters.remove(key);
         }
     }
 }
@@ -166,23 +44,29 @@ impl Future for Waiter<'_> {
     type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut sem_state = self.semaphore.state.borrow_mut();
-        let future_mut = unsafe { self.get_unchecked_mut() };
+        let this = self.get_mut();
+        let mut sem_state = this.semaphore.state.borrow_mut();
 
-        let waiter_node = unsafe { Pin::new_unchecked(&mut future_mut.node) };
-
-        let units = waiter_node.units;
-        match sem_state.try_acquire(units) {
+        match sem_state.try_acquire(this.units) {
             Err(x) => {
-                Self::remove_from_waiting_queue(waiter_node, &mut sem_state);
+                if let Some(key) = this.key.take() {
+                    sem_state.waiters.remove(key);
+                }
                 Poll::Ready(Err(x))
             }
             Ok(true) => {
-                Self::remove_from_waiting_queue(waiter_node, &mut sem_state);
+                if let Some(key) = this.key.take() {
+                    sem_state.waiters.remove(key);
+                }
                 Poll::Ready(Ok(()))
             }
             Ok(false) => {
-                Self::register_in_waiting_queue(waiter_node, &mut sem_state, cx.waker().clone());
+                let queued = this
+                    .key
+                    .is_some_and(|key| sem_state.waiters.set_waker(key, cx.waker().clone()));
+                if !queued {
+                    this.key = Some(sem_state.waiters.push_back(this.units, cx.waker().clone()));
+                }
                 Poll::Pending
             }
         }
@@ -193,7 +77,7 @@ impl Future for Waiter<'_> {
 struct SemaphoreState {
     avail: u64,
     closed: bool,
-    waiters_list: LinkedList<WaiterAdapter>,
+    waiters: WaiterQueue<u64>,
 }
 
 impl SemaphoreState {
@@ -201,7 +85,7 @@ impl SemaphoreState {
         SemaphoreState {
             avail,
             closed: false,
-            waiters_list: LinkedList::new(WaiterAdapter::new()),
+            waiters: WaiterQueue::default(),
         }
     }
 
@@ -227,17 +111,14 @@ impl SemaphoreState {
     fn close(&mut self) {
         self.closed = true;
 
-        let mut cursor = self.waiters_list.front_mut();
-        while !cursor.is_null() {
-            let node = cursor.remove().unwrap();
-
-            let node = unsafe { Pin::new_unchecked(&*node.as_ptr()) };
-            let waker = node.waker.borrow_mut().take();
-            if let Some(waker) = waker {
-                waker.wake();
-            } else {
-                panic!("Future is linked into the waiting list without a waker");
-            }
+        while let Some(key) = self.waiters.front() {
+            let (_, waker) = self
+                .waiters
+                .remove(key)
+                .expect("front names a queued waiter");
+            waker
+                .expect("Future is linked into the waiting list without a waker")
+                .wake();
         }
     }
 
@@ -303,35 +184,26 @@ fn process_wakes(sem: &Semaphore, units: u64) {
     state.signal(units);
 
     let mut available_units = state.avail;
+    let mut cursor = state.waiters.front();
 
-    let mut cursor = state.waiters_list.front_mut();
-
-    //only tasks which will be able to proceed will be awaken
     while available_units > 0 {
-        let mut waker = None;
-        if let Some(node) = cursor.get() {
-            let node = unsafe { Pin::new_unchecked(node) };
-
-            if node.units <= available_units {
-                let w = node.waker.borrow_mut().take();
-
-                if w.is_some() {
-                    waker = w;
-                } else {
-                    panic!("Future was linked into the waiting list without a waker");
-                }
-
-                available_units -= node.units;
-            }
-        } else {
+        let Some(key) = cursor else {
             break;
-        }
-
-        if let Some(waker) = waker {
-            waker.wake();
-            cursor.remove();
-        } else {
-            cursor.move_next();
+        };
+        cursor = state.waiters.next(key);
+        let units = *state
+            .waiters
+            .get(key)
+            .expect("cursor names a queued waiter");
+        if units <= available_units {
+            let (_, waker) = state
+                .waiters
+                .remove(key)
+                .expect("cursor names a queued waiter");
+            waker
+                .expect("Future was linked into the waiting list without a waker")
+                .wake();
+            available_units -= units;
         }
     }
 }
@@ -472,7 +344,7 @@ impl Semaphore {
             let mut state = self.state.borrow_mut();
             // Try acquiring first without paying the price to construct a waker.
             // If that fails then we construct a waker and wait on it.
-            if state.waiters_list.is_empty() && state.try_acquire(units)? {
+            if state.waiters.is_empty() && state.try_acquire(units)? {
                 return Ok(());
             }
             Waiter::new(units, self)
@@ -517,7 +389,7 @@ impl Semaphore {
     pub fn try_acquire(&self, units: u64) -> Result<bool> {
         let mut state = self.state.borrow_mut();
 
-        if state.waiters_list.is_empty() && state.try_acquire(units)? {
+        if state.waiters.is_empty() && state.try_acquire(units)? {
             return Ok(true);
         }
 
@@ -565,7 +437,7 @@ impl Semaphore {
     pub fn try_acquire_permit(&self, units: u64) -> Result<Permit<'_>> {
         let mut state = self.state.borrow_mut();
 
-        if state.waiters_list.is_empty() && state.try_acquire(units)? {
+        if state.waiters.is_empty() && state.try_acquire(units)? {
             return Ok(Permit::new(units, self));
         }
         Err(GlommioError::WouldBlock(ResourceType::Semaphore {
@@ -617,7 +489,7 @@ impl Semaphore {
     pub fn try_acquire_static_permit(self: &Rc<Self>, units: u64) -> Result<StaticPermit> {
         let mut state = self.state.borrow_mut();
 
-        if state.waiters_list.is_empty() && state.try_acquire(units)? {
+        if state.waiters.is_empty() && state.try_acquire(units)? {
             return Ok(StaticPermit::new(units, self.clone()));
         }
         Err(GlommioError::WouldBlock(ResourceType::Semaphore {
@@ -679,7 +551,7 @@ impl Semaphore {
 
 impl Drop for Semaphore {
     fn drop(&mut self) {
-        assert!(self.state.borrow().waiters_list.is_empty());
+        assert!(self.state.borrow().waiters.is_empty());
     }
 }
 
@@ -934,12 +806,7 @@ mod test {
                     Timer::new(Duration::from_micros(100)).await;
                 }
 
-                let mut waiters_count = 0;
-                for _ in &semaphore_c.state.borrow().waiters_list {
-                    waiters_count += 1;
-                }
-
-                assert_eq!(1, waiters_count);
+                assert_eq!(1, semaphore_c.state.borrow().waiters.len());
 
                 semaphore_c.signal(1);
             })

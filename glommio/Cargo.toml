@@ -149,6 +149,10 @@ name    = "echo"
 harness = false
 name    = "competing_io"
 
+[[bench]]
+harness = false
+name    = "waiter_lists"
+
 [[example]]
 name = "pingpong_ladder"
 path = "examples/pingpong_ladder.rs"
