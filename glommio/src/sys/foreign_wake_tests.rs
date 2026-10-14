@@ -99,3 +99,13 @@ fn accepted_wake_is_visible_before_the_submitter_returns() {
     assert_eq!(drained, 1);
     assert_eq!(count.0.load(Ordering::Relaxed), 1);
 }
+
+#[test]
+fn forced_notification_after_a_reap_writes_the_eventfd() {
+    let notifier = new_sleep_notifier().unwrap();
+    let waker = Waker::from(Arc::new(Count::default()));
+    notifier.queue_waker(waker.clone(), true);
+    assert_eq!(notification_count(notifier.eventfd_fd()), 1);
+    notifier.queue_waker(waker, true);
+    assert_eq!(notification_count(notifier.eventfd_fd()), 1);
+}
