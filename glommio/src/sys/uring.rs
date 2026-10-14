@@ -2093,6 +2093,7 @@ impl Reactor {
         }
 
         if let Some(preempt) = preempt_timer() {
+            crate::probe_trace::record(7, preempt.as_micros() as u32);
             self.latency_preemption_timeout_src
                 .set(Some(lat_ring.prepare_latency_preemption_timer(preempt)));
             flush_rings!(lat_ring, main_ring)?;

@@ -370,6 +370,7 @@ impl SleepNotifier {
         test_support::after_foreign_wake_queued();
 
         self.notify(force_notify);
+        crate::probe_trace::record(1, force_notify as u32);
     }
 
     /// Whether a foreign waker can still be handed to the owning executor.
@@ -393,6 +394,9 @@ impl SleepNotifier {
         while let Ok(waker) = self.foreign_wakes.try_recv() {
             processed += 1;
             wake!(waker);
+        }
+        if processed > 0 {
+            crate::probe_trace::record(3, processed as u32);
         }
         processed
     }

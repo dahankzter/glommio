@@ -297,6 +297,8 @@ macro_rules! wake {
 }
 
 mod free_list;
+#[doc(hidden)]
+pub mod probe_trace;
 
 mod reactor;
 mod sys;

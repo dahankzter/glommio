@@ -818,6 +818,7 @@ impl Reactor {
 
     /// Processes new events, blocking until the first event or the timeout.
     pub(crate) fn react(&self, timeout: impl Fn() -> Option<Duration>) -> io::Result<bool> {
+        crate::probe_trace::record(6, 0);
         // Process ready timers.
         let (next_timer, woke) = self.process_external_events();
 

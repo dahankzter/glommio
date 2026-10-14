@@ -68,6 +68,9 @@ fn run(busy: usize, run_for: Duration, cpu: usize) -> Vec<Duration> {
                                     while t.elapsed() < Duration::from_micros(20) {
                                         std::hint::spin_loop();
                                     }
+                                    if std::env::var_os("PROBE_BUSY_SYSCALL").is_some() {
+                                        std::thread::yield_now();
+                                    }
                                     glommio::yield_if_needed().await;
                                 }
                             },
@@ -169,4 +172,119 @@ fn flat_scheduler_probe() {
             lat[n - 1]
         );
     }
+}
+
+#[test]
+fn trace_one_busy_queue() {
+    if std::env::var_os("PROBE_TRACE").is_none() {
+        return;
+    }
+    glommio::probe_trace::take();
+    glommio::probe_trace::enable(true);
+    let lat = run(1, Duration::from_millis(2000), 10);
+    glommio::probe_trace::enable(false);
+    let ev = glommio::probe_trace::take();
+    let mut rows: Vec<[Option<Duration>; 6]> = Vec::new();
+    let mut busy_picks = Vec::new();
+    for (i, &(t0, tag, arg)) in ev.iter().enumerate() {
+        if tag != 1 || arg != 1 {
+            continue;
+        }
+        let mut row = [None; 6];
+        let mut picks = 0;
+        for &(t, tg, a) in &ev[i + 1..] {
+            let d = t - t0;
+            match (tg, a) {
+                (2, 1) if row[0].is_none() => row[0] = Some(d),
+                (6, _) if row[1].is_none() => row[1] = Some(d),
+                (3, _) if row[2].is_none() => row[2] = Some(d),
+                (4, 1) if row[3].is_none() => row[3] = Some(d),
+                (5, 0) if row[4].is_none() => picks += 1,
+                (5, 1) => {
+                    row[4] = Some(d);
+                    break;
+                }
+                (1, _) => break,
+                _ => {}
+            }
+        }
+        rows.push(row);
+        busy_picks.push(picks);
+    }
+    let names = [
+        "write -> busy breaks on need_preempt",
+        "write -> react",
+        "write -> drain woke",
+        "write -> latency queue activated",
+        "write -> latency queue picked",
+    ];
+    for (k, name) in names.iter().enumerate() {
+        let mut v: Vec<Duration> = rows.iter().filter_map(|r| r[k]).collect();
+        v.sort();
+        if v.is_empty() {
+            println!("TRACE {name:<40} never");
+            continue;
+        }
+        let q = |p: f64| v[((v.len() as f64 - 1.0) * p) as usize];
+        println!(
+            "TRACE {name:<40} n={:<4} p50={:>10.3?} p90={:>10.3?} max={:>10.3?}",
+            v.len(),
+            q(0.5),
+            q(0.9),
+            v[v.len() - 1]
+        );
+    }
+    let mut armed = Vec::new();
+    let mut last_run = Vec::new();
+    for (i, &(_, tag, arg)) in ev.iter().enumerate() {
+        if tag != 4 || arg != 1 {
+            continue;
+        }
+        let mut arm = None;
+        let mut pick = None;
+        for &(t, tg, a) in &ev[i + 1..] {
+            match (tg, a) {
+                (7, us) if pick.is_none() => arm = Some(us),
+                (5, 0) if pick.is_none() => pick = Some(t),
+                (2, _) if pick.is_some() => {
+                    last_run.push(t - pick.unwrap());
+                    break;
+                }
+                (5, 1) => break,
+                _ => {}
+            }
+        }
+        if let Some(us) = arm {
+            armed.push(us);
+        }
+    }
+    armed.sort();
+    last_run.sort();
+    if !armed.is_empty() {
+        println!(
+            "TRACE preempt armed after activation (us): p50={} min={} max={}",
+            armed[armed.len() / 2],
+            armed[0],
+            armed[armed.len() - 1]
+        );
+    }
+    if !last_run.is_empty() {
+        let n = last_run.len();
+        println!(
+            "TRACE busy run after activation: n={n} p50={:?} p90={:?} max={:?}",
+            last_run[n / 2],
+            last_run[(n - 1) * 9 / 10],
+            last_run[n - 1]
+        );
+    }
+    busy_picks.sort();
+    let n = busy_picks.len();
+    println!(
+        "TRACE busy queue picks between write and latency pick: p50={} p90={} max={}",
+        busy_picks[n / 2],
+        busy_picks[(n - 1) * 9 / 10],
+        busy_picks[n - 1]
+    );
+    let n = lat.len();
+    println!("TRACE probe latency p50={:?} p90={:?}", lat[n / 2], lat[(n - 1) * 9 / 10]);
 }

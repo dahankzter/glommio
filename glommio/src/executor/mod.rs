@@ -430,6 +430,7 @@ impl ExecutorQueues {
     fn maybe_activate(&mut self, queue: Rc<RefCell<TaskQueue>>) {
         let mut state = queue.borrow_mut();
         if !state.is_active() {
+            crate::probe_trace::record(4, (state.name == "latency") as u32);
             state.vruntime = self.default_vruntime + 1;
             state.active = true;
             drop(state);
@@ -1393,6 +1394,7 @@ impl LocalExecutor {
         }
 
         let queue = candidate.unwrap();
+        crate::probe_trace::record(5, (queue.borrow().name == "latency") as u32);
         tq.active_executing = Some(queue.clone());
         drop(tq);
 
@@ -1422,6 +1424,7 @@ impl LocalExecutor {
             loop {
                 let mut queue_ref = queue.borrow_mut();
                 if self.need_preempt() || queue_ref.yielded() {
+                    crate::probe_trace::record(2, self.need_preempt() as u32);
                     break;
                 }
 
