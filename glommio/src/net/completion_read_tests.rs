@@ -362,6 +362,9 @@ fn a_short_fill_turns_speculation_off() {
 
 /// Streaming: a fill that comes back full says more is waiting, and the next
 /// fill speculates instead of paying for a ring round trip.
+///
+/// The reads are half the buffer, since a read at least as large as the
+/// buffer goes to the socket directly and never fills it.
 #[test]
 fn a_full_fill_turns_speculation_on() {
     test_executor!(async move {
@@ -373,11 +376,12 @@ fn a_full_fill_turns_speculation_on() {
             .await
             .unwrap()
             .buffered_with(super::Preallocated::new(64));
-        let mut chunk = [0u8; 64];
+        let mut chunk = [0u8; 32];
 
         peer.write_all(&[7u8; 64 * 8]).await.unwrap();
         Timer::new(Duration::from_millis(20)).await;
 
+        stream.read_exact(&mut chunk).await.unwrap();
         stream.read_exact(&mut chunk).await.unwrap();
         let before = SPECULATIONS.with(|c| c.get());
         stream.read_exact(&mut chunk).await.unwrap();
