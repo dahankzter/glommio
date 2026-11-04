@@ -317,6 +317,8 @@ impl<S: AsRawFd> NonBufferedStream<S> {
 
     /// One non-blocking `recv`; `None` when the socket has nothing.
     pub(crate) fn poll_read_speculative(&mut self, buf: &mut [u8]) -> Option<io::Result<usize>> {
+        #[cfg(test)]
+        SPECULATIONS.with(|count| count.set(count.get() + 1));
         super::yolo_recv(self.stream.as_raw_fd(), buf)
     }
 
@@ -436,6 +438,13 @@ impl<S: AsRawFd> NonBufferedStream<S> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many speculative `recv` calls this thread has made, for the tests
+    /// that check when a buffered stream speculates.
+    pub(crate) static SPECULATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
 #[derive(Debug)]
 pub(crate) struct GlommioStream<S, B> {
     stream: NonBufferedStream<S>,
@@ -443,6 +452,12 @@ pub(crate) struct GlommioStream<S, B> {
     rx_done: Cell<bool>,
     /// A completion-based read with the receive buffer lent to the kernel.
     rx_source: Option<Source>,
+    /// Whether the last fill of the receive buffer came back full, which is
+    /// the one sign that more data is already waiting. A buffered stream
+    /// speculates with a plain `recv` only then; otherwise it goes straight
+    /// to a completion read, since a miss would cost a syscall and buy
+    /// nothing the ring read does not.
+    rx_more_likely: bool,
 }
 
 impl<S> From<socket2::Socket> for GlommioStream<S, NonBuffered>
@@ -465,6 +480,7 @@ where
             rx_buf: NonBuffered,
             rx_done: Cell::new(false),
             rx_source: None,
+            rx_more_likely: true,
         }
     }
 }
@@ -492,6 +508,7 @@ impl<S> GlommioStream<S, NonBuffered> {
             rx_buf,
             rx_done: self.rx_done,
             rx_source: self.rx_source,
+            rx_more_likely: self.rx_more_likely,
         }
     }
 }
@@ -559,7 +576,9 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
     }
 
     fn poll_replenish_buffer(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
+        let room = self.rx_buf.unfilled().len();
         let result = poll_err!(ready!(self.poll_fill(cx)));
+        self.rx_more_likely = result == room;
         self.rx_buf.handle_result(result);
         if result == 0 {
             self.rx_done.set(true);
@@ -567,8 +586,9 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
         Poll::Ready(Ok(result))
     }
 
-    /// Fills the receive buffer by a speculative `recv`, a completion read
-    /// into the lent buffer, or readiness when the buffer cannot be lent.
+    /// Fills the receive buffer by a speculative `recv` when the last fill
+    /// was full, a completion read into the lent buffer, or readiness when
+    /// the buffer cannot be lent.
     fn poll_fill(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
         if let Some(source) = self.rx_source.as_ref() {
             let reactor = self.stream.reactor.upgrade().unwrap();
@@ -593,8 +613,10 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
             return Poll::Ready(result);
         }
 
-        if let Some(result) = self.stream.poll_read_speculative(self.rx_buf.unfilled()) {
-            return Poll::Ready(result);
+        if self.rx_more_likely {
+            if let Some(result) = self.stream.poll_read_speculative(self.rx_buf.unfilled()) {
+                return Poll::Ready(result);
+            }
         }
 
         match self.rx_buf.take_kernel_buffer() {
