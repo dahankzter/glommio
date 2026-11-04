@@ -1,5 +1,5 @@
 //! Buffered reads while the receive buffer is lent to the kernel.
-use super::{TcpListener, TcpStream};
+use super::{stream::SPECULATIONS, TcpListener, TcpStream};
 use crate::timer::Timer;
 use futures_lite::{
     future::poll_once,
@@ -325,5 +325,66 @@ fn shutdown_read_with_read_pending() {
         })
         .await;
         assert!(matches!(r, Ok(Ok(0))));
+    });
+}
+
+/// Request and response: every reply is shorter than the buffer, so after the
+/// first one the stream stops speculating and submits the completion read
+/// straight away. No `recv` syscall is spent finding the socket empty.
+#[test]
+fn a_short_fill_turns_speculation_off() {
+    test_executor!(async move {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut peer = TcpStream::connect(addr).await.unwrap();
+        let mut stream = listener.accept().await.unwrap().buffered();
+        let mut reply = [0u8; 4];
+
+        peer.write_all(b"AAAA").await.unwrap();
+        stream.read_exact(&mut reply).await.unwrap();
+
+        let before = SPECULATIONS.with(|c| c.get());
+        for _ in 0..3 {
+            let send = async {
+                Timer::new(Duration::from_millis(5)).await;
+                peer.write_all(b"BBBB").await.unwrap();
+            };
+            let (_, read) = futures_lite::future::zip(send, stream.read_exact(&mut reply)).await;
+            read.unwrap();
+        }
+        assert_eq!(
+            SPECULATIONS.with(|c| c.get()),
+            before,
+            "a stream whose last fill was short still speculated"
+        );
+    });
+}
+
+/// Streaming: a fill that comes back full says more is waiting, and the next
+/// fill speculates instead of paying for a ring round trip.
+#[test]
+fn a_full_fill_turns_speculation_on() {
+    test_executor!(async move {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut peer = TcpStream::connect(addr).await.unwrap();
+        let mut stream = listener
+            .accept()
+            .await
+            .unwrap()
+            .buffered_with(super::Preallocated::new(64));
+        let mut chunk = [0u8; 64];
+
+        peer.write_all(&[7u8; 64 * 8]).await.unwrap();
+        Timer::new(Duration::from_millis(20)).await;
+
+        stream.read_exact(&mut chunk).await.unwrap();
+        let before = SPECULATIONS.with(|c| c.get());
+        stream.read_exact(&mut chunk).await.unwrap();
+        assert_eq!(
+            SPECULATIONS.with(|c| c.get()),
+            before + 1,
+            "a stream whose last fill was full did not speculate"
+        );
     });
 }
