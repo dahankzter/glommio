@@ -1299,6 +1299,13 @@ struct SleepableRing {
     /// Declared after `ring` so the registration is released first. Shared
     /// with every multishot source, which gives its buffers back through it.
     provided_buffers: Option<Rc<RefCell<ProvidedBuffers>>>,
+    /// Whether the kernel was told to run this ring's task work at the
+    /// thread's next kernel entry instead of interrupting it per completion
+    /// (`IORING_SETUP_COOP_TASKRUN`), and to say so in the submission
+    /// queue's flags (`IORING_SETUP_TASKRUN_FLAG`). A multishot receive
+    /// completes once per arrival, and an interrupt per arrival is what a
+    /// pipelined client pays most for.
+    cooperative: bool,
     size: usize,
     submission_queue: ReactorQueue,
     name: &'static str,
@@ -1310,16 +1317,31 @@ struct SleepableRing {
 }
 
 impl SleepableRing {
+    /// Builds the ring, cooperatively when asked and the kernel allows it;
+    /// a kernel before 5.19 refuses the flags and the ring is built plain.
     fn new(
         size: usize,
         name: &'static str,
         allocator: Rc<UringBufferAllocator>,
         source_map: Rc<RefCell<SourceMap>>,
+        cooperative: bool,
     ) -> io::Result<Self> {
         check_uring_support()?;
+        let (ring, cooperative) = match cooperative {
+            true => match IoUring::builder()
+                .setup_coop_taskrun()
+                .setup_taskrun_flag()
+                .build(size as _)
+            {
+                Ok(ring) => (ring, true),
+                Err(_) => (IoUring::new(size as _)?, false),
+            },
+            false => (IoUring::new(size as _)?, false),
+        };
         Ok(SleepableRing {
-            ring: IoUring::new(size as _)?,
+            ring,
             provided_buffers: None,
+            cooperative,
             size,
             submission_queue: UringQueueState::with_capacity(size * 4),
             name,
@@ -1333,6 +1355,28 @@ impl SleepableRing {
 
     fn ring_fd(&self) -> RawFd {
         std::os::unix::io::AsRawFd::as_raw_fd(&self.ring)
+    }
+
+    /// Whether the kernel holds completions it has not posted yet, which a
+    /// cooperative ring reports in the submission queue's flags.
+    fn task_work_pending(&mut self) -> bool {
+        self.cooperative && self.ring.submission().taskrun()
+    }
+
+    /// Enters the kernel with nothing to submit so pending task work runs
+    /// and its completions are posted. One syscall for however many are
+    /// pending, which is the whole point of the cooperative ring.
+    fn run_pending_task_work(&mut self) -> io::Result<bool> {
+        if !self.task_work_pending() {
+            return Ok(false);
+        }
+        self.ring
+            .submitter()
+            .submit()
+            .or_else(Reactor::busy_ok)
+            .or_else(Reactor::again_ok)
+            .or_else(Reactor::intr_ok)?;
+        Ok(true)
     }
 
     /// This function prepares a timer that fires unconditionally after a
@@ -1742,11 +1786,21 @@ impl Reactor {
             }]
         };
 
-        let mut main_ring =
-            SleepableRing::new(ring_depth, "main", allocator.clone(), source_map.clone())?;
+        let mut main_ring = SleepableRing::new(
+            ring_depth,
+            "main",
+            allocator.clone(),
+            source_map.clone(),
+            false,
+        )?;
         let mut poll_ring = PollRing::new(ring_depth, allocator.clone(), source_map.clone())?;
-        let mut latency_ring =
-            SleepableRing::new(ring_depth, "latency", allocator.clone(), source_map.clone())?;
+        let mut latency_ring = SleepableRing::new(
+            ring_depth,
+            "latency",
+            allocator.clone(),
+            source_map.clone(),
+            true,
+        )?;
         if recv_buffers.count > 0 {
             match ProvidedBuffers::register(
                 &latency_ring.ring,
@@ -1871,6 +1925,7 @@ impl Reactor {
             .or_else(Reactor::busy_ok)
             .or_else(Reactor::again_ok)
             .or_else(Reactor::intr_ok)?;
+        ring.run_pending_task_work()?;
         let consumed = ring.consume_completion_queue(&mut woke);
         drop(ring);
         if consumed > 0 && self.preempt_timer_fired() {
@@ -1889,9 +1944,17 @@ impl Reactor {
     }
 
     /// Whether an inline reap has taken completions the executor has not
-    /// yet answered with a pass.
+    /// yet answered with a pass, or the kernel holds latency completions it
+    /// will only post at the next kernel entry. Either is a reason for the
+    /// executor to yield, as a non-empty completion queue is.
     pub(crate) fn preempt_requested(&self) -> bool {
-        self.preempt_requested.get()
+        self.preempt_requested.get() || self.latency_ring.borrow_mut().task_work_pending()
+    }
+
+    /// Whether the latency ring runs its task work cooperatively.
+    #[cfg(test)]
+    pub(crate) fn latency_ring_is_cooperative(&self) -> bool {
+        self.latency_ring.borrow().cooperative
     }
 
     pub(crate) fn install_eventfd(&self) {
@@ -2400,6 +2463,7 @@ impl Reactor {
         let mut main_ring = self.main_ring.borrow_mut();
         let mut lat_ring = self.latency_ring.borrow_mut();
 
+        lat_ring.run_pending_task_work()?;
         consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring);
 
         drop(self.latency_preemption_timeout_src.take());
@@ -2438,6 +2502,7 @@ impl Reactor {
                 if self.eventfd_src.is_installed().unwrap() {
                     self.link_rings_and_sleep(&mut main_ring)
                         .expect("some error");
+                    lat_ring.run_pending_task_work()?;
                     flush_cancellations!(into &mut 0; lat_ring, poll_ring, main_ring);
                     flush_rings!(lat_ring, poll_ring, main_ring)?;
                     consume_rings!(into &mut 0; lat_ring, poll_ring, main_ring);
@@ -2798,6 +2863,42 @@ mod tests {
         });
     }
 
+    /// On a kernel that takes the flags, the latency ring is cooperative.
+    #[test]
+    fn the_latency_ring_runs_task_work_cooperatively() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .make()
+            .unwrap();
+        ex.run(async {
+            assert!(crate::executor()
+                .reactor()
+                .sys
+                .latency_ring_is_cooperative());
+        });
+    }
+
+    /// A task that never enters the kernel still sees the preempt timer: the
+    /// kernel's pending task work shows in the flags, and need_preempt reads
+    /// them.
+    #[test]
+    fn a_spinning_task_is_still_preempted_on_a_cooperative_ring() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .preempt_timer(Duration::from_millis(2))
+            .make()
+            .unwrap();
+        ex.run(async {
+            crate::timer::Timer::new(Duration::from_millis(1)).await;
+            let start = Instant::now();
+            while !crate::executor().need_preempt() {
+                assert!(
+                    start.elapsed() < Duration::from_millis(500),
+                    "no preemption in 500ms with a 2ms preempt timer"
+                );
+            }
+            assert!(start.elapsed() < Duration::from_millis(100));
+        });
+    }
+
     /// Every buffer handed back lands in its own slot with its own address.
     #[test]
     fn provided_buffers_are_distinct() {
@@ -3001,7 +3102,7 @@ mod tests {
     fn sqe_link_chain() {
         let allocator = Rc::new(UringBufferAllocator::new(65536));
         let source_map = Rc::new(RefCell::new(SourceMap::default()));
-        let mut ring = SleepableRing::new(4, "main", allocator, source_map).unwrap();
+        let mut ring = SleepableRing::new(4, "main", allocator, source_map, false).unwrap();
         let q = ring.submission_queue();
         let mut queue = q.borrow_mut();
 
@@ -3033,7 +3134,7 @@ mod tests {
     fn unterminated_sqe_link_chain() {
         let allocator = Rc::new(UringBufferAllocator::new(65536));
         let source_map = Rc::new(RefCell::new(SourceMap::default()));
-        let mut ring = SleepableRing::new(2, "main", allocator, source_map).unwrap();
+        let mut ring = SleepableRing::new(2, "main", allocator, source_map, false).unwrap();
         let q = ring.submission_queue();
         let mut queue = q.borrow_mut();
 
@@ -3053,7 +3154,7 @@ mod tests {
     fn sqe_link_chain_overflow() {
         let allocator = Rc::new(UringBufferAllocator::new(65536));
         let source_map = Rc::new(RefCell::new(SourceMap::default()));
-        let mut ring = SleepableRing::new(2, "main", allocator, source_map).unwrap();
+        let mut ring = SleepableRing::new(2, "main", allocator, source_map, false).unwrap();
         let q = ring.submission_queue();
         let mut queue = q.borrow_mut();
 
