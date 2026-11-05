@@ -3193,7 +3193,14 @@ mod tests {
         );
         let notifier = sys::new_sleep_notifier().unwrap();
         let pool = BlockingThreadPool::new(PoolPlacement::Unbound(1), notifier.clone()).unwrap();
-        let mut reactor = Reactor::new(notifier, 0, 128, pool).unwrap();
+        let mut reactor = Reactor::new(
+            notifier,
+            0,
+            128,
+            pool,
+            crate::executor::RecvBuffers::default(),
+        )
+        .unwrap();
 
         let queues = [
             ("main", reactor.main_ring.get_mut().submission_queue()),
