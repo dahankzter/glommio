@@ -69,7 +69,9 @@ enum UringOpDescriptor {
     SockSendMsg(*mut libc::msghdr, i32),
     SockRecv(usize, i32),
     SockRecvInto(i32),
-    RecvMulti,
+    /// The bool is whether to bundle: one completion for everything the
+    /// socket holds, over as many buffers as that takes.
+    RecvMulti(bool),
     SockRecvMsg(usize, i32),
     Nop,
 }
@@ -541,9 +543,13 @@ where
                     }
                 })
             }
-            UringOpDescriptor::RecvMulti => {
+            UringOpDescriptor::RecvMulti(bundle) => {
                 flags |= squeue::Flags::BUFFER_SELECT;
-                opcode::RecvMulti::new(fd, RECV_BUFFER_GROUP).build()
+                if bundle {
+                    opcode::RecvMultiBundle::new(fd, RECV_BUFFER_GROUP).build()
+                } else {
+                    opcode::RecvMulti::new(fd, RECV_BUFFER_GROUP).build()
+                }
             }
             UringOpDescriptor::SockRecv(len, flags) => {
                 let mut buf = DmaBuffer::new(len).expect("failed to allocate buffer");
@@ -774,10 +780,11 @@ fn queue_multishot_arrival(inner: &mut InnerSource, value: &cqueue::Entry) {
         return;
     }
     if let Some(bid) = cqueue::buffer_select(value.flags()) {
-        state.buffers.borrow_mut().lent();
+        let len = value.result() as usize;
+        let bids = state.buffers.borrow_mut().lent(bid, len);
         state.ready.push_back(crate::sys::Arrival {
-            bid,
-            len: value.result() as usize,
+            bids,
+            len,
             taken: 0,
         });
     }
@@ -1158,6 +1165,10 @@ pub(crate) struct ProvidedBuffers {
     tail: u16,
     /// Buffers the kernel has filled and nobody has given back yet.
     held: usize,
+    /// The buffers in the order the kernel will take them, which is the
+    /// order they were given back in. A bundled completion names only its
+    /// first buffer; the rest are the next entries here.
+    order: std::collections::VecDeque<u16>,
 }
 
 impl ProvidedBuffers {
@@ -1202,6 +1213,7 @@ impl ProvidedBuffers {
             size,
             tail: 0,
             held: 0,
+            order: std::collections::VecDeque::with_capacity(count as usize),
         };
         for bid in 0..count {
             buffers.give_back(bid);
@@ -1215,7 +1227,6 @@ impl ProvidedBuffers {
         self.count as usize
     }
 
-    #[cfg(test)]
     pub(crate) fn size(&self) -> usize {
         self.size
     }
@@ -1226,10 +1237,28 @@ impl ProvidedBuffers {
         self.held
     }
 
-    /// Records that the kernel filled a buffer, which is now the receiver's
-    /// to give back.
-    fn lent(&mut self) {
-        self.held += 1;
+    /// Records that the kernel filled `len` bytes starting at buffer
+    /// `first`, over as many consecutive buffers as that takes, and returns
+    /// them in order. They are the receiver's to give back.
+    fn lent(&mut self, first: u16, len: usize) -> smallvec::SmallVec<[u16; 4]> {
+        let needed = if len == 0 { 1 } else { len.div_ceil(self.size) };
+        let mut bids = smallvec::SmallVec::new();
+        for i in 0..needed {
+            let bid = self
+                .order
+                .pop_front()
+                .expect("the kernel filled a buffer it was never given");
+            if i == 0 {
+                assert_eq!(
+                    bid, first,
+                    "a completion named a buffer out of ring order: the kernel and the ring \
+                     disagree on which buffers hold whose bytes"
+                );
+            }
+            bids.push(bid);
+        }
+        self.held += needed;
+        bids
     }
 
     /// The bytes the kernel wrote into buffer `bid`, `len` of them.
@@ -1243,6 +1272,7 @@ impl ProvidedBuffers {
     pub(crate) fn give_back(&mut self, bid: u16) {
         debug_assert!(bid < self.count);
         self.held = self.held.saturating_sub(1);
+        self.order.push_back(bid);
         let slot = (self.tail & (self.count - 1)) as usize;
         unsafe {
             let entry = &mut *self.entries.add(slot);
@@ -1701,6 +1731,9 @@ pub(crate) struct Reactor {
 
     /// Set once the kernel has rejected the multishot receive flag.
     recv_multi_refused: Cell<bool>,
+    /// Set once the kernel has rejected the bundle flag (before 6.10), after
+    /// which multishot receives are armed one buffer per completion.
+    bundle_refused: Cell<bool>,
 
     /// Raised when a stream consumed latency completions inline, which may
     /// have taken the preempt timer's with them. The executor treats it as it
@@ -1864,6 +1897,7 @@ impl Reactor {
             source_map,
             rings_depth: ring_depth,
             recv_multi_refused: Cell::new(false),
+            bundle_refused: Cell::new(false),
             preempt_requested: Cell::new(false),
         })
     }
@@ -1899,6 +1933,16 @@ impl Reactor {
     /// so no further stream tries one.
     pub(crate) fn refuse_recv_multi(&self) {
         self.recv_multi_refused.set(true);
+    }
+
+    /// Whether a new multishot receive should ask for bundled completions.
+    pub(crate) fn recv_multi_bundles(&self) -> bool {
+        !self.bundle_refused.get()
+    }
+
+    /// Remembers that this kernel answered a bundled receive with EINVAL.
+    pub(crate) fn refuse_bundle(&self) {
+        self.bundle_refused.set(true);
     }
 
     /// Consumes whatever the kernel has already posted on the latency ring
@@ -1944,11 +1988,12 @@ impl Reactor {
     }
 
     /// Whether an inline reap has taken completions the executor has not
-    /// yet answered with a pass, or the kernel holds latency completions it
-    /// will only post at the next kernel entry. Either is a reason for the
-    /// executor to yield, as a non-empty completion queue is.
+    /// yet answered with a pass. Pending task work on the cooperative ring
+    /// is deliberately not a reason here: making it one turned every batch
+    /// of arrivals into a pass and a syscall, and the preempt timer already
+    /// bounds how long a task runs without the reactor looking.
     pub(crate) fn preempt_requested(&self) -> bool {
-        self.preempt_requested.get() || self.latency_ring.borrow_mut().task_work_pending()
+        self.preempt_requested.get()
     }
 
     /// Whether the latency ring runs its task work cooperatively.
@@ -2090,11 +2135,11 @@ impl Reactor {
 
     /// Arms a multishot receive: one request that completes once per
     /// arrival into a buffer from the executor's ring.
-    pub(crate) fn recv_multi(&self, source: &Source) {
+    pub(crate) fn recv_multi(&self, source: &Source, bundle: bool) {
         queue_request_into_ring(
             &mut *self.ring_for_source(source),
             source,
-            UringOpDescriptor::RecvMulti,
+            UringOpDescriptor::RecvMulti(bundle),
             &mut self.source_map.borrow_mut(),
         );
     }
@@ -2780,7 +2825,11 @@ mod tests {
                     state
                         .ready
                         .iter()
-                        .map(|a| buffers.bytes(a.bid, a.len).to_vec())
+                        .map(|a| {
+                            let mut out = vec![0u8; a.len];
+                            a.copy_to(&buffers, 0, &mut out);
+                            out
+                        })
                         .collect(),
                     state.armed,
                 )
@@ -2826,9 +2875,10 @@ mod tests {
         });
     }
 
-    /// Running out of buffers ends the request with ENOBUFS rather than
-    /// losing data: what arrived is queued, and the rest is still in the
-    /// socket for a re-armed request.
+    /// Running out of buffers ends the request rather than losing data: what
+    /// arrived is queued, the rest is still in the socket for a re-armed
+    /// request. A plain multishot ends with ENOBUFS; a bundled one ends on
+    /// the arrival that took the last buffer.
     #[test]
     fn a_multishot_source_stops_with_enobufs_when_the_ring_runs_dry() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
@@ -2849,10 +2899,10 @@ mod tests {
             let (ready, armed) = arrivals(&source);
             assert!(!armed, "two buffers took three arrivals");
             assert_eq!(ready.concat(), b"aaaabbbb");
-            assert_eq!(
-                source.result().unwrap().unwrap_err().raw_os_error(),
-                Some(libc::ENOBUFS)
-            );
+            match source.result().unwrap() {
+                Err(err) => assert_eq!(err.raw_os_error(), Some(libc::ENOBUFS)),
+                Ok(n) => assert_eq!(n, 4, "a bundled request ends with its last arrival"),
+            }
 
             drop(source);
             let again = reactor.recv_multi(reader.as_raw_fd()).unwrap();
@@ -2877,12 +2927,11 @@ mod tests {
         });
     }
 
-    /// An arrival from another thread reaches a task that never enters the
-    /// kernel through the flags alone: the kernel has not posted the
-    /// completion, it has only said one is pending, and that is enough for
-    /// the executor to yield.
+    /// An arrival from another thread that the kernel has not posted yet is
+    /// still taken by an inline reap: the flag says work is pending and the
+    /// reap enters once to run it.
     #[test]
-    fn pending_task_work_counts_as_a_reason_to_yield() {
+    fn an_inline_reap_runs_pending_task_work() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
             .recv_buffers(8, 64)
             .preempt_timer(Duration::from_secs(10))
@@ -2892,22 +2941,25 @@ mod tests {
             use std::os::fd::AsRawFd as _;
             let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
             let reactor = crate::executor().reactor();
-            let _source = reactor.recv_multi(reader.as_raw_fd()).unwrap();
+            let source = reactor.recv_multi(reader.as_raw_fd()).unwrap();
             settle(&reactor);
-            assert!(!reactor.sys.preempt_requested());
 
             let peer = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(10));
                 std::io::Write::write_all(&mut writer, b"from afar").unwrap();
                 std::thread::sleep(Duration::from_millis(100));
             });
             let start = Instant::now();
-            while !reactor.sys.preempt_requested() {
+            loop {
+                reactor.reap_latency_completions().unwrap();
+                if !arrivals(&source).0.is_empty() {
+                    break;
+                }
                 assert!(
                     start.elapsed() < Duration::from_millis(200),
-                    "an arrival from another thread never asked the executor to yield"
+                    "the reap never ran the pending task work"
                 );
             }
+            assert_eq!(arrivals(&source).0.concat(), b"from afar");
             peer.join().unwrap();
         });
     }
@@ -2931,6 +2983,46 @@ mod tests {
                 );
             }
             assert!(start.elapsed() < Duration::from_millis(100));
+        });
+    }
+
+    /// On a kernel that bundles, one completion carries everything the
+    /// socket held, over as many buffers as that took, and the stream reads
+    /// it back whole.
+    #[test]
+    fn a_bundled_arrival_spans_buffers() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .recv_buffers(8, 64)
+            .make()
+            .unwrap();
+        ex.run(async {
+            use std::os::fd::AsRawFd as _;
+            let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            let reactor = crate::executor().reactor();
+            let source = reactor.recv_multi(reader.as_raw_fd()).unwrap();
+            settle(&reactor);
+            let message: Vec<u8> = (0..200u8).collect();
+            std::io::Write::write_all(&mut writer, &message).unwrap();
+            settle(&reactor);
+
+            let (ready, armed) = arrivals(&source);
+            assert!(armed);
+            assert_eq!(ready.concat(), message);
+            let bundled = match &*source.source_type() {
+                SourceType::RecvMulti(state) => state.bundled,
+                _ => unreachable!(),
+            };
+            if bundled {
+                assert_eq!(ready.len(), 1, "a bundled receive split one write");
+            }
+            let buffers = reactor.sys.recv_buffers().unwrap();
+            assert_eq!(
+                buffers.borrow().held(),
+                4,
+                "200 bytes take four 64-byte buffers"
+            );
+            drop(source);
+            assert_eq!(buffers.borrow().held(), 0);
         });
     }
 

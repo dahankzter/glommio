@@ -275,3 +275,18 @@ fn one_fill_takes_every_queued_arrival_that_fits() {
         );
     });
 }
+
+/// A message larger than a kernel buffer comes back whole and in order
+/// through the stream, whether the kernel bundled it or split it.
+#[test]
+fn a_message_spanning_kernel_buffers_reads_whole() {
+    executor(8, 32).run(async {
+        let (mut writer, mut reader) = pair(Preallocated::new(4096)).await;
+        let message: Vec<u8> = (0..120u8).collect();
+        writer.write_all(&message).await.unwrap();
+        let mut got = vec![0u8; message.len()];
+        reader.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, message);
+        assert_eq!(buffers_held(), 0);
+    });
+}
