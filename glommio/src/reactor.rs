@@ -472,6 +472,25 @@ impl Reactor {
 
     /// A completion-based read into `buffer`, which stays in the `Source`
     /// until the read completes.
+    /// Arms a multishot receive on `fd`, or returns `None` when this
+    /// executor has no receive buffers or the kernel refused the flag.
+    pub(crate) fn recv_multi(&self, fd: RawFd) -> Option<Source> {
+        let buffers = self.sys.recv_buffers()?;
+        let source = self.new_source(
+            fd,
+            SourceType::RecvMulti(sys::RecvMultiState::new(buffers)),
+            None,
+        );
+        self.sys.recv_multi(&source);
+        Some(source)
+    }
+
+    /// Stops trying multishot receive on this executor, after the kernel
+    /// answered one with EINVAL.
+    pub(crate) fn refuse_recv_multi(&self) {
+        self.sys.refuse_recv_multi()
+    }
+
     pub(crate) fn recv_into(&self, fd: RawFd, buffer: crate::net::OwnedRxBuf) -> Source {
         let source = self.new_source(fd, SourceType::SockRecvInto(Some(buffer)), None);
         self.sys.recv_into(&source, MsgFlags::empty());
