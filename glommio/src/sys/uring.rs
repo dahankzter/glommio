@@ -2877,6 +2877,41 @@ mod tests {
         });
     }
 
+    /// An arrival from another thread reaches a task that never enters the
+    /// kernel through the flags alone: the kernel has not posted the
+    /// completion, it has only said one is pending, and that is enough for
+    /// the executor to yield.
+    #[test]
+    fn pending_task_work_counts_as_a_reason_to_yield() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .recv_buffers(8, 64)
+            .preempt_timer(Duration::from_secs(10))
+            .make()
+            .unwrap();
+        ex.run(async {
+            use std::os::fd::AsRawFd as _;
+            let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            let reactor = crate::executor().reactor();
+            let _source = reactor.recv_multi(reader.as_raw_fd()).unwrap();
+            settle(&reactor);
+            assert!(!reactor.sys.preempt_requested());
+
+            let peer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                std::io::Write::write_all(&mut writer, b"from afar").unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+            });
+            let start = Instant::now();
+            while !reactor.sys.preempt_requested() {
+                assert!(
+                    start.elapsed() < Duration::from_millis(200),
+                    "an arrival from another thread never asked the executor to yield"
+                );
+            }
+            peer.join().unwrap();
+        });
+    }
+
     /// A task that never enters the kernel still sees the preempt timer: the
     /// kernel's pending task work shows in the flags, and need_preempt reads
     /// them.
