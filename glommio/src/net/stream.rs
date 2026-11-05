@@ -588,8 +588,13 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
     }
 
     fn poll_replenish_buffer(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
-        let result = poll_err!(ready!(self.poll_fill(cx)));
-        self.rx_buf.handle_result(result);
+        let result = if self.rx_multi.is_some() {
+            poll_err!(ready!(self.poll_fill_multishot(cx)))
+        } else {
+            let result = poll_err!(ready!(self.poll_fill(cx)));
+            self.rx_buf.handle_result(result);
+            result
+        };
         if result == 0 {
             self.rx_done.set(true);
         }
@@ -599,9 +604,6 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
     /// Fills the receive buffer by a speculative `recv`, a completion read
     /// into the lent buffer, or readiness when the buffer cannot be lent.
     fn poll_fill(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
-        if self.rx_multi.is_some() {
-            return self.poll_fill_multishot(cx);
-        }
         if let Some(source) = self.rx_source.as_ref() {
             let reactor = self.stream.reactor.upgrade().unwrap();
             let Some(result) = source.result() else {
@@ -639,18 +641,24 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
         }
     }
 
-    /// Fills the receive buffer from the multishot receive: the next queued
-    /// arrival if there is one, else whatever the kernel has already posted
-    /// and the reactor has not yet looked at, else waits. A request the
-    /// kernel has dropped is re-armed, after taking what the socket holds,
-    /// unless it ended in end of file or an error.
+    /// Fills the receive buffer from the multishot receive: every queued
+    /// arrival that fits, else whatever the kernel has already posted and the
+    /// reactor has not yet looked at, else waits. A request the kernel has
+    /// dropped is re-armed, after taking what the socket holds, unless it
+    /// ended in end of file or an error.
+    ///
+    /// Unlike [`poll_fill`](Self::poll_fill), this advances the receive
+    /// buffer itself, arrival by arrival: a pipeline's replies sit in the
+    /// queue as a dozen completions, and handing them out one per poll costs
+    /// a poll round each.
     fn poll_fill_multishot(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
         let reactor = self.stream.reactor.upgrade().unwrap();
         let mut reaped = false;
         loop {
-            if let Some(n) = self.take_arrival() {
+            let taken = self.take_arrivals();
+            if taken > 0 {
                 self.stream.read_timeout.cancel_timer(&reactor);
-                return Poll::Ready(Ok(n));
+                return Poll::Ready(Ok(taken));
             }
             let multi = self.rx_multi.as_ref().unwrap();
             let Some(result) = multi.result() else {
@@ -674,20 +682,42 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
                 Err(err) if err.raw_os_error() == Some(libc::ENOBUFS) => {}
                 Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
                     reactor.refuse_recv_multi();
-                    return self.poll_fill(cx);
+                    let result = poll_err!(ready!(self.poll_fill(cx)));
+                    self.rx_buf.handle_result(result);
+                    return Poll::Ready(Ok(result));
                 }
                 Err(err) => return Poll::Ready(Err(err)),
             }
             let fd = self.stream.stream.as_raw_fd();
             if let Some(result) = self.stream.poll_read_speculative(self.rx_buf.unfilled()) {
                 self.rx_multi = reactor.recv_multi(fd);
-                return Poll::Ready(result);
+                let result = poll_err!(result);
+                self.rx_buf.handle_result(result);
+                return Poll::Ready(Ok(result));
             }
             match reactor.recv_multi(fd) {
                 Some(source) => self.rx_multi = Some(source),
-                None => return self.poll_fill(cx),
+                None => {
+                    let result = poll_err!(ready!(self.poll_fill(cx)));
+                    self.rx_buf.handle_result(result);
+                    return Poll::Ready(Ok(result));
+                }
             }
         }
+    }
+
+    /// Moves queued arrivals into the receive buffer until it is full or the
+    /// queue is empty, and returns how many bytes that was.
+    fn take_arrivals(&mut self) -> usize {
+        let mut total = 0;
+        while let Some(n) = self.take_arrival() {
+            self.rx_buf.handle_result(n);
+            total += n;
+            if self.rx_buf.unfilled().is_empty() {
+                break;
+            }
+        }
+        total
     }
 
     /// Copies the oldest queued arrival into the receive buffer, as much as

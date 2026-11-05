@@ -254,3 +254,24 @@ fn an_inline_reap_of_an_arrival_alone_asks_for_no_pass() {
             );
         });
 }
+
+/// Arrivals that are already queued come out of one fill together, not one
+/// per poll: a pipeline's replies sit in the socket as a dozen completions
+/// and a reader must not pay a round trip for each.
+#[test]
+fn one_fill_takes_every_queued_arrival_that_fits() {
+    use futures_lite::io::AsyncBufReadExt;
+    executor(32, 64).run(async {
+        let (mut writer, mut reader) = pair(Preallocated::new(4096)).await;
+        for i in 0..12u8 {
+            writer.write_all(&[i; 48]).await.unwrap();
+            Timer::new(Duration::from_millis(3)).await;
+        }
+        let filled = reader.fill_buf().await.unwrap().len();
+        assert_eq!(
+            filled,
+            12 * 48,
+            "a fill returned one arrival of the dozen queued"
+        );
+    });
+}
