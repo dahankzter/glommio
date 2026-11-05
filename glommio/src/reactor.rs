@@ -160,8 +160,15 @@ impl Reactor {
         ring_depth: usize,
         record_io_latencies: bool,
         blocking_thread: BlockingThreadPool,
+        recv_buffers: crate::executor::RecvBuffers,
     ) -> io::Result<Reactor> {
-        let sys = sys::Reactor::new(notifier, io_memory, ring_depth, blocking_thread)?;
+        let sys = sys::Reactor::new(
+            notifier,
+            io_memory,
+            ring_depth,
+            blocking_thread,
+            recv_buffers,
+        )?;
         let preempt_status = sys.preempt_status();
         Ok(Reactor {
             sys,

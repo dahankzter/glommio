@@ -1081,8 +1081,136 @@ impl UringCommon for PollRing {
     }
 }
 
+/// The buffer group a ring's provided buffers are registered under. One
+/// group per ring is all multishot receive needs.
+const RECV_BUFFER_GROUP: u16 = 0;
+
+/// Receive buffers lent to the kernel through a provided-buffer ring.
+///
+/// `entries` is the ring the kernel reads buffer descriptors from and
+/// `memory` the buffers themselves, `count` of `size` bytes each, both
+/// page-aligned and alive for as long as the registration. Handing a buffer
+/// back is a write to the ring's tail, no syscall.
+pub(crate) struct ProvidedBuffers {
+    entries: *mut types::BufRingEntry,
+    memory: *mut u8,
+    count: u16,
+    size: usize,
+    tail: u16,
+}
+
+impl ProvidedBuffers {
+    /// Registers `count` buffers of `size` bytes with `ring`. `count` is a
+    /// power of two at most 32768, which the builder guarantees.
+    fn register(ring: &IoUring, count: usize, size: usize) -> io::Result<Self> {
+        debug_assert!(count.is_power_of_two() && count <= 32768);
+        let count = count as u16;
+        let ring_layout =
+            Layout::from_size_align(count as usize * size_of::<types::BufRingEntry>(), 4096)
+                .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let memory_layout = Layout::from_size_align(count as usize * size, 4096)
+            .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        let entries =
+            unsafe { alloc::alloc::alloc_zeroed(ring_layout) } as *mut types::BufRingEntry;
+        if entries.is_null() {
+            return Err(io::Error::from_raw_os_error(libc::ENOMEM));
+        }
+        let memory = unsafe { alloc::alloc::alloc_zeroed(memory_layout) };
+        if memory.is_null() {
+            unsafe { alloc::alloc::dealloc(entries as *mut u8, ring_layout) };
+            return Err(io::Error::from_raw_os_error(libc::ENOMEM));
+        }
+        if let Err(err) = unsafe {
+            ring.submitter().register_buf_ring_with_flags(
+                entries as u64,
+                count,
+                RECV_BUFFER_GROUP,
+                0,
+            )
+        } {
+            unsafe {
+                alloc::alloc::dealloc(entries as *mut u8, ring_layout);
+                alloc::alloc::dealloc(memory, memory_layout);
+            }
+            return Err(err);
+        }
+        let mut buffers = ProvidedBuffers {
+            entries,
+            memory,
+            count,
+            size,
+            tail: 0,
+        };
+        for bid in 0..count {
+            buffers.give_back(bid);
+        }
+        buffers.publish();
+        Ok(buffers)
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.count as usize
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size
+    }
+
+    /// The bytes the kernel wrote into buffer `bid`, `len` of them.
+    pub(crate) fn bytes(&self, bid: u16, len: usize) -> &[u8] {
+        debug_assert!(bid < self.count && len <= self.size);
+        unsafe { std::slice::from_raw_parts(self.memory.add(bid as usize * self.size), len) }
+    }
+
+    /// Queues buffer `bid` for the kernel to pick again. Visible to the
+    /// kernel after [`publish`](Self::publish).
+    pub(crate) fn give_back(&mut self, bid: u16) {
+        debug_assert!(bid < self.count);
+        let slot = (self.tail & (self.count - 1)) as usize;
+        unsafe {
+            let entry = &mut *self.entries.add(slot);
+            entry.set_addr(self.memory.add(bid as usize * self.size) as u64);
+            entry.set_len(self.size as u32);
+            entry.set_bid(bid);
+        }
+        self.tail = self.tail.wrapping_add(1);
+    }
+
+    /// Makes every buffer given back so far visible to the kernel.
+    pub(crate) fn publish(&self) {
+        unsafe {
+            let tail =
+                types::BufRingEntry::tail(self.entries) as *const std::sync::atomic::AtomicU16;
+            (*tail).store(self.tail, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+impl Drop for ProvidedBuffers {
+    /// The ring this was registered with is declared before it in
+    /// [`SleepableRing`], so the registration is gone by the time the memory
+    /// is.
+    fn drop(&mut self) {
+        unsafe {
+            alloc::alloc::dealloc(
+                self.entries as *mut u8,
+                Layout::from_size_align_unchecked(
+                    self.count as usize * size_of::<types::BufRingEntry>(),
+                    4096,
+                ),
+            );
+            alloc::alloc::dealloc(
+                self.memory,
+                Layout::from_size_align_unchecked(self.count as usize * self.size, 4096),
+            );
+        }
+    }
+}
+
 struct SleepableRing {
     ring: IoUring,
+    /// Declared after `ring` so the registration is released first.
+    provided_buffers: Option<ProvidedBuffers>,
     size: usize,
     submission_queue: ReactorQueue,
     name: &'static str,
@@ -1103,6 +1231,7 @@ impl SleepableRing {
         check_uring_support()?;
         Ok(SleepableRing {
             ring: IoUring::new(size as _)?,
+            provided_buffers: None,
             size,
             submission_queue: UringQueueState::with_capacity(size * 4),
             name,
@@ -1491,6 +1620,7 @@ impl Reactor {
         mut io_memory: usize,
         ring_depth: usize,
         blocking_thread: BlockingThreadPool,
+        recv_buffers: crate::executor::RecvBuffers,
     ) -> crate::Result<Reactor, ()> {
         const MIN_MEMLOCK_LIMIT: u64 = 512 * 1024;
         let (memlock_limit, _) = Resource::MEMLOCK.get()?;
@@ -1518,6 +1648,19 @@ impl Reactor {
         let mut poll_ring = PollRing::new(ring_depth, allocator.clone(), source_map.clone())?;
         let mut latency_ring =
             SleepableRing::new(ring_depth, "latency", allocator.clone(), source_map.clone())?;
+        if recv_buffers.count > 0 {
+            match ProvidedBuffers::register(
+                &latency_ring.ring,
+                recv_buffers.count,
+                recv_buffers.size,
+            ) {
+                Ok(buffers) => latency_ring.provided_buffers = Some(buffers),
+                Err(err) => warn!(
+                    "this kernel takes no provided-buffer ring ({err}); buffered sockets will \
+                     read without multishot receive"
+                ),
+            }
+        }
 
         match unsafe { main_ring.submitter().register_buffers(&registry) } {
             Err(x) => warn!("Error: registering buffers in the main ring. Skipping{x:#?}"),
@@ -1576,6 +1719,16 @@ impl Reactor {
 
     pub(crate) fn ring_depth(&self) -> usize {
         self.rings_depth
+    }
+
+    /// The receive buffers lent to the kernel, as `(count, size)`, or `None`
+    /// when there are none, by configuration or because the kernel refused.
+    pub(crate) fn provided_buffers(&self) -> Option<(usize, usize)> {
+        self.latency_ring
+            .borrow()
+            .provided_buffers
+            .as_ref()
+            .map(|b| (b.count(), b.size()))
     }
 
     pub(crate) fn install_eventfd(&self) {
@@ -2328,6 +2481,65 @@ mod tests {
         }
     }
 
+    /// The pool the builder asked for is the pool the latency ring holds.
+    #[test]
+    fn provided_buffers_follow_the_builder() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .recv_buffers(64, 4096)
+            .make()
+            .unwrap();
+        ex.run(async {
+            assert_eq!(
+                crate::executor().reactor().sys.provided_buffers(),
+                Some((64, 4096))
+            );
+        });
+    }
+
+    /// A count that is not a power of two is rounded up, as the kernel needs.
+    #[test]
+    fn provided_buffer_count_rounds_up() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .recv_buffers(100, 512)
+            .make()
+            .unwrap();
+        ex.run(async {
+            assert_eq!(
+                crate::executor().reactor().sys.provided_buffers(),
+                Some((128, 512))
+            );
+        });
+    }
+
+    /// Zero buffers means no ring registered at all.
+    #[test]
+    fn zero_provided_buffers_registers_nothing() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .recv_buffers(0, 4096)
+            .make()
+            .unwrap();
+        ex.run(async {
+            assert_eq!(crate::executor().reactor().sys.provided_buffers(), None);
+        });
+    }
+
+    /// Every buffer handed back lands in its own slot with its own address.
+    #[test]
+    fn provided_buffers_are_distinct() {
+        let ring = IoUring::new(8).unwrap();
+        let buffers = ProvidedBuffers::register(&ring, 8, 1024).unwrap();
+        let addresses: std::collections::HashSet<usize> = (0..8)
+            .map(|bid| buffers.bytes(bid, 1024).as_ptr() as usize)
+            .collect();
+        assert_eq!(addresses.len(), 8);
+        let sorted = {
+            let mut v: Vec<usize> = addresses.into_iter().collect();
+            v.sort();
+            v
+        };
+        assert!(sorted.windows(2).all(|w| w[1] - w[0] == 1024));
+    }
+
     #[test]
     fn missing_opcodes_are_named_in_the_error() {
         let err = UringUnsupported::MissingOps(vec!["STATX", "CLOSE"]).to_string();
@@ -2352,7 +2564,14 @@ mod tests {
     fn timeout_smoke_test() {
         let notifier = sys::new_sleep_notifier().unwrap();
         let pool = BlockingThreadPool::new(PoolPlacement::Unbound(1), notifier.clone()).unwrap();
-        let reactor = Reactor::new(notifier, 0, 128, pool).unwrap();
+        let reactor = Reactor::new(
+            notifier,
+            0,
+            128,
+            pool,
+            crate::executor::RecvBuffers::default(),
+        )
+        .unwrap();
 
         fn timeout_source(millis: u64) -> (Source, UringOpDescriptor) {
             let source = Source::new(
