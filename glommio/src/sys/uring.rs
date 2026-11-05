@@ -3017,7 +3017,12 @@ mod tests {
                 "200 bytes take four 64-byte buffers"
             );
             drop(source);
-            assert_eq!(buffers.borrow().held(), 0);
+            settle(&reactor);
+            assert_eq!(
+                buffers.borrow().held(),
+                0,
+                "the cancellation's completion did not return the queued buffers"
+            );
         });
     }
 
