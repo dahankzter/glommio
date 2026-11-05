@@ -443,6 +443,11 @@ pub(crate) struct GlommioStream<S, B> {
     rx_done: Cell<bool>,
     /// A completion-based read with the receive buffer lent to the kernel.
     rx_source: Option<Source>,
+    /// The multishot receive a buffered stream arms for its lifetime, when
+    /// the executor lends buffers. While it is armed every byte the socket
+    /// produces lands in one of those buffers, so nothing here reads the
+    /// socket directly.
+    rx_multi: Option<Source>,
 }
 
 impl<S> From<socket2::Socket> for GlommioStream<S, NonBuffered>
@@ -465,6 +470,7 @@ where
             rx_buf: NonBuffered,
             rx_done: Cell::new(false),
             rx_source: None,
+            rx_multi: None,
         }
     }
 }
@@ -485,13 +491,19 @@ where
     }
 }
 
-impl<S> GlommioStream<S, NonBuffered> {
+impl<S: AsRawFd> GlommioStream<S, NonBuffered> {
     pub(crate) fn buffered_with<B: Buffered>(self, rx_buf: B) -> GlommioStream<S, B> {
+        let rx_multi = self
+            .stream
+            .reactor
+            .upgrade()
+            .and_then(|reactor| reactor.recv_multi(self.stream.stream.as_raw_fd()));
         GlommioStream {
             stream: self.stream,
             rx_buf,
             rx_done: self.rx_done,
             rx_source: self.rx_source,
+            rx_multi,
         }
     }
 }
@@ -523,6 +535,20 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
             return Ok(len);
         }
         let mut pos = self.rx_buf.peek(buf);
+        if let Some(multi) = self.rx_multi.as_ref() {
+            if let SourceType::RecvMulti(state) = &*multi.source_type() {
+                let buffers = state.buffers.borrow();
+                for arrival in &state.ready {
+                    if pos == buf.len() {
+                        break;
+                    }
+                    let bytes = &buffers.bytes(arrival.bid, arrival.len)[arrival.taken..];
+                    let n = bytes.len().min(buf.len() - pos);
+                    buf[pos..pos + n].copy_from_slice(&bytes[..n]);
+                    pos += n;
+                }
+            }
+        }
         if pos < buf.len() && !self.rx_done.get() {
             if let Some(result) = self.stream.try_peek(&mut buf[pos..]) {
                 match result {
@@ -548,7 +574,10 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
         if self.rx_buf.is_empty() {
-            if buf.len() >= self.rx_buf.buffer_size() && self.rx_source.is_none() {
+            if buf.len() >= self.rx_buf.buffer_size()
+                && self.rx_source.is_none()
+                && self.rx_multi.is_none()
+            {
                 return self.stream.poll_read(cx, buf);
             }
             if !self.rx_done.get() {
@@ -570,6 +599,9 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
     /// Fills the receive buffer by a speculative `recv`, a completion read
     /// into the lent buffer, or readiness when the buffer cannot be lent.
     fn poll_fill(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
+        if self.rx_multi.is_some() {
+            return self.poll_fill_multishot(cx);
+        }
         if let Some(source) = self.rx_source.as_ref() {
             let reactor = self.stream.reactor.upgrade().unwrap();
             let Some(result) = source.result() else {
@@ -605,6 +637,85 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
             }
             None => self.stream.poll_read(cx, self.rx_buf.unfilled()),
         }
+    }
+
+    /// Fills the receive buffer from the multishot receive: the next queued
+    /// arrival if there is one, else whatever the kernel has already posted
+    /// and the reactor has not yet looked at, else waits. A request the
+    /// kernel has dropped is re-armed, after taking what the socket holds,
+    /// unless it ended in end of file or an error.
+    fn poll_fill_multishot(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
+        let reactor = self.stream.reactor.upgrade().unwrap();
+        let mut reaped = false;
+        loop {
+            if let Some(n) = self.take_arrival() {
+                self.stream.read_timeout.cancel_timer(&reactor);
+                return Poll::Ready(Ok(n));
+            }
+            let multi = self.rx_multi.as_ref().unwrap();
+            let Some(result) = multi.result() else {
+                if !reaped {
+                    reaped = true;
+                    if poll_err!(reactor.reap_latency_completions()) > 0 {
+                        continue;
+                    }
+                }
+                poll_err!(self.stream.read_timeout.check(&reactor));
+                multi.add_waiter_single(cx.waker());
+                self.stream
+                    .read_timeout
+                    .maybe_set_timer(&reactor, cx.waker());
+                return Poll::Pending;
+            };
+            self.rx_multi = None;
+            match result {
+                Ok(0) => return Poll::Ready(Ok(0)),
+                Ok(_) => {}
+                Err(err) if err.raw_os_error() == Some(libc::ENOBUFS) => {}
+                Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
+                    reactor.refuse_recv_multi();
+                    return self.poll_fill(cx);
+                }
+                Err(err) => return Poll::Ready(Err(err)),
+            }
+            let fd = self.stream.stream.as_raw_fd();
+            if let Some(result) = self.stream.poll_read_speculative(self.rx_buf.unfilled()) {
+                self.rx_multi = reactor.recv_multi(fd);
+                return Poll::Ready(result);
+            }
+            match reactor.recv_multi(fd) {
+                Some(source) => self.rx_multi = Some(source),
+                None => return self.poll_fill(cx),
+            }
+        }
+    }
+
+    /// Copies the oldest queued arrival into the receive buffer, as much as
+    /// fits, and gives the kernel its buffer back once it is drained.
+    fn take_arrival(&mut self) -> Option<usize> {
+        let multi = self.rx_multi.as_ref()?;
+        let mut source_type = multi.source_type_mut();
+        let SourceType::RecvMulti(state) = &mut *source_type else {
+            unreachable!("rx_multi holds a multishot receive");
+        };
+        let arrival = state.ready.front_mut()?;
+        let room = self.rx_buf.unfilled();
+        let n = {
+            let buffers = state.buffers.borrow();
+            let bytes = &buffers.bytes(arrival.bid, arrival.len)[arrival.taken..];
+            let n = bytes.len().min(room.len());
+            room[..n].copy_from_slice(&bytes[..n]);
+            n
+        };
+        arrival.taken += n;
+        if arrival.taken == arrival.len {
+            let bid = arrival.bid;
+            state.ready.pop_front();
+            let mut buffers = state.buffers.borrow_mut();
+            buffers.give_back(bid);
+            buffers.publish();
+        }
+        Some(n)
     }
 
     pub(crate) fn poll_write(&mut self, cx: &Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
