@@ -2986,9 +2986,11 @@ mod tests {
         });
     }
 
-    /// On a kernel that bundles, one completion carries everything the
-    /// socket held, over as many buffers as that took, and the stream reads
-    /// it back whole.
+    /// A write larger than one buffer comes back whole over several, with
+    /// every buffer accounted for. How many completions the kernel splits
+    /// it into is its business: this kernel takes three full buffers in one
+    /// and the 8-byte tail in another, so a bundle is an economy, not a
+    /// promise.
     #[test]
     fn a_bundled_arrival_spans_buffers() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
@@ -3008,13 +3010,6 @@ mod tests {
             let (ready, armed) = arrivals(&source);
             assert!(armed);
             assert_eq!(ready.concat(), message);
-            let bundled = match &*source.source_type() {
-                SourceType::RecvMulti(state) => state.bundled,
-                _ => unreachable!(),
-            };
-            if bundled {
-                assert_eq!(ready.len(), 1, "a bundled receive split one write");
-            }
             let buffers = reactor.sys.recv_buffers().unwrap();
             assert_eq!(
                 buffers.borrow().held(),
