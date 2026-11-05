@@ -886,12 +886,14 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
                 rx_buf: self.rx_buf,
                 rx_done: self.rx_done,
                 rx_source: self.rx_source,
+                rx_multi: self.rx_multi,
             },
             GlommioStream {
                 stream: tx,
                 rx_buf: NonBuffered,
                 rx_done: Cell::new(false),
                 rx_source: None,
+                rx_multi: None,
             },
         )
     }
@@ -916,6 +918,7 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<Rc<S>, B> {
             rx_buf: rx.rx_buf,
             rx_done: rx.rx_done,
             rx_source: rx.rx_source,
+            rx_multi: rx.rx_multi,
         })
     }
 }
