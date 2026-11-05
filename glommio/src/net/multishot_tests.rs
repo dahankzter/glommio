@@ -209,19 +209,48 @@ fn an_arrival_already_posted_is_ready_on_the_first_poll() {
     });
 }
 
-/// Reaping inline must not hide a fired preempt timer: the executor is told
-/// to yield as if the completion queue were still non-empty.
+/// Reaping inline must not hide a fired preempt timer: when the reap took
+/// its completion, the executor is told to yield as if the queue were still
+/// non-empty.
 #[test]
-fn an_inline_reap_asks_the_executor_to_yield() {
-    executor(8, 64).run(async {
-        let (mut writer, mut reader) = pair(Preallocated::default()).await;
-        writer.write_all(b"x").await.unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        let mut got = [0u8; 1];
-        poll_once(reader.read(&mut got)).await.unwrap().unwrap();
-        assert!(
-            crate::executor().need_preempt(),
-            "inline reap consumed completions without asking for a pass"
-        );
-    });
+fn an_inline_reap_that_takes_the_preempt_timer_asks_the_executor_to_yield() {
+    LocalExecutorBuilder::new(Placement::Unbound)
+        .recv_buffers(8, 64)
+        .preempt_timer(Duration::from_millis(1))
+        .make()
+        .unwrap()
+        .run(async {
+            let (mut writer, mut reader) = pair(Preallocated::default()).await;
+            writer.write_all(b"x").await.unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            let mut got = [0u8; 1];
+            poll_once(reader.read(&mut got)).await.unwrap().unwrap();
+            assert!(
+                crate::executor().need_preempt(),
+                "inline reap consumed the preempt timer without asking for a pass"
+            );
+        });
+}
+
+/// A reap that took only the stream's own arrival asks for nothing: a pass
+/// per message is what a pipeline cannot afford.
+#[test]
+fn an_inline_reap_of_an_arrival_alone_asks_for_no_pass() {
+    LocalExecutorBuilder::new(Placement::Unbound)
+        .recv_buffers(8, 64)
+        .preempt_timer(Duration::from_secs(10))
+        .make()
+        .unwrap()
+        .run(async {
+            let (mut writer, mut reader) = pair(Preallocated::default()).await;
+            Timer::new(Duration::from_millis(5)).await;
+            writer.write_all(b"x").await.unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            let mut got = [0u8; 1];
+            poll_once(reader.read(&mut got)).await.unwrap().unwrap();
+            assert!(
+                !crate::executor().need_preempt(),
+                "a reap of the stream's own arrival asked for a pass"
+            );
+        });
 }

@@ -1854,9 +1854,12 @@ impl Reactor {
     /// this before parking, so an arrival already in the queue is seen on the
     /// same poll.
     ///
-    /// Anything consumed here would otherwise have made the executor yield
-    /// at its next check, the preempt timer's completion included, so the
-    /// request to yield is kept on the side and cleared by the next pass.
+    /// The preempt timer's completion may be among what is consumed, and
+    /// that one would otherwise have made the executor yield at its next
+    /// check, so when it is, the request to yield is kept on the side and
+    /// cleared by the next pass. Other completions only wake their waiters,
+    /// which needs no pass, and asking for one per reap turns a pipeline
+    /// into a pass per message.
     pub(crate) fn reap_latency_completions(&self) -> io::Result<usize> {
         let mut woke = 0;
         let mut ring = self.latency_ring.borrow_mut();
@@ -1870,10 +1873,19 @@ impl Reactor {
             .or_else(Reactor::intr_ok)?;
         let consumed = ring.consume_completion_queue(&mut woke);
         drop(ring);
-        if consumed > 0 {
+        if consumed > 0 && self.preempt_timer_fired() {
             self.preempt_requested.set(true);
         }
         Ok(consumed)
+    }
+
+    /// Whether the latency ring's preempt timer has completed and the
+    /// executor has not yet run the pass that would act on it.
+    fn preempt_timer_fired(&self) -> bool {
+        let timer = self.latency_preemption_timeout_src.take();
+        let fired = timer.as_ref().is_some_and(|t| t.result().is_some());
+        self.latency_preemption_timeout_src.set(timer);
+        fired
     }
 
     /// Whether an inline reap has taken completions the executor has not
