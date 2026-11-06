@@ -1151,6 +1151,10 @@ impl UringCommon for PollRing {
 /// group per ring is all multishot receive needs.
 const RECV_BUFFER_GROUP: u16 = 0;
 
+/// `IORING_ENTER_GETEVENTS`, the same value on every architecture: an entry
+/// that asks for events, which is what runs a deferred ring's task work.
+const GETEVENTS: u32 = 1;
+
 /// Receive buffers lent to the kernel through a provided-buffer ring.
 ///
 /// `entries` is the ring the kernel reads buffer descriptors from and
@@ -1329,12 +1333,13 @@ struct SleepableRing {
     /// Declared after `ring` so the registration is released first. Shared
     /// with every multishot source, which gives its buffers back through it.
     provided_buffers: Option<Rc<RefCell<ProvidedBuffers>>>,
-    /// Whether the kernel was told to run this ring's task work at the
-    /// thread's next kernel entry instead of interrupting it per completion
-    /// (`IORING_SETUP_COOP_TASKRUN`), and to say so in the submission
-    /// queue's flags (`IORING_SETUP_TASKRUN_FLAG`). A multishot receive
-    /// completes once per arrival, and an interrupt per arrival is what a
-    /// pipelined client pays most for.
+    /// Whether the kernel was told to defer this ring's task work until
+    /// this thread enters the ring (`IORING_SETUP_DEFER_TASKRUN`, which
+    /// needs `IORING_SETUP_SINGLE_ISSUER`), and to say work is pending in
+    /// the submission queue's flags. A poll wakeup then only queues the
+    /// receive; it runs, and takes everything the socket holds, when the
+    /// reactor enters, so a burst of arrivals costs one receive and one
+    /// completion instead of one of each per arrival.
     cooperative: bool,
     size: usize,
     submission_queue: ReactorQueue,
@@ -1347,8 +1352,9 @@ struct SleepableRing {
 }
 
 impl SleepableRing {
-    /// Builds the ring, cooperatively when asked and the kernel allows it;
-    /// a kernel before 5.19 refuses the flags and the ring is built plain.
+    /// Builds the ring, with deferred task work when asked and the kernel
+    /// allows it; a kernel before 6.1 refuses the flags and the ring is
+    /// built plain.
     fn new(
         size: usize,
         name: &'static str,
@@ -1359,7 +1365,8 @@ impl SleepableRing {
         check_uring_support()?;
         let (ring, cooperative) = match cooperative {
             true => match IoUring::builder()
-                .setup_coop_taskrun()
+                .setup_single_issuer()
+                .setup_defer_taskrun()
                 .setup_taskrun_flag()
                 .build(size as _)
             {
@@ -1393,19 +1400,25 @@ impl SleepableRing {
         self.cooperative && self.ring.submission().taskrun()
     }
 
-    /// Enters the kernel with nothing to submit so pending task work runs
-    /// and its completions are posted. One syscall for however many are
-    /// pending, which is the whole point of the cooperative ring.
+    /// Enters the kernel with nothing to submit and nothing to wait for, so
+    /// pending task work runs and its completions are posted. One syscall
+    /// for however many are pending, which is the whole point of deferring.
+    /// Deferred work runs only on an entry that asks for events, so the
+    /// flag is passed explicitly rather than through `submit`, which sets
+    /// it only when it waits.
     fn run_pending_task_work(&mut self) -> io::Result<bool> {
         if !self.task_work_pending() {
             return Ok(false);
         }
-        self.ring
-            .submitter()
-            .submit()
-            .or_else(Reactor::busy_ok)
-            .or_else(Reactor::again_ok)
-            .or_else(Reactor::intr_ok)?;
+        unsafe {
+            self.ring
+                .submitter()
+                .enter::<libc::sigset_t>(0, 0, GETEVENTS, None)
+        }
+        .map(|_| ())
+        .or_else(Reactor::busy_ok)
+        .or_else(Reactor::again_ok)
+        .or_else(Reactor::intr_ok)?;
         Ok(true)
     }
 
@@ -1661,8 +1674,20 @@ impl UringCommon for SleepableRing {
         self.submission_queue.clone()
     }
 
+    /// A deferred ring asks for events on every entry, since nothing it
+    /// completes is posted otherwise; a submit-only entry would leave a
+    /// cancelled timeout counted as in flight and the ring unable to sleep.
     fn submit_sqes(&mut self) -> io::Result<usize> {
-        let x = self.ring.submit()?;
+        let x = if self.cooperative {
+            let to_submit = self.ring.submission().len() as u32;
+            unsafe {
+                self.ring
+                    .submitter()
+                    .enter::<libc::sigset_t>(to_submit, 0, GETEVENTS, None)?
+            }
+        } else {
+            self.ring.submit()?
+        };
         self.in_kernel += x;
         Ok(x)
     }
@@ -1714,6 +1739,10 @@ pub(crate) struct Reactor {
     latency_preemption_timeout_src: Cell<Option<Source>>,
     throughput_preemption_timeout_src: Cell<Option<Source>>,
 
+    /// The main ring's fd. The reactor sleeps on the latency ring, which
+    /// defers its task work, and watches the main ring from there; the other
+    /// way round would not wake, since deferred work wakes only the ring's
+    /// own submitter and never pollers of its fd.
     link_fd: RawFd,
 
     /// This keeps the `eventfd` alive. Drop will close it when we're done
@@ -1870,7 +1899,7 @@ impl Reactor {
             },
         }
 
-        let link_fd = latency_ring.ring_fd();
+        let link_fd = main_ring.ring_fd();
 
         let eventfd_src = Source::new(
             IoRequirements::default(),
@@ -1988,15 +2017,16 @@ impl Reactor {
     }
 
     /// Whether an inline reap has taken completions the executor has not
-    /// yet answered with a pass. Pending task work on the cooperative ring
-    /// is deliberately not a reason here: making it one turned every batch
-    /// of arrivals into a pass and a syscall, and the preempt timer already
-    /// bounds how long a task runs without the reactor looking.
+    /// yet answered with a pass, or the latency ring holds deferred work.
+    /// With deferred task work nothing is posted until the reactor enters,
+    /// the preempt timer's completion included, so pending work has to
+    /// count as a reason to yield or a CPU-bound queue would never be
+    /// preempted.
     pub(crate) fn preempt_requested(&self) -> bool {
-        self.preempt_requested.get()
+        self.preempt_requested.get() || self.latency_ring.borrow_mut().task_work_pending()
     }
 
-    /// Whether the latency ring runs its task work cooperatively.
+    /// Whether the latency ring defers its task work.
     #[cfg(test)]
     pub(crate) fn latency_ring_is_cooperative(&self) -> bool {
         self.latency_ring.borrow().cooperative
@@ -2390,7 +2420,10 @@ impl Reactor {
     pub(crate) fn poll_io(&self, woke: &mut usize) -> io::Result<()> {
         self.poll_ring.borrow_mut().poll(woke)?;
         self.main_ring.borrow_mut().poll(woke)?;
-        self.latency_ring.borrow_mut().poll(woke)?;
+        let mut latency_ring = self.latency_ring.borrow_mut();
+        latency_ring.run_pending_task_work()?;
+        latency_ring.poll(woke)?;
+        drop(latency_ring);
         *woke += self.flush_syscall_thread();
         Ok(())
     }
@@ -2545,7 +2578,7 @@ impl Reactor {
             lat_ring = self.latency_ring.borrow_mut();
             if events == 0 {
                 if self.eventfd_src.is_installed().unwrap() {
-                    self.link_rings_and_sleep(&mut main_ring)
+                    self.link_rings_and_sleep(&mut lat_ring)
                         .expect("some error");
                     lat_ring.run_pending_task_work()?;
                     flush_cancellations!(into &mut 0; lat_ring, poll_ring, main_ring);
@@ -2924,6 +2957,39 @@ mod tests {
                 .reactor()
                 .sys
                 .latency_ring_is_cooperative());
+        });
+    }
+
+    /// An arrival from another thread that the kernel has not posted yet
+    /// asks the executor to yield by the flag alone, before any reap.
+    #[test]
+    fn pending_task_work_counts_as_a_reason_to_yield() {
+        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
+            .recv_buffers(8, 64)
+            .preempt_timer(Duration::from_secs(10))
+            .make()
+            .unwrap();
+        ex.run(async {
+            use std::os::fd::AsRawFd as _;
+            let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+            let reactor = crate::executor().reactor();
+            let _source = reactor.recv_multi(reader.as_raw_fd()).unwrap();
+            settle(&reactor);
+            assert!(!reactor.sys.preempt_requested());
+
+            let peer = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                std::io::Write::write_all(&mut writer, b"from afar").unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+            });
+            let start = Instant::now();
+            while !reactor.sys.preempt_requested() {
+                assert!(
+                    start.elapsed() < Duration::from_millis(200),
+                    "an arrival from another thread never asked the executor to yield"
+                );
+            }
+            peer.join().unwrap();
         });
     }
 
