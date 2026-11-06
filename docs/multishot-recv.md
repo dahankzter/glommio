@@ -91,19 +91,28 @@ entries of `size` bytes each, contiguous, page-aligned, allocated once at
 executor start. Giving a buffer back to the kernel is a write to the ring's
 tail, no syscall.
 
-**Both numbers are the user's.** `LocalExecutorBuilder::recv_buffers(count,
-size)` and the same on `LocalExecutorPoolBuilder`. No one default fits a
-proxy pushing 64 KiB frames and a key-value store answering in 40 bytes, and
-the memory is per executor, so a pool of 64 shards multiplies it by 64. The
-defaults, for a builder that does not say:
+**Both numbers are the user's, and the default is off.**
+`LocalExecutorBuilder::recv_buffers(count, size)` and the same on
+`LocalExecutorPoolBuilder`. No one default fits a proxy pushing 64 KiB frames
+and a key-value store answering in 40 bytes, and the memory is per executor,
+so a pool of 64 shards multiplies it by 64. A builder that does not say gets
+no buffers and no multishot, and nothing changes for a program that upgrades.
+The reason it is opt-in is in the measurements above: on a single connection
+multishot buys 10% throughput with 1.5 times the CPU per transaction, by
+spending the reply's latency on reactor passes instead of parked, and that
+is the application's trade to make. Under fan-in, many connections into one
+executor, it is a saving per message.
 
-- `size`: 8 KiB, the buffer a buffered stream already allocates today
-  (`Preallocated::DEFAULT_BUFFER_SIZE`), so the meaning of "a full fill"
-  does not change for a stream that never asked for a size.
-- `count`: 1024, which makes the pool 8 MiB, on the scale of the 10 MiB of
-  `io_memory` an executor already sets aside. The count bounds how many
-  arrivals the kernel can hold between two visits to the completion queue, not
-  how many connections can be open; an idle connection holds no buffer.
+- `size` is the most one completion carries; a message larger than it arrives
+  in several. The protocol's usual message is the right number, 8 KiB if
+  unsure, which is the buffer a buffered stream already allocates for itself
+  (`Preallocated::DEFAULT_BUFFER_SIZE`).
+- `count` bounds how many arrivals the kernel can hold between two visits to
+  the completion queue, not how many connections can be open; an idle
+  connection holds no buffer. Connections times the arrivals each may have
+  outstanding between two visits is the number. Running out is not fatal:
+  the kernel ends the request with `ENOBUFS`, the stream takes what is there
+  and re-arms, and the reader never notices, at the cost of a submission.
 - `count = 0` disables multishot and every buffered stream keeps the
   completion path.
 

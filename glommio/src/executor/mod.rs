@@ -78,8 +78,6 @@ pub(crate) const DEFAULT_EXECUTOR_NAME: &str = "unnamed";
 pub(crate) const DEFAULT_PREEMPT_TIMER: Duration = Duration::from_millis(100);
 pub(crate) const DEFAULT_IO_MEMORY: usize = 10 << 20;
 pub(crate) const DEFAULT_RING_SUBMISSION_DEPTH: usize = 128;
-/// Provided receive buffers per executor, see [`LocalExecutorBuilder::recv_buffers`].
-pub(crate) const DEFAULT_RECV_BUFFER_COUNT: usize = 1024;
 /// Bytes per provided receive buffer: what a buffered stream allocates for
 /// itself, so a full fill means the same thing either way.
 pub(crate) const DEFAULT_RECV_BUFFER_SIZE: usize = crate::net::Preallocated::DEFAULT_BUFFER_SIZE;
@@ -118,9 +116,12 @@ impl RecvBuffers {
     }
 }
 
+/// Off: no buffers, no multishot, and nothing allocated. Multishot trades
+/// CPU for throughput on a core that would otherwise idle, which is a
+/// choice the application makes, not the runtime.
 impl Default for RecvBuffers {
     fn default() -> Self {
-        Self::new(DEFAULT_RECV_BUFFER_COUNT, DEFAULT_RECV_BUFFER_SIZE)
+        Self::new(0, DEFAULT_RECV_BUFFER_SIZE)
     }
 }
 
@@ -657,14 +658,18 @@ impl LocalExecutorBuilder {
     /// to a power of two and is at most 32768. `size` is the most one
     /// completion can carry; a message larger than it arrives in several.
     ///
-    /// The memory is `count * size` per executor, allocated at start. The
-    /// default is 1024 buffers of 8 KiB, 8 MiB, which is the buffer a
-    /// buffered stream allocates for itself times a count on the scale of
-    /// [`io_memory`](Self::io_memory). A pool of shards multiplies it by the
-    /// number of shards, which is why both numbers are here rather than
-    /// chosen for you. A `count` of zero turns multishot receive off, and
-    /// buffered streams submit a read per message as before. A kernel older
-    /// than 6.0 behaves as if it were zero.
+    /// The memory is `count * size` per executor, allocated at start, and a
+    /// pool of shards multiplies it by the number of shards, which is why
+    /// both numbers are here rather than chosen for you. The default is
+    /// none: multishot is off, buffered streams submit a read per message,
+    /// and nothing is allocated. A `count` of zero says the same. A kernel
+    /// older than 6.0 behaves as if it were zero. Multishot pays under
+    /// fan-in, many connections into one executor; on a single connection
+    /// it buys throughput with CPU the core would otherwise have idled, so
+    /// measure before turning it on. A reasonable first `size` is the
+    /// message the protocol usually carries, 8 KiB if unsure, and `count`
+    /// the connections times the arrivals each may have outstanding between
+    /// two visits to the ring.
     ///
     /// [`TcpStream`]: crate::net::TcpStream
     /// [`UnixStream`]: crate::net::UnixStream
