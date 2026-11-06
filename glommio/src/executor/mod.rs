@@ -104,13 +104,16 @@ pub struct RecvBuffers {
 }
 
 impl RecvBuffers {
-    /// The kernel's limit on a buffer ring: 32768 entries, a power of two.
+    /// The kernel's limit on a buffer ring: 32768 entries.
     pub const MAX_COUNT: usize = 32768;
+    /// The kernel's limit on a buffer: its length is 32 bits.
+    pub const MAX_SIZE: usize = u32::MAX as usize;
     /// The size used when none is given: 8 KiB, the buffer a buffered stream
     /// allocates for itself, so a full fill means the same thing either way.
     pub const DEFAULT_SIZE: usize = DEFAULT_RECV_BUFFER_SIZE;
 
     /// No buffers and no multishot, which is the default.
+    #[must_use = "The buffers must be given to a builder to be useful"]
     pub fn none() -> Self {
         RecvBuffers {
             count: 0,
@@ -118,41 +121,36 @@ impl RecvBuffers {
         }
     }
 
-    /// `count` buffers of `size` bytes. The count is rounded up to a power of
-    /// two, as the kernel requires, and must not be above
-    /// [`MAX_COUNT`](Self::MAX_COUNT); zero is [`none`](Self::none).
+    /// `count` buffers of `size` bytes, exactly. A count of zero is
+    /// [`none`](Self::none), whatever the size.
     ///
     /// # Panics
     ///
-    /// If `count` is above the kernel's limit, or `size` is zero with a
-    /// non-zero count.
+    /// If `count` is above [`MAX_COUNT`](Self::MAX_COUNT), or `size` is zero
+    /// or above [`MAX_SIZE`](Self::MAX_SIZE), with a non-zero count.
+    #[must_use = "The buffers must be given to a builder to be useful"]
     pub fn exact(count: usize, size: usize) -> Self {
+        if count == 0 {
+            return Self::none();
+        }
         assert!(
             count <= Self::MAX_COUNT,
             "recv_buffers: count {count} is above the kernel's limit of {}",
             Self::MAX_COUNT
         );
-        assert!(
-            count == 0 || size > 0,
-            "recv_buffers: a receive buffer of zero bytes cannot hold a message"
-        );
-        RecvBuffers {
-            count: if count == 0 {
-                0
-            } else {
-                count.next_power_of_two()
-            },
-            size,
-        }
+        Self::check_size(size);
+        RecvBuffers { count, size }
     }
 
     /// As many buffers of [`DEFAULT_SIZE`](Self::DEFAULT_SIZE) as fit in
-    /// `bytes`, rounded down to a power of two so the budget is never
-    /// exceeded. A pool multiplies the budget by its shard count.
+    /// `bytes`, so the budget is never exceeded, and at most
+    /// [`MAX_COUNT`](Self::MAX_COUNT). A pool multiplies the budget by its
+    /// shard count.
     ///
     /// # Panics
     ///
     /// If `bytes` is below one buffer.
+    #[must_use = "The buffers must be given to a builder to be useful"]
     pub fn budget(bytes: usize) -> Self {
         Self::budget_of(bytes, Self::DEFAULT_SIZE)
     }
@@ -161,31 +159,34 @@ impl RecvBuffers {
     ///
     /// # Panics
     ///
-    /// If `size` is zero or `bytes` is below one buffer.
+    /// If `size` is zero or above [`MAX_SIZE`](Self::MAX_SIZE), or `bytes`
+    /// is below one buffer.
+    #[must_use = "The buffers must be given to a builder to be useful"]
     pub fn budget_of(bytes: usize, size: usize) -> Self {
-        assert!(
-            size > 0,
-            "recv_buffers: a receive buffer of zero bytes cannot hold a message"
-        );
+        Self::check_size(size);
         assert!(
             bytes >= size,
             "recv_buffers: a budget of {bytes} bytes holds no buffer of {size}"
         );
-        let fitting = (bytes / size).min(Self::MAX_COUNT);
-        let count = if fitting.is_power_of_two() {
-            fitting
-        } else {
-            fitting.next_power_of_two() / 2
-        };
-        RecvBuffers { count, size }
+        RecvBuffers {
+            count: (bytes / size).min(Self::MAX_COUNT),
+            size,
+        }
     }
 
     /// Sized from the workload: `connections` open at once, each with
     /// [`arrivals_each`](RecvBuffersShape::arrivals_each) outstanding, two
     /// unless said otherwise, of
     /// [`message_size`](RecvBuffersShape::message_size) bytes, 8 KiB unless
-    /// said otherwise. The count is rounded up to a power of two and capped
-    /// at [`MAX_COUNT`](Self::MAX_COUNT).
+    /// said otherwise. Zero connections is [`none`](Self::none). The count
+    /// is capped at [`MAX_COUNT`](Self::MAX_COUNT), which a shape above it
+    /// does not reach; the exhaustion count in the IO stats says so at run
+    /// time.
+    ///
+    /// The product is an upper bound: the kernel runs deferred receives a
+    /// batch at a time and buffers come back between batches, so fewer
+    /// usually do. The exhaustion count is the way to size downward.
+    #[must_use = "The shape must be given to a builder to be useful"]
     pub fn for_connections(connections: usize) -> RecvBuffersShape {
         RecvBuffersShape {
             connections,
@@ -194,7 +195,7 @@ impl RecvBuffers {
         }
     }
 
-    /// How many buffers, after rounding; zero means multishot is off.
+    /// How many buffers; zero means multishot is off.
     pub fn count(&self) -> usize {
         self.count
     }
@@ -204,9 +205,24 @@ impl RecvBuffers {
         self.size
     }
 
-    /// The memory this costs per executor.
+    /// The memory this costs per executor. Cannot overflow: the count and
+    /// size limits keep the product under 2^47.
     pub fn bytes(&self) -> usize {
         self.count * self.size
+    }
+
+    /// The kernel describes a buffer with a 32-bit length; a larger one
+    /// would be registered as its length modulo 2^32 and read back whole,
+    /// which is a corrupt stream, not an error.
+    fn check_size(size: usize) {
+        assert!(
+            size > 0,
+            "recv_buffers: a receive buffer of zero bytes cannot hold a message"
+        );
+        assert!(
+            size <= Self::MAX_SIZE,
+            "recv_buffers: a receive buffer of {size} bytes is above the kernel's 32-bit length"
+        );
     }
 }
 
@@ -232,7 +248,7 @@ pub struct RecvBuffersShape {
 impl RecvBuffersShape {
     /// How many arrivals one connection may have outstanding between two
     /// visits to the ring: the pipeline depth for a pipelined protocol, one
-    /// or two for request and response.
+    /// or two for request and response. Zero is [`RecvBuffers::none`].
     #[must_use = "The shape must be given to a builder to be useful"]
     pub fn arrivals_each(mut self, arrivals: usize) -> Self {
         self.arrivals_each = arrivals;
@@ -241,13 +257,20 @@ impl RecvBuffersShape {
 
     /// The bytes one buffer holds: the protocol's usual message. A larger
     /// message arrives in several buffers.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` is zero or above [`RecvBuffers::MAX_SIZE`], here rather
+    /// than in the builder, so the panic names the call that caused it.
     #[must_use = "The shape must be given to a builder to be useful"]
     pub fn message_size(mut self, bytes: usize) -> Self {
+        RecvBuffers::check_size(bytes);
         self.message_size = bytes;
         self
     }
 
     /// The count and size this shape comes to.
+    #[must_use = "The buffers must be given to a builder to be useful"]
     pub fn resolve(self) -> RecvBuffers {
         self.into()
     }
@@ -256,14 +279,7 @@ impl RecvBuffersShape {
 impl From<RecvBuffersShape> for RecvBuffers {
     fn from(shape: RecvBuffersShape) -> Self {
         let wanted = shape.connections.saturating_mul(shape.arrivals_each);
-        let count = wanted
-            .checked_next_power_of_two()
-            .unwrap_or(RecvBuffers::MAX_COUNT)
-            .min(RecvBuffers::MAX_COUNT);
-        if count == 0 {
-            return RecvBuffers::none();
-        }
-        RecvBuffers::exact(count, shape.message_size)
+        RecvBuffers::exact(wanted.min(RecvBuffers::MAX_COUNT), shape.message_size)
     }
 }
 
@@ -796,9 +812,9 @@ impl LocalExecutorBuilder {
     /// `count` bounds how many arrivals the kernel can hold between two visits
     /// to the completion queue, not how many connections can be open. When
     /// they run out the kernel drops the request with `ENOBUFS` and the
-    /// stream falls back to a plain read until it re-arms. It is rounded up
-    /// to a power of two and is at most 32768. `size` is the most one
-    /// completion can carry; a message larger than it arrives in several.
+    /// stream falls back to a plain read until it re-arms. It is at most
+    /// 32768. `size` is the most one completion can carry; a message larger
+    /// than it arrives in several.
     ///
     /// The memory is `count * size` per executor, allocated at start, and a
     /// pool of shards multiplies it by the number of shards, which is why

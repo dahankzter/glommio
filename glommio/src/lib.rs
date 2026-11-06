@@ -787,6 +787,10 @@ pub struct IoStats {
     /// [`RecvBuffers`] and had to be re-armed, since the stats were last
     /// taken. Each costs a submission and a plain read; a steady rate says
     /// the count is too small for the connections and their arrivals.
+    /// Counted for the executor as a whole: the reactor cannot say which
+    /// task queue a receive belongs to, so
+    /// [`task_queue_io_stats`](crate::ExecutorProxy::task_queue_io_stats)
+    /// reports zero here.
     pub recv_buffers_exhausted: u64,
 }
 

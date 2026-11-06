@@ -3495,6 +3495,7 @@ pub struct glommio::prelude::executor::RecvBuffers
 impl glommio::RecvBuffers
 pub const glommio::RecvBuffers::DEFAULT_SIZE: usize
 pub const glommio::RecvBuffers::MAX_COUNT: usize
+pub const glommio::RecvBuffers::MAX_SIZE: usize
 pub fn glommio::RecvBuffers::budget(bytes: usize) -> Self
 pub fn glommio::RecvBuffers::budget_of(bytes: usize, size: usize) -> Self
 pub fn glommio::RecvBuffers::bytes(&self) -> usize
@@ -6355,6 +6356,7 @@ pub struct glommio::RecvBuffers
 impl glommio::RecvBuffers
 pub const glommio::RecvBuffers::DEFAULT_SIZE: usize
 pub const glommio::RecvBuffers::MAX_COUNT: usize
+pub const glommio::RecvBuffers::MAX_SIZE: usize
 pub fn glommio::RecvBuffers::budget(bytes: usize) -> Self
 pub fn glommio::RecvBuffers::budget_of(bytes: usize, size: usize) -> Self
 pub fn glommio::RecvBuffers::bytes(&self) -> usize

@@ -12,28 +12,52 @@ use glommio::{
 #[test]
 fn the_three_ways_of_stating_the_buffers_resolve() {
     let exact = RecvBuffers::exact(100, 4096);
-    assert_eq!((exact.count(), exact.size()), (128, 4096));
+    assert_eq!(
+        (exact.count(), exact.size()),
+        (100, 4096),
+        "exact means exact"
+    );
 
     let budget = RecvBuffers::budget(16 << 20);
     assert_eq!(budget.count(), 2048);
     assert_eq!(budget.size(), RecvBuffers::DEFAULT_SIZE);
-    assert!(budget.bytes() <= 16 << 20, "a budget was exceeded");
+    assert_eq!(budget.bytes(), 16 << 20, "the whole budget is used");
     let odd = RecvBuffers::budget_of(100_000, 4096);
-    assert_eq!(odd.count(), 16, "24 fit, 16 is the power of two below");
+    assert_eq!(odd.count(), 24, "as many as fit, no rounding");
+    assert!(odd.bytes() <= 100_000);
+    let vast = RecvBuffers::budget(1 << 40);
+    assert_eq!(
+        vast.count(),
+        RecvBuffers::MAX_COUNT,
+        "capped at the kernel's limit"
+    );
 
     let shaped = RecvBuffers::for_connections(1000)
         .arrivals_each(4)
         .message_size(512)
         .resolve();
-    assert_eq!((shaped.count(), shaped.size()), (4096, 512));
+    assert_eq!((shaped.count(), shaped.size()), (4000, 512));
     let defaults = RecvBuffers::for_connections(3).resolve();
-    assert_eq!(defaults.count(), 8, "two arrivals each, rounded up");
+    assert_eq!(defaults.count(), 6, "two arrivals each");
     assert_eq!(defaults.size(), RecvBuffers::DEFAULT_SIZE);
     let huge = RecvBuffers::for_connections(usize::MAX).resolve();
     assert_eq!(huge.count(), RecvBuffers::MAX_COUNT, "capped, not refused");
 
     assert_eq!(RecvBuffers::none().count(), 0);
     assert_eq!(RecvBuffers::default(), RecvBuffers::none());
+    assert_eq!(
+        RecvBuffers::exact(0, 4096),
+        RecvBuffers::none(),
+        "off is one value, whatever size came with it"
+    );
+    assert_eq!(
+        RecvBuffers::for_connections(0).resolve(),
+        RecvBuffers::none()
+    );
+    assert_eq!(
+        RecvBuffers::for_connections(10).arrivals_each(0).resolve(),
+        RecvBuffers::none()
+    );
 }
 
 #[test]
@@ -80,4 +104,19 @@ fn too_many_recv_buffers_is_refused_at_build_time() {
 #[should_panic(expected = "holds no buffer")]
 fn a_budget_below_one_buffer_is_refused() {
     let _ = RecvBuffers::budget(100);
+}
+
+/// The kernel describes a buffer with a 32-bit length; a larger one was
+/// registered as its length modulo 2^32 and read back whole, which
+/// corrupted the stream without an error.
+#[test]
+#[should_panic(expected = "32-bit length")]
+fn a_buffer_the_kernel_cannot_describe_is_refused() {
+    let _ = RecvBuffers::exact(1, 1 << 32);
+}
+
+#[test]
+#[should_panic(expected = "zero bytes")]
+fn a_zero_message_size_is_refused_where_it_is_given() {
+    let _ = RecvBuffers::for_connections(4).message_size(0);
 }

@@ -116,14 +116,19 @@ executor, it is a saving per message.
 - `count` bounds how many arrivals the kernel can hold between two visits to
   the completion queue, not how many connections can be open; an idle
   connection holds no buffer. Connections times the arrivals each may have
-  outstanding between two visits is the number. Running out is not fatal:
+  outstanding between two visits is the number, and it is an upper bound:
+  the kernel runs deferred receives a batch at a time and buffers come back
+  between batches, so 64 connections with one message each waiting took 33
+  buffers, not 64. Running out is not fatal:
   the kernel ends the request with `ENOBUFS`, the stream takes what is there
   and re-arms, and the reader never notices, at the cost of a submission.
 - `count = 0` disables multishot and every buffered stream keeps the
   completion path.
 
-`count` is at most 32768 and is rounded up to a power of two, both kernel
-rules.
+`count` is at most 32768, a kernel rule. The ring the kernel reads buffer
+descriptors from must hold a power of two of entries and is sized to the one
+at or above `count`; the buffers themselves are exactly `count`, so a budget
+costs what it says and not up to twice that.
 
 ### A ring of its own, with deferred task work
 

@@ -648,6 +648,13 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
     /// buffer itself, arrival by arrival: a pipeline's replies sit in the
     /// queue as a dozen completions, and handing them out one per poll costs
     /// a poll round each.
+    ///
+    /// A request that ran out of buffers is counted for the IO stats. A
+    /// plain multishot says so with `ENOBUFS`; a bundled one ends, without
+    /// error, on the arrival that took the last buffer, which is the only
+    /// way a bundled request ends with data and no error. A plain one that
+    /// ends that way was cut off by a full completion queue instead, which
+    /// more buffers would not help, so it is not counted.
     fn poll_fill_multishot(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
         let reactor = self.stream.reactor.upgrade().unwrap();
         let mut reaped = false;
@@ -679,9 +686,8 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
             self.rx_multi = None;
             match result {
                 Ok(0) => return Poll::Ready(Ok(0)),
-                // The buffers ran out: a plain request ends with ENOBUFS, a
-                // bundled one on the arrival that took the last buffer.
-                Ok(_) => reactor.note_recv_buffers_exhausted(),
+                Ok(_) if was_bundled => reactor.note_recv_buffers_exhausted(),
+                Ok(_) => {}
                 Err(err) if err.raw_os_error() == Some(libc::ENOBUFS) => {
                     reactor.note_recv_buffers_exhausted()
                 }
