@@ -1351,6 +1351,10 @@ struct SleepableRing {
     /// Whether a stream reaping inline has already paid the one entry it is
     /// allowed between two reactor passes. Reset by the pass and by a reap
     /// that found something, so a burst of empty polls costs one syscall.
+    /// The pass reads it too: an entry a few microseconds old has run the
+    /// deferred work already, and a pass that entered again behind it was
+    /// a busy poll that found the reply before the sleep could park, at
+    /// the cost of the whole core.
     inline_enter_spent: bool,
     size: usize,
     submission_queue: ReactorQueue,
@@ -1414,6 +1418,23 @@ impl SleepableRing {
         if !self.cooperative || self.in_kernel == 0 {
             return Ok(());
         }
+        self.enter_for_events()
+    }
+
+    /// The reactor pass's entry: skipped when a stream entered since the
+    /// last pass, since that entry ran the work and the sleep, if the pass
+    /// ends in one, runs whatever has come since. A busy executor whose
+    /// readers are all parked gets the entry, which is what keeps their
+    /// arrivals surfacing without a sleep.
+    fn run_deferred_work_for_pass(&mut self) -> io::Result<()> {
+        let spent = std::mem::replace(&mut self.inline_enter_spent, false);
+        if spent {
+            return Ok(());
+        }
+        self.run_deferred_work()
+    }
+
+    fn enter_for_events(&mut self) -> io::Result<()> {
         unsafe {
             self.ring
                 .submitter()
@@ -1624,21 +1645,17 @@ impl SleepableRing {
                 }
             }
 
-            if self
-                .submit_sqes()
+            let submitted = self
+                .ring
+                .submit_and_wait(1)
                 .or_else(Reactor::busy_ok)
                 .or_else(Reactor::again_ok)
-                .or_else(Reactor::intr_ok)?
-                != links.len()
-            {
+                .or_else(Reactor::intr_ok)?;
+            self.in_kernel += submitted;
+            if submitted != links.len() {
                 Err(io::Error::from_raw_os_error(libc::EBUSY))
             } else {
-                self.ring
-                    .submit_and_wait(1)
-                    .map(|_| 1)
-                    .or_else(Reactor::busy_ok)
-                    .or_else(Reactor::again_ok)
-                    .or_else(Reactor::intr_ok)
+                Ok(1)
             }
         } else {
             self.submit_sqes()
@@ -2428,8 +2445,7 @@ impl Reactor {
         self.main_ring.borrow_mut().poll(woke)?;
         self.latency_ring.borrow_mut().poll(woke)?;
         let mut socket_ring = self.socket_ring.borrow_mut();
-        socket_ring.inline_enter_spent = false;
-        socket_ring.run_deferred_work()?;
+        socket_ring.run_deferred_work_for_pass()?;
         socket_ring.poll(woke)?;
         drop(socket_ring);
         *woke += self.flush_syscall_thread();
@@ -2549,8 +2565,7 @@ impl Reactor {
         let mut lat_ring = self.latency_ring.borrow_mut();
         let mut sock_ring = self.socket_ring.borrow_mut();
 
-        sock_ring.inline_enter_spent = false;
-        sock_ring.run_deferred_work()?;
+        sock_ring.run_deferred_work_for_pass()?;
         consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring, sock_ring);
 
         drop(self.latency_preemption_timeout_src.take());
