@@ -59,6 +59,14 @@ branch, three interleaved runs each, CPU on the reading thread per message:
 streaming rung moved from 2833 ns to 2742 ns per 64 KiB, 3% better, and the
 unbuffered rung did not move, as it keeps its path.
 
+The ring of its own (below) did not move the ladder: buffered 903/888/894 ns
+against 899/905/909 ns for the revision before it, three interleaved runs.
+What it moved is the pipelined cell: on the PostgreSQL client's
+`pipeline-select 1 × 16`, three runs of five seconds, 44564/44499/44578
+transactions a second at a p99 of 0.369 ms, where the readiness path does
+45079 at 0.365 ms and the revision before the ring did 599 at 196 ms.
+`select-only 1 × 1` went from 70046 to 77946/78664.
+
 ## Acceptance
 
 Two cells of the PostgreSQL client's scoreboard, both against the main this
