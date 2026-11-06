@@ -679,8 +679,12 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
             self.rx_multi = None;
             match result {
                 Ok(0) => return Poll::Ready(Ok(0)),
-                Ok(_) => {}
-                Err(err) if err.raw_os_error() == Some(libc::ENOBUFS) => {}
+                // The buffers ran out: a plain request ends with ENOBUFS, a
+                // bundled one on the arrival that took the last buffer.
+                Ok(_) => reactor.note_recv_buffers_exhausted(),
+                Err(err) if err.raw_os_error() == Some(libc::ENOBUFS) => {
+                    reactor.note_recv_buffers_exhausted()
+                }
                 Err(err) if err.raw_os_error() == Some(libc::EINVAL) => {
                     reactor.refuse_recv_multi(was_bundled);
                     if was_bundled {

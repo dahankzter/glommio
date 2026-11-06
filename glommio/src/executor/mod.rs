@@ -83,19 +83,50 @@ pub(crate) const DEFAULT_RING_SUBMISSION_DEPTH: usize = 128;
 pub(crate) const DEFAULT_RECV_BUFFER_SIZE: usize = crate::net::Preallocated::DEFAULT_BUFFER_SIZE;
 
 /// The receive buffers an executor lends to the kernel for multishot
-/// receive. `count` of zero means none, and no multishot.
+/// receive: `count` buffers of `size` bytes, `count * size` bytes per
+/// executor, allocated at start. See [`LocalExecutorBuilder::recv_buffers`]
+/// for what they do and when to want them. Three ways to say it:
+///
+/// - [`for_connections`](Self::for_connections), from the workload: how many
+///   connections, how many arrivals each may have outstanding between two
+///   visits to the ring, and the size of a message;
+/// - [`budget`](Self::budget), from the memory to spend per executor;
+/// - [`exact`](Self::exact), the two numbers, for a workload already measured.
+///
+/// Whichever way, [`count`](Self::count) and [`size`](Self::size) say what
+/// was resolved, worth a line in the startup log, and
+/// [`IoStats::recv_buffers_exhausted`](crate::IoStats::recv_buffers_exhausted)
+/// says afterwards whether it was enough.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RecvBuffers {
-    pub(crate) count: usize,
-    pub(crate) size: usize,
+pub struct RecvBuffers {
+    count: usize,
+    size: usize,
 }
 
 impl RecvBuffers {
-    /// The kernel's limits: a buffer ring holds at most 32768 entries and the
-    /// count must be a power of two, which it is rounded up to.
-    pub(crate) const MAX_COUNT: usize = 32768;
+    /// The kernel's limit on a buffer ring: 32768 entries, a power of two.
+    pub const MAX_COUNT: usize = 32768;
+    /// The size used when none is given: 8 KiB, the buffer a buffered stream
+    /// allocates for itself, so a full fill means the same thing either way.
+    pub const DEFAULT_SIZE: usize = DEFAULT_RECV_BUFFER_SIZE;
 
-    pub(crate) fn new(count: usize, size: usize) -> Self {
+    /// No buffers and no multishot, which is the default.
+    pub fn none() -> Self {
+        RecvBuffers {
+            count: 0,
+            size: Self::DEFAULT_SIZE,
+        }
+    }
+
+    /// `count` buffers of `size` bytes. The count is rounded up to a power of
+    /// two, as the kernel requires, and must not be above
+    /// [`MAX_COUNT`](Self::MAX_COUNT); zero is [`none`](Self::none).
+    ///
+    /// # Panics
+    ///
+    /// If `count` is above the kernel's limit, or `size` is zero with a
+    /// non-zero count.
+    pub fn exact(count: usize, size: usize) -> Self {
         assert!(
             count <= Self::MAX_COUNT,
             "recv_buffers: count {count} is above the kernel's limit of {}",
@@ -114,6 +145,69 @@ impl RecvBuffers {
             size,
         }
     }
+
+    /// As many buffers of [`DEFAULT_SIZE`](Self::DEFAULT_SIZE) as fit in
+    /// `bytes`, rounded down to a power of two so the budget is never
+    /// exceeded. A pool multiplies the budget by its shard count.
+    ///
+    /// # Panics
+    ///
+    /// If `bytes` is below one buffer.
+    pub fn budget(bytes: usize) -> Self {
+        Self::budget_of(bytes, Self::DEFAULT_SIZE)
+    }
+
+    /// As [`budget`](Self::budget), with buffers of `size` bytes.
+    ///
+    /// # Panics
+    ///
+    /// If `size` is zero or `bytes` is below one buffer.
+    pub fn budget_of(bytes: usize, size: usize) -> Self {
+        assert!(
+            size > 0,
+            "recv_buffers: a receive buffer of zero bytes cannot hold a message"
+        );
+        assert!(
+            bytes >= size,
+            "recv_buffers: a budget of {bytes} bytes holds no buffer of {size}"
+        );
+        let fitting = (bytes / size).min(Self::MAX_COUNT);
+        let count = if fitting.is_power_of_two() {
+            fitting
+        } else {
+            fitting.next_power_of_two() / 2
+        };
+        RecvBuffers { count, size }
+    }
+
+    /// Sized from the workload: `connections` open at once, each with
+    /// [`arrivals_each`](RecvBuffersShape::arrivals_each) outstanding, two
+    /// unless said otherwise, of
+    /// [`message_size`](RecvBuffersShape::message_size) bytes, 8 KiB unless
+    /// said otherwise. The count is rounded up to a power of two and capped
+    /// at [`MAX_COUNT`](Self::MAX_COUNT).
+    pub fn for_connections(connections: usize) -> RecvBuffersShape {
+        RecvBuffersShape {
+            connections,
+            arrivals_each: 2,
+            message_size: Self::DEFAULT_SIZE,
+        }
+    }
+
+    /// How many buffers, after rounding; zero means multishot is off.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// The bytes in each buffer, the most one completion carries.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// The memory this costs per executor.
+    pub fn bytes(&self) -> usize {
+        self.count * self.size
+    }
 }
 
 /// Off: no buffers, no multishot, and nothing allocated. Multishot trades
@@ -121,7 +215,55 @@ impl RecvBuffers {
 /// choice the application makes, not the runtime.
 impl Default for RecvBuffers {
     fn default() -> Self {
-        Self::new(0, DEFAULT_RECV_BUFFER_SIZE)
+        Self::none()
+    }
+}
+
+/// A [`RecvBuffers`] stated from the workload, see
+/// [`RecvBuffers::for_connections`]. Passed to the builder as is, or
+/// resolved with [`resolve`](Self::resolve) to read the numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecvBuffersShape {
+    connections: usize,
+    arrivals_each: usize,
+    message_size: usize,
+}
+
+impl RecvBuffersShape {
+    /// How many arrivals one connection may have outstanding between two
+    /// visits to the ring: the pipeline depth for a pipelined protocol, one
+    /// or two for request and response.
+    #[must_use = "The shape must be given to a builder to be useful"]
+    pub fn arrivals_each(mut self, arrivals: usize) -> Self {
+        self.arrivals_each = arrivals;
+        self
+    }
+
+    /// The bytes one buffer holds: the protocol's usual message. A larger
+    /// message arrives in several buffers.
+    #[must_use = "The shape must be given to a builder to be useful"]
+    pub fn message_size(mut self, bytes: usize) -> Self {
+        self.message_size = bytes;
+        self
+    }
+
+    /// The count and size this shape comes to.
+    pub fn resolve(self) -> RecvBuffers {
+        self.into()
+    }
+}
+
+impl From<RecvBuffersShape> for RecvBuffers {
+    fn from(shape: RecvBuffersShape) -> Self {
+        let wanted = shape.connections.saturating_mul(shape.arrivals_each);
+        let count = wanted
+            .checked_next_power_of_two()
+            .unwrap_or(RecvBuffers::MAX_COUNT)
+            .min(RecvBuffers::MAX_COUNT);
+        if count == 0 {
+            return RecvBuffers::none();
+        }
+        RecvBuffers::exact(count, shape.message_size)
     }
 }
 
@@ -641,8 +783,8 @@ impl LocalExecutorBuilder {
         self
     }
 
-    /// The receive buffers this executor lends to the kernel: `count` buffers
-    /// of `size` bytes each.
+    /// The receive buffers this executor lends to the kernel, a
+    /// [`RecvBuffers`] or the shape [`RecvBuffers::for_connections`] gives.
     ///
     /// A buffered [`TcpStream`] or [`UnixStream`] arms one multishot receive
     /// for its lifetime instead of submitting a read per message. The kernel
@@ -666,16 +808,18 @@ impl LocalExecutorBuilder {
     /// older than 6.0 behaves as if it were zero. Multishot pays under
     /// fan-in, many connections into one executor; on a single connection
     /// it buys throughput with CPU the core would otherwise have idled, so
-    /// measure before turning it on. A reasonable first `size` is the
-    /// message the protocol usually carries, 8 KiB if unsure, and `count`
-    /// the connections times the arrivals each may have outstanding between
-    /// two visits to the ring.
+    /// measure before turning it on. [`RecvBuffers::for_connections`] does
+    /// the arithmetic from the workload, [`RecvBuffers::budget`] from the
+    /// memory, and [`IoStats::recv_buffers_exhausted`] says afterwards
+    /// whether the count was enough.
+    ///
+    /// [`IoStats::recv_buffers_exhausted`]: crate::IoStats::recv_buffers_exhausted
     ///
     /// [`TcpStream`]: crate::net::TcpStream
     /// [`UnixStream`]: crate::net::UnixStream
     #[must_use = "The builder must be built to be useful"]
-    pub fn recv_buffers(mut self, count: usize, size: usize) -> LocalExecutorBuilder {
-        self.recv_buffers = RecvBuffers::new(count, size);
+    pub fn recv_buffers(mut self, buffers: impl Into<RecvBuffers>) -> LocalExecutorBuilder {
+        self.recv_buffers = buffers.into();
         self
     }
 
@@ -996,8 +1140,8 @@ impl LocalExecutorPoolBuilder {
     /// The receive buffers each executor in the pool lends to the kernel, as
     /// [`LocalExecutorBuilder::recv_buffers`]. The memory is per executor.
     #[must_use = "The builder must be built to be useful"]
-    pub fn recv_buffers(mut self, count: usize, size: usize) -> Self {
-        self.recv_buffers = RecvBuffers::new(count, size);
+    pub fn recv_buffers(mut self, buffers: impl Into<RecvBuffers>) -> Self {
+        self.recv_buffers = buffers.into();
         self
     }
 

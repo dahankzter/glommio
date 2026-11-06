@@ -1811,6 +1811,9 @@ pub(crate) struct Reactor {
     /// Set once the kernel has rejected the bundle flag (before 6.10), after
     /// which multishot receives are armed one buffer per completion.
     bundle_refused: Cell<bool>,
+    /// Multishot receives that ended because the buffers ran out, since the
+    /// stats were last taken.
+    recv_buffers_exhausted: Cell<u64>,
 }
 
 pub(crate) fn common_flags() -> PollFlags {
@@ -1913,11 +1916,11 @@ impl Reactor {
             source_map.clone(),
             true,
         )?;
-        if recv_buffers.count > 0 {
+        if recv_buffers.count() > 0 {
             match ProvidedBuffers::register(
                 &socket_ring.ring,
-                recv_buffers.count,
-                recv_buffers.size,
+                recv_buffers.count(),
+                recv_buffers.size(),
             ) {
                 Ok(buffers) => socket_ring.provided_buffers = Some(Rc::new(RefCell::new(buffers))),
                 Err(err) => warn!(
@@ -1978,6 +1981,7 @@ impl Reactor {
             rings_depth: ring_depth,
             recv_multi_refused: Cell::new(false),
             bundle_refused: Cell::new(false),
+            recv_buffers_exhausted: Cell::new(0),
         })
     }
 
@@ -2022,6 +2026,12 @@ impl Reactor {
     /// Remembers that this kernel answered a bundled receive with EINVAL.
     pub(crate) fn refuse_bundle(&self) {
         self.bundle_refused.set(true);
+    }
+
+    /// Counts a multishot receive the kernel ended for want of a buffer.
+    pub(crate) fn note_recv_buffers_exhausted(&self) {
+        self.recv_buffers_exhausted
+            .set(self.recv_buffers_exhausted.get() + 1);
     }
 
     /// Consumes what the socket ring has posted, for a stream that found
@@ -2693,6 +2703,7 @@ impl Reactor {
             std::mem::take(&mut self.main_ring.borrow_mut().stats),
             std::mem::take(&mut self.latency_ring.borrow_mut().stats),
             std::mem::take(&mut self.poll_ring.borrow_mut().stats),
+            self.recv_buffers_exhausted.take(),
         )
     }
 
@@ -2723,6 +2734,7 @@ impl Reactor {
                 main.unwrap_or_default(),
                 lat.unwrap_or_default(),
                 poll.unwrap_or_default(),
+                0,
             ))
         }
     }
@@ -2833,7 +2845,7 @@ mod tests {
     #[test]
     fn provided_buffers_follow_the_builder() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(64, 4096)
+            .recv_buffers(crate::RecvBuffers::exact(64, 4096))
             .make()
             .unwrap();
         ex.run(async {
@@ -2848,7 +2860,7 @@ mod tests {
     #[test]
     fn provided_buffer_count_rounds_up() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(100, 512)
+            .recv_buffers(crate::RecvBuffers::exact(100, 512))
             .make()
             .unwrap();
         ex.run(async {
@@ -2863,7 +2875,7 @@ mod tests {
     #[test]
     fn zero_provided_buffers_registers_nothing() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(0, 4096)
+            .recv_buffers(crate::RecvBuffers::exact(0, 4096))
             .make()
             .unwrap();
         ex.run(async {
@@ -2905,7 +2917,7 @@ mod tests {
     #[test]
     fn a_multishot_source_queues_every_arrival_and_retires_on_eof() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(8, 64)
+            .recv_buffers(crate::RecvBuffers::exact(8, 64))
             .make()
             .unwrap();
         ex.run(async {
@@ -2944,7 +2956,7 @@ mod tests {
     #[test]
     fn a_multishot_source_stops_with_enobufs_when_the_ring_runs_dry() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(2, 16)
+            .recv_buffers(crate::RecvBuffers::exact(2, 16))
             .make()
             .unwrap();
         ex.run(async {
@@ -2992,7 +3004,7 @@ mod tests {
     #[test]
     fn an_inline_reap_runs_pending_task_work() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(8, 64)
+            .recv_buffers(crate::RecvBuffers::exact(8, 64))
             .preempt_timer(Duration::from_secs(10))
             .make()
             .unwrap();
@@ -3055,7 +3067,7 @@ mod tests {
     #[test]
     fn a_bundled_arrival_spans_buffers() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(8, 64)
+            .recv_buffers(crate::RecvBuffers::exact(8, 64))
             .make()
             .unwrap();
         ex.run(async {
@@ -3128,14 +3140,7 @@ mod tests {
     fn timeout_smoke_test() {
         let notifier = sys::new_sleep_notifier().unwrap();
         let pool = BlockingThreadPool::new(PoolPlacement::Unbound(1), notifier.clone()).unwrap();
-        let reactor = Reactor::new(
-            notifier,
-            0,
-            128,
-            pool,
-            crate::executor::RecvBuffers::default(),
-        )
-        .unwrap();
+        let reactor = Reactor::new(notifier, 0, 128, pool, crate::RecvBuffers::none()).unwrap();
 
         fn timeout_source(millis: u64) -> (Source, UringOpDescriptor) {
             let source = Source::new(
@@ -3254,14 +3259,7 @@ mod tests {
         );
         let notifier = sys::new_sleep_notifier().unwrap();
         let pool = BlockingThreadPool::new(PoolPlacement::Unbound(1), notifier.clone()).unwrap();
-        let mut reactor = Reactor::new(
-            notifier,
-            0,
-            128,
-            pool,
-            crate::executor::RecvBuffers::default(),
-        )
-        .unwrap();
+        let mut reactor = Reactor::new(notifier, 0, 128, pool, crate::RecvBuffers::none()).unwrap();
 
         let queues = [
             ("main", reactor.main_ring.get_mut().submission_queue()),
