@@ -661,7 +661,7 @@ impl<S: AsRawFd, B: RxBuf> GlommioStream<S, B> {
             let Some(result) = multi.result() else {
                 if !reaped {
                     reaped = true;
-                    if poll_err!(reactor.reap_latency_completions()) > 0 {
+                    if poll_err!(reactor.reap_socket_completions()) > 0 {
                         continue;
                     }
                 }

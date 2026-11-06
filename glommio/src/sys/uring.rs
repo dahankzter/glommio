@@ -1335,12 +1335,23 @@ struct SleepableRing {
     provided_buffers: Option<Rc<RefCell<ProvidedBuffers>>>,
     /// Whether the kernel was told to defer this ring's task work until
     /// this thread enters the ring (`IORING_SETUP_DEFER_TASKRUN`, which
-    /// needs `IORING_SETUP_SINGLE_ISSUER`), and to say work is pending in
-    /// the submission queue's flags. A poll wakeup then only queues the
-    /// receive; it runs, and takes everything the socket holds, when the
+    /// needs `IORING_SETUP_SINGLE_ISSUER`). A poll wakeup then only queues
+    /// the receive; it runs, and takes everything the socket holds, when the
     /// reactor enters, so a burst of arrivals costs one receive and one
-    /// completion instead of one of each per arrival.
+    /// completion instead of one of each per arrival. Nothing such a ring
+    /// completes is posted until it is entered, so every entry on it asks
+    /// for events, and the reactor enters it once per pass.
+    ///
+    /// The kernel also reports pending work in the submission queue's flags
+    /// (`IORING_SQ_TASKRUN`), and that flag is deliberately never read: a
+    /// multishot receive that re-queues itself while the work runs leaves
+    /// it set over an empty queue, where no entry clears it, and a reactor
+    /// that took it for pending work spun at 140k entries a second.
     cooperative: bool,
+    /// Whether a stream reaping inline has already paid the one entry it is
+    /// allowed between two reactor passes. Reset by the pass and by a reap
+    /// that found something, so a burst of empty polls costs one syscall.
+    inline_enter_spent: bool,
     size: usize,
     submission_queue: ReactorQueue,
     name: &'static str,
@@ -1367,7 +1378,6 @@ impl SleepableRing {
             true => match IoUring::builder()
                 .setup_single_issuer()
                 .setup_defer_taskrun()
-                .setup_taskrun_flag()
                 .build(size as _)
             {
                 Ok(ring) => (ring, true),
@@ -1379,6 +1389,7 @@ impl SleepableRing {
             ring,
             provided_buffers: None,
             cooperative,
+            inline_enter_spent: false,
             size,
             submission_queue: UringQueueState::with_capacity(size * 4),
             name,
@@ -1394,21 +1405,14 @@ impl SleepableRing {
         std::os::unix::io::AsRawFd::as_raw_fd(&self.ring)
     }
 
-    /// Whether the kernel holds completions it has not posted yet, which a
-    /// cooperative ring reports in the submission queue's flags.
-    fn task_work_pending(&mut self) -> bool {
-        self.cooperative && self.ring.submission().taskrun()
-    }
-
     /// Enters the kernel with nothing to submit and nothing to wait for, so
-    /// pending task work runs and its completions are posted. One syscall
-    /// for however many are pending, which is the whole point of deferring.
-    /// Deferred work runs only on an entry that asks for events, so the
-    /// flag is passed explicitly rather than through `submit`, which sets
-    /// it only when it waits.
-    fn run_pending_task_work(&mut self) -> io::Result<bool> {
-        if !self.task_work_pending() {
-            return Ok(false);
+    /// a deferred ring's pending task work runs and its completions are
+    /// posted. One syscall for however many are pending, which is the whole
+    /// point of deferring. Does nothing on a plain ring, whose work the
+    /// kernel runs on its own, or on a ring with no request in flight.
+    fn run_deferred_work(&mut self) -> io::Result<()> {
+        if !self.cooperative || self.in_kernel == 0 {
+            return Ok(());
         }
         unsafe {
             self.ring
@@ -1418,8 +1422,19 @@ impl SleepableRing {
         .map(|_| ())
         .or_else(Reactor::busy_ok)
         .or_else(Reactor::again_ok)
-        .or_else(Reactor::intr_ok)?;
-        Ok(true)
+        .or_else(Reactor::intr_ok)
+    }
+
+    /// The one entry a stream reaping inline may make between two passes,
+    /// when the completion queue is empty: it runs whatever the kernel has
+    /// deferred, so a reply already in the socket is seen on the first
+    /// poll. A second empty poll before the next pass enters nothing.
+    fn run_deferred_work_once(&mut self) -> io::Result<()> {
+        if self.inline_enter_spent || !self.ring.completion().is_empty() {
+            return Ok(());
+        }
+        self.inline_enter_spent = true;
+        self.run_deferred_work()
     }
 
     /// This function prepares a timer that fires unconditionally after a
@@ -1575,29 +1590,38 @@ impl SleepableRing {
     ///
     /// The poll targets the latency ring's fd, which outlives this reactor,
     /// and the `is_full()` check above means the push cannot fail.
-    fn sleep(&mut self, link: &Source) -> io::Result<usize> {
+    /// Sleeps in this ring until it completes something, with a poll on
+    /// each of `links`, the other rings' fds, so their completions wake it
+    /// too.
+    fn sleep(&mut self, links: &[Source]) -> io::Result<usize> {
         assert_eq!(
             self.waiting_kernel_submission(),
             0,
             "sleeping with pending SQEs"
         );
-        if !self.ring.submission().is_full() {
-            let op = UringDescriptor {
-                fd: link.raw(),
-                flags: squeue::Flags::empty(),
-                user_data: to_user_data(
-                    self.source_map
-                        .borrow_mut()
-                        .add_source(link, self.submission_queue.clone()),
-                ),
-                args: UringOpDescriptor::PollAdd(common_flags() | read_flags()),
-            };
-            let entry = fill_sqe(&op, DmaBuffer::new, &mut self.source_map.borrow_mut());
-            unsafe {
-                self.ring
-                    .submission()
-                    .push(&entry)
-                    .expect("submission queue was checked to have room");
+        let room = {
+            let sq = self.ring.submission();
+            sq.capacity() - sq.len()
+        };
+        if room >= links.len() {
+            for link in links {
+                let op = UringDescriptor {
+                    fd: link.raw(),
+                    flags: squeue::Flags::empty(),
+                    user_data: to_user_data(
+                        self.source_map
+                            .borrow_mut()
+                            .add_source(link, self.submission_queue.clone()),
+                    ),
+                    args: UringOpDescriptor::PollAdd(common_flags() | read_flags()),
+                };
+                let entry = fill_sqe(&op, DmaBuffer::new, &mut self.source_map.borrow_mut());
+                unsafe {
+                    self.ring
+                        .submission()
+                        .push(&entry)
+                        .expect("submission queue was checked to have room");
+                }
             }
 
             if self
@@ -1605,7 +1629,7 @@ impl SleepableRing {
                 .or_else(Reactor::busy_ok)
                 .or_else(Reactor::again_ok)
                 .or_else(Reactor::intr_ok)?
-                != 1
+                != links.len()
             {
                 Err(io::Error::from_raw_os_error(libc::EBUSY))
             } else {
@@ -1735,15 +1759,19 @@ pub(crate) struct Reactor {
     main_ring: RefCell<SleepableRing>,
     latency_ring: RefCell<SleepableRing>,
     poll_ring: RefCell<PollRing>,
+    /// Multishot receives, and nothing else, on a ring that defers its task
+    /// work. The latency ring stays plain so that the preempt timer and a
+    /// foreign wake still interrupt a running task, which deferred work
+    /// cannot: it is posted only when this thread enters.
+    socket_ring: RefCell<SleepableRing>,
 
     latency_preemption_timeout_src: Cell<Option<Source>>,
     throughput_preemption_timeout_src: Cell<Option<Source>>,
 
-    /// The main ring's fd. The reactor sleeps on the latency ring, which
-    /// defers its task work, and watches the main ring from there; the other
-    /// way round would not wake, since deferred work wakes only the ring's
-    /// own submitter and never pollers of its fd.
-    link_fd: RawFd,
+    /// The main and latency rings' fds. The reactor sleeps in the socket
+    /// ring, whose deferred work wakes only its own submitter and never a
+    /// poller of its fd, and watches the other two from there.
+    link_fds: [RawFd; 2],
 
     /// This keeps the `eventfd` alive. Drop will close it when we're done
     notifier: Arc<sys::SleepNotifier>,
@@ -1763,11 +1791,6 @@ pub(crate) struct Reactor {
     /// Set once the kernel has rejected the bundle flag (before 6.10), after
     /// which multishot receives are armed one buffer per completion.
     bundle_refused: Cell<bool>,
-
-    /// Raised when a stream consumed latency completions inline, which may
-    /// have taken the preempt timer's with them. The executor treats it as it
-    /// would a non-empty completion queue, and the next pass clears it.
-    preempt_requested: Cell<bool>,
 }
 
 pub(crate) fn common_flags() -> PollFlags {
@@ -1861,15 +1884,22 @@ impl Reactor {
             "latency",
             allocator.clone(),
             source_map.clone(),
+            false,
+        )?;
+        let mut socket_ring = SleepableRing::new(
+            ring_depth,
+            "socket",
+            allocator.clone(),
+            source_map.clone(),
             true,
         )?;
         if recv_buffers.count > 0 {
             match ProvidedBuffers::register(
-                &latency_ring.ring,
+                &socket_ring.ring,
                 recv_buffers.count,
                 recv_buffers.size,
             ) {
-                Ok(buffers) => latency_ring.provided_buffers = Some(Rc::new(RefCell::new(buffers))),
+                Ok(buffers) => socket_ring.provided_buffers = Some(Rc::new(RefCell::new(buffers))),
                 Err(err) => warn!(
                     "this kernel takes no provided-buffer ring ({err}); buffered sockets will \
                      read without multishot receive"
@@ -1899,7 +1929,7 @@ impl Reactor {
             },
         }
 
-        let link_fd = main_ring.ring_fd();
+        let link_fds = [main_ring.ring_fd(), latency_ring.ring_fd()];
 
         let eventfd_src = Source::new(
             IoRequirements::default(),
@@ -1917,17 +1947,17 @@ impl Reactor {
             main_ring: RefCell::new(main_ring),
             latency_ring: RefCell::new(latency_ring),
             poll_ring: RefCell::new(poll_ring),
+            socket_ring: RefCell::new(socket_ring),
             latency_preemption_timeout_src: Cell::new(None),
             throughput_preemption_timeout_src: Cell::new(None),
             blocking_thread,
-            link_fd,
+            link_fds,
             notifier,
             eventfd_src,
             source_map,
             rings_depth: ring_depth,
             recv_multi_refused: Cell::new(false),
             bundle_refused: Cell::new(false),
-            preempt_requested: Cell::new(false),
         })
     }
 
@@ -1955,7 +1985,7 @@ impl Reactor {
         if self.recv_multi_refused.get() {
             return None;
         }
-        self.latency_ring.borrow().provided_buffers.clone()
+        self.socket_ring.borrow().provided_buffers.clone()
     }
 
     /// Remembers that this kernel answered a multishot receive with EINVAL,
@@ -1974,22 +2004,16 @@ impl Reactor {
         self.bundle_refused.set(true);
     }
 
-    /// Consumes whatever the kernel has already posted on the latency ring
-    /// without sleeping: shared memory, no syscall, unless a submission is
-    /// still queued, in which case it goes out first so a request armed a
-    /// moment ago is in the kernel. A stream with a multishot receive calls
-    /// this before parking, so an arrival already in the queue is seen on the
-    /// same poll.
-    ///
-    /// The preempt timer's completion may be among what is consumed, and
-    /// that one would otherwise have made the executor yield at its next
-    /// check, so when it is, the request to yield is kept on the side and
-    /// cleared by the next pass. Other completions only wake their waiters,
-    /// which needs no pass, and asking for one per reap turns a pipeline
-    /// into a pass per message.
-    pub(crate) fn reap_latency_completions(&self) -> io::Result<usize> {
+    /// Consumes what the socket ring has posted, for a stream that found
+    /// its queue empty and would otherwise wait for a reactor pass. The
+    /// queue is shared memory, so this costs no syscall when the kernel has
+    /// already posted; when it has not, the ring is entered once between
+    /// passes so deferred work runs, which is what keeps a reply already in
+    /// the socket visible on the first poll. The preempt timer lives on the
+    /// latency ring and is never touched here, so a reap asks for no pass.
+    pub(crate) fn reap_socket_completions(&self) -> io::Result<usize> {
         let mut woke = 0;
-        let mut ring = self.latency_ring.borrow_mut();
+        let mut ring = self.socket_ring.borrow_mut();
         ring.consume_cancellation_queue()
             .or_else(Reactor::busy_ok)
             .or_else(Reactor::again_ok)
@@ -1998,38 +2022,18 @@ impl Reactor {
             .or_else(Reactor::busy_ok)
             .or_else(Reactor::again_ok)
             .or_else(Reactor::intr_ok)?;
-        ring.run_pending_task_work()?;
+        ring.run_deferred_work_once()?;
         let consumed = ring.consume_completion_queue(&mut woke);
-        drop(ring);
-        if consumed > 0 && self.preempt_timer_fired() {
-            self.preempt_requested.set(true);
+        if consumed > 0 {
+            ring.inline_enter_spent = false;
         }
         Ok(consumed)
     }
 
-    /// Whether the latency ring's preempt timer has completed and the
-    /// executor has not yet run the pass that would act on it.
-    fn preempt_timer_fired(&self) -> bool {
-        let timer = self.latency_preemption_timeout_src.take();
-        let fired = timer.as_ref().is_some_and(|t| t.result().is_some());
-        self.latency_preemption_timeout_src.set(timer);
-        fired
-    }
-
-    /// Whether an inline reap has taken completions the executor has not
-    /// yet answered with a pass, or the latency ring holds deferred work.
-    /// With deferred task work nothing is posted until the reactor enters,
-    /// the preempt timer's completion included, so pending work has to
-    /// count as a reason to yield or a CPU-bound queue would never be
-    /// preempted.
-    pub(crate) fn preempt_requested(&self) -> bool {
-        self.preempt_requested.get() || self.latency_ring.borrow_mut().task_work_pending()
-    }
-
-    /// Whether the latency ring defers its task work.
+    /// Whether the socket ring defers its task work.
     #[cfg(test)]
-    pub(crate) fn latency_ring_is_cooperative(&self) -> bool {
-        self.latency_ring.borrow().cooperative
+    pub(crate) fn socket_ring_is_cooperative(&self) -> bool {
+        self.socket_ring.borrow().cooperative
     }
 
     pub(crate) fn install_eventfd(&self) {
@@ -2407,23 +2411,27 @@ impl Reactor {
     /// We may not be able to register an `SQE` at this point, so we return an
     /// Error and will just not sleep.
     fn link_rings_and_sleep(&self, ring: &mut SleepableRing) -> io::Result<()> {
-        let link_rings = Source::new(
-            IoRequirements::default(),
-            self.link_fd,
-            SourceType::LinkRings,
-            None,
-            None,
-        );
-        ring.sleep(&link_rings).or_else(Self::busy_ok).map(|_| {})
+        let links = self.link_fds.map(|fd| {
+            Source::new(
+                IoRequirements::default(),
+                fd,
+                SourceType::LinkRings,
+                None,
+                None,
+            )
+        });
+        ring.sleep(&links).or_else(Self::busy_ok).map(|_| {})
     }
 
     pub(crate) fn poll_io(&self, woke: &mut usize) -> io::Result<()> {
         self.poll_ring.borrow_mut().poll(woke)?;
         self.main_ring.borrow_mut().poll(woke)?;
-        let mut latency_ring = self.latency_ring.borrow_mut();
-        latency_ring.run_pending_task_work()?;
-        latency_ring.poll(woke)?;
-        drop(latency_ring);
+        self.latency_ring.borrow_mut().poll(woke)?;
+        let mut socket_ring = self.socket_ring.borrow_mut();
+        socket_ring.inline_enter_spent = false;
+        socket_ring.run_deferred_work()?;
+        socket_ring.poll(woke)?;
+        drop(socket_ring);
         *woke += self.flush_syscall_thread();
         Ok(())
     }
@@ -2534,15 +2542,16 @@ impl Reactor {
         Preempt: Fn() -> Option<Duration>,
         F: Fn() -> usize,
     {
-        self.preempt_requested.set(false);
         woke += self.flush_syscall_thread();
 
         let mut poll_ring = self.poll_ring.borrow_mut();
         let mut main_ring = self.main_ring.borrow_mut();
         let mut lat_ring = self.latency_ring.borrow_mut();
+        let mut sock_ring = self.socket_ring.borrow_mut();
 
-        lat_ring.run_pending_task_work()?;
-        consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring);
+        sock_ring.inline_enter_spent = false;
+        sock_ring.run_deferred_work()?;
+        consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring, sock_ring);
 
         drop(self.latency_preemption_timeout_src.take());
 
@@ -2553,15 +2562,16 @@ impl Reactor {
             ),
         ));
 
-        flush_cancellations!(into &mut woke; lat_ring, poll_ring, main_ring);
-        flush_rings!(lat_ring, poll_ring, main_ring)?;
-        consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring);
+        flush_cancellations!(into &mut woke; lat_ring, poll_ring, main_ring, sock_ring);
+        flush_rings!(lat_ring, poll_ring, main_ring, sock_ring)?;
+        consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring, sock_ring);
 
         let should_sleep = preempt_timer().is_none()
             && (woke == 0)
             && poll_ring.can_sleep()
             && main_ring.can_sleep()
-            && lat_ring.can_sleep();
+            && lat_ring.can_sleep()
+            && sock_ring.can_sleep();
 
         if should_sleep {
             if let Some(dur) = user_timer {
@@ -2571,19 +2581,19 @@ impl Reactor {
             }
             self.notifier.prepare_to_sleep();
             membarrier::heavy();
-            drop((poll_ring, main_ring, lat_ring));
+            drop((poll_ring, main_ring, lat_ring, sock_ring));
             let events = process_remote_channels() + self.flush_syscall_thread();
             poll_ring = self.poll_ring.borrow_mut();
             main_ring = self.main_ring.borrow_mut();
             lat_ring = self.latency_ring.borrow_mut();
+            sock_ring = self.socket_ring.borrow_mut();
             if events == 0 {
                 if self.eventfd_src.is_installed().unwrap() {
-                    self.link_rings_and_sleep(&mut lat_ring)
+                    self.link_rings_and_sleep(&mut sock_ring)
                         .expect("some error");
-                    lat_ring.run_pending_task_work()?;
-                    flush_cancellations!(into &mut 0; lat_ring, poll_ring, main_ring);
-                    flush_rings!(lat_ring, poll_ring, main_ring)?;
-                    consume_rings!(into &mut 0; lat_ring, poll_ring, main_ring);
+                    flush_cancellations!(into &mut 0; lat_ring, poll_ring, main_ring, sock_ring);
+                    flush_rings!(lat_ring, poll_ring, main_ring, sock_ring)?;
+                    consume_rings!(into &mut 0; lat_ring, poll_ring, main_ring, sock_ring);
                 }
                 self.notifier.wake_up();
             }
@@ -2648,8 +2658,8 @@ impl Reactor {
                 PollableStatus::Pollable => self.poll_ring.borrow_mut(),
                 PollableStatus::NonPollable(_) => self.main_ring.borrow_mut(),
             },
+            SourceType::RecvMulti(_) => self.socket_ring.borrow_mut(),
             SourceType::SockRecv(_)
-            | SourceType::RecvMulti(_)
             | SourceType::SockRecvMsg(_, _, _, _)
             | SourceType::Accept(_)
             | SourceType::Connect(_) => self.latency_ring.borrow_mut(),
@@ -2744,6 +2754,7 @@ impl Drop for Reactor {
             self.main_ring.get_mut().submission_queue(),
             self.latency_ring.get_mut().submission_queue(),
             self.poll_ring.get_mut().submission_queue(),
+            self.socket_ring.get_mut().submission_queue(),
         ];
         for queue in queues {
             for op in queue.borrow().submissions.iter() {
@@ -2946,56 +2957,20 @@ mod tests {
         });
     }
 
-    /// On a kernel that takes the flags, the latency ring is cooperative.
+    /// On a kernel that takes the flags, the socket ring defers its work.
     #[test]
-    fn the_latency_ring_runs_task_work_cooperatively() {
+    fn the_socket_ring_defers_its_task_work() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
             .make()
             .unwrap();
         ex.run(async {
-            assert!(crate::executor()
-                .reactor()
-                .sys
-                .latency_ring_is_cooperative());
-        });
-    }
-
-    /// An arrival from another thread that the kernel has not posted yet
-    /// asks the executor to yield by the flag alone, before any reap.
-    #[test]
-    fn pending_task_work_counts_as_a_reason_to_yield() {
-        let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
-            .recv_buffers(8, 64)
-            .preempt_timer(Duration::from_secs(10))
-            .make()
-            .unwrap();
-        ex.run(async {
-            use std::os::fd::AsRawFd as _;
-            let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
-            let reactor = crate::executor().reactor();
-            let _source = reactor.recv_multi(reader.as_raw_fd()).unwrap();
-            settle(&reactor);
-            assert!(!reactor.sys.preempt_requested());
-
-            let peer = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(10));
-                std::io::Write::write_all(&mut writer, b"from afar").unwrap();
-                std::thread::sleep(Duration::from_millis(100));
-            });
-            let start = Instant::now();
-            while !reactor.sys.preempt_requested() {
-                assert!(
-                    start.elapsed() < Duration::from_millis(200),
-                    "an arrival from another thread never asked the executor to yield"
-                );
-            }
-            peer.join().unwrap();
+            assert!(crate::executor().reactor().sys.socket_ring_is_cooperative());
         });
     }
 
     /// An arrival from another thread that the kernel has not posted yet is
-    /// still taken by an inline reap: the flag says work is pending and the
-    /// reap enters once to run it.
+    /// still taken by an inline reap: the reap enters once between passes
+    /// to run the deferred work.
     #[test]
     fn an_inline_reap_runs_pending_task_work() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
@@ -3016,7 +2991,7 @@ mod tests {
             });
             let start = Instant::now();
             loop {
-                reactor.reap_latency_completions().unwrap();
+                reactor.reap_socket_completions().unwrap();
                 if !arrivals(&source).0.is_empty() {
                     break;
                 }
@@ -3024,17 +2999,19 @@ mod tests {
                     start.elapsed() < Duration::from_millis(200),
                     "the reap never ran the pending task work"
                 );
+                let mut woke = 0;
+                reactor.sys.poll_io(&mut woke).unwrap();
             }
             assert_eq!(arrivals(&source).0.concat(), b"from afar");
             peer.join().unwrap();
         });
     }
 
-    /// A task that never enters the kernel still sees the preempt timer: the
-    /// kernel's pending task work shows in the flags, and need_preempt reads
-    /// them.
+    /// A task that never enters the kernel still sees the preempt timer,
+    /// which is why the timer stays on the plain latency ring and not on the
+    /// ring that defers its work.
     #[test]
-    fn a_spinning_task_is_still_preempted_on_a_cooperative_ring() {
+    fn a_spinning_task_is_still_preempted_beside_a_deferred_ring() {
         let ex = crate::LocalExecutorBuilder::new(crate::Placement::Unbound)
             .preempt_timer(Duration::from_millis(2))
             .make()

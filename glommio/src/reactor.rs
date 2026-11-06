@@ -190,7 +190,7 @@ impl Reactor {
 
     #[inline(always)]
     pub(crate) fn need_preempt(&self) -> bool {
-        !self.preempt_status.is_empty() || self.sys.preempt_requested()
+        !self.preempt_status.is_empty()
     }
 
     pub(crate) fn id(&self) -> usize {
@@ -497,9 +497,9 @@ impl Reactor {
         }
     }
 
-    /// See [`sys::Reactor::reap_latency_completions`].
-    pub(crate) fn reap_latency_completions(&self) -> io::Result<usize> {
-        self.sys.reap_latency_completions()
+    /// See [`sys::Reactor::reap_socket_completions`].
+    pub(crate) fn reap_socket_completions(&self) -> io::Result<usize> {
+        self.sys.reap_socket_completions()
     }
 
     pub(crate) fn recv_into(&self, fd: RawFd, buffer: crate::net::OwnedRxBuf) -> Source {
