@@ -1421,14 +1421,17 @@ impl SleepableRing {
         self.enter_for_events()
     }
 
-    /// The reactor pass's entry: skipped when a stream entered since the
-    /// last pass, since that entry ran the work and the sleep, if the pass
-    /// ends in one, runs whatever has come since. A busy executor whose
-    /// readers are all parked gets the entry, which is what keeps their
-    /// arrivals surfacing without a sleep.
-    fn run_deferred_work_for_pass(&mut self) -> io::Result<()> {
+    /// The reactor pass's entry. Skipped when a stream entered since the
+    /// last pass, since that entry ran the work; and skipped on a pass
+    /// that may sleep, since the sleep's own entry runs the work and
+    /// returns at once if it posted anything. Entering before the sleep
+    /// instead found a depth-1 reply on the second or third pass and never
+    /// parked, at the cost of the whole core. A busy executor whose readers
+    /// are all parked gets the entry, which is what keeps their arrivals
+    /// surfacing without a sleep.
+    fn run_deferred_work_for_pass(&mut self, may_sleep: bool) -> io::Result<()> {
         let spent = std::mem::replace(&mut self.inline_enter_spent, false);
-        if spent {
+        if spent || may_sleep {
             return Ok(());
         }
         self.run_deferred_work()
@@ -2445,7 +2448,7 @@ impl Reactor {
         self.main_ring.borrow_mut().poll(woke)?;
         self.latency_ring.borrow_mut().poll(woke)?;
         let mut socket_ring = self.socket_ring.borrow_mut();
-        socket_ring.run_deferred_work_for_pass()?;
+        socket_ring.run_deferred_work_for_pass(false)?;
         socket_ring.poll(woke)?;
         drop(socket_ring);
         *woke += self.flush_syscall_thread();
@@ -2565,7 +2568,7 @@ impl Reactor {
         let mut lat_ring = self.latency_ring.borrow_mut();
         let mut sock_ring = self.socket_ring.borrow_mut();
 
-        sock_ring.run_deferred_work_for_pass()?;
+        sock_ring.run_deferred_work_for_pass(preempt_timer().is_none())?;
         consume_rings!(into &mut woke; lat_ring, poll_ring, main_ring, sock_ring);
 
         drop(self.latency_preemption_timeout_src.take());
